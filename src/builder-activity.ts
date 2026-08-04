@@ -63,6 +63,28 @@ export function formatBuilderToolOutput(value: unknown): string {
   }
 }
 
+export type TimelineReconcileOp =
+  | { action: 'reuse'; index: number; toolCallId: string }
+  | { action: 'insert'; index: number; toolCallId: string };
+
+// Decide how to reconcile the currently rendered timeline cards (identified by
+// their tool call ids, in order) against the desired activities — WITHOUT
+// tearing anything down. A card whose id already sits at its target index is
+// reused (patched in place); anything else is inserted. Cards beyond
+// `removeCount`'s complement are trimmed. Keeping this pure makes the "never
+// rebuild an existing card" guarantee testable without a DOM.
+export function planBuilderTimeline(
+  existingIds: string[],
+  activities: Pick<BuilderToolActivity, 'toolCallId'>[]
+): { ops: TimelineReconcileOp[]; length: number } {
+  const ops: TimelineReconcileOp[] = activities.map((activity, index) =>
+    existingIds[index] === activity.toolCallId
+      ? { action: 'reuse', index, toolCallId: activity.toolCallId }
+      : { action: 'insert', index, toolCallId: activity.toolCallId }
+  );
+  return { ops, length: activities.length };
+}
+
 export function applyBuilderToolEvent(
   activities: BuilderToolActivity[],
   event: BuilderToolEvent

@@ -10,6 +10,7 @@ import {
 import { continueBuildRequest, nextBuildRequestStep } from './build-request-flow';
 import {
   applyBuilderToolEvent,
+  planBuilderTimeline,
   type BuilderToolActivity,
   type BuilderToolEvent
 } from './builder-activity';
@@ -1086,15 +1087,35 @@ async function persistActiveChatHistory() {
   });
 }
 
-function persistActiveChatHistoryQuietly() {
-  void persistActiveChatHistory().catch((error) => {
-    void logAgentTurnEvent('persist_error', {
-      message: getErrorMessage(error)
-    });
+// Persist a specific chat's snapshot (meta + messages) regardless of which chat
+// is currently on screen. A running turn captures its own meta/messages so that
+// navigating to another chat mid-run cannot redirect the save to the wrong chat.
+async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
+  if (!meta || !stored.length) return;
+  meta.updatedAt = new Date().toISOString();
+  await invoke<ChatHistoryRow>('save_chat_history', {
+    payload: { ...meta, messages: stored }
   });
 }
 
-function createTurnSnapshotPersister(intervalMs = 450) {
+function persistChatSnapshotQuietly(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
+  void persistChatSnapshot(meta, stored).catch((error) => {
+    void logAgentTurnEvent('persist_error', { message: getErrorMessage(error) });
+  });
+}
+
+// True when the user is scrolled to (or near) the bottom of the transcript, so
+// we only auto-follow new content when they haven't scrolled up to read.
+function isNearBottom(el: HTMLElement | null, threshold = 140): boolean {
+  if (!el) return false;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+function scrollMessagesToBottom() {
+  if (messages) messages.scrollTop = messages.scrollHeight;
+}
+
+function createTurnSnapshotPersister(persist: () => void, intervalMs = 450) {
   let lastPersistedAt = 0;
   let timer: number | undefined;
 
@@ -1104,7 +1125,7 @@ function createTurnSnapshotPersister(intervalMs = 450) {
       timer = undefined;
     }
     lastPersistedAt = Date.now();
-    persistActiveChatHistoryQuietly();
+    persist();
   };
 
   return {
@@ -1271,10 +1292,18 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     status: 'running'
   };
   storedMessages.push(assistantRecord);
-  const snapshotPersister = createTurnSnapshotPersister();
+  // Bind this turn to its chat so a background run (user navigated away) keeps
+  // persisting to the right chat and stops mutating the on-screen transcript.
+  const turnSessionId = activeSessionId;
+  const turnMeta = activeChatMeta;
+  const turnStored = storedMessages;
+  const turnIsActive = () => activeSessionId === turnSessionId;
+  const snapshotPersister = createTurnSnapshotPersister(() =>
+    persistChatSnapshotQuietly(turnMeta, turnStored)
+  );
   isRunning = true;
   setStopButtonVisible(true);
-  await persistActiveChatHistory();
+  await persistChatSnapshot(turnMeta, turnStored);
   void logAgentTurnEvent('turn_start', {
     mode: appMode,
     userMessage: content
@@ -1293,13 +1322,12 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
         snapshotPersister.schedule();
-        if (pendingBody) {
-          pendingBody.textContent = streamed;
+        if (turnIsActive()) {
+          const pinned = isNearBottom(messages);
+          if (pendingBody) pendingBody.textContent = streamed;
+          if (thinkingPreview.parentElement) thinkingPreview.remove();
+          if (pinned) scrollMessagesToBottom();
         }
-        if (thinkingPreview.parentElement) {
-          thinkingPreview.remove();
-        }
-        messages.scrollTop = messages.scrollHeight;
       },
       onThinkingDelta: (delta) => {
         thinking += delta;
@@ -1311,8 +1339,11 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
           delta,
           thinkingTail: thinking.slice(-4000)
         });
-        thinkingPreview.textContent = formatThinkingPreview(thinking);
-        messages.scrollTop = messages.scrollHeight;
+        if (turnIsActive()) {
+          const pinned = isNearBottom(messages);
+          thinkingPreview.textContent = formatThinkingPreview(thinking);
+          if (pinned) scrollMessagesToBottom();
+        }
       },
       onToolCall: (toolCall) => {
         assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
@@ -1357,23 +1388,25 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     }
     requestedBuild = reply.buildRequest ?? requestedBuild;
     if (requestedBuild) {
-      pending.remove();
-      const recordIndex = storedMessages.indexOf(assistantRecord);
-      if (recordIndex >= 0) storedMessages.splice(recordIndex, 1);
-      if (nextBuildRequestStep(appMode) === 'offer-switch') {
-        renderExploreModeCapabilityNotice(requestedBuild);
-      } else {
-        renderCapabilityConfirmation(requestedBuild);
+      const recordIndex = turnStored.indexOf(assistantRecord);
+      if (recordIndex >= 0) turnStored.splice(recordIndex, 1);
+      if (turnIsActive()) {
+        pending.remove();
+        if (nextBuildRequestStep(appMode) === 'offer-switch') {
+          renderExploreModeCapabilityNotice(requestedBuild);
+        } else {
+          renderCapabilityConfirmation(requestedBuild);
+        }
       }
       return;
     }
 
     const finalContent = reply.content || streamed || 'The model returned an empty response.';
-    if (pendingBody) {
-      renderMessageText(pendingBody, finalContent, true);
+    if (turnIsActive()) {
+      if (pendingBody) renderMessageText(pendingBody, finalContent, true);
+      pending.classList.remove('pending');
+      chatMessages.push({ role: 'assistant', content: finalContent });
     }
-    pending.classList.remove('pending');
-    chatMessages.push({ role: 'assistant', content: finalContent });
     assistantRecord.text = finalContent;
     assistantRecord.timestamp = Date.now();
     assistantRecord.thinking = thinking.trim() || undefined;
@@ -1381,7 +1414,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     assistantRecord.model = reply.model;
     assistantRecord.status = 'completed';
     assistantRecord.error = undefined;
-    await persistActiveChatHistory();
+    await persistChatSnapshot(turnMeta, turnStored);
     void logAgentTurnEvent('turn_completed', {
       provider: reply.provider,
       model: reply.model,
@@ -1393,15 +1426,17 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
       setEnvLabel(`${reply.provider}/${reply.model}`);
     }
   } catch (error) {
-    pending.remove();
     const errorMessage = getErrorMessage(error);
-    addMessage('assistant', errorMessage);
+    if (turnIsActive()) {
+      pending.remove();
+      addMessage('assistant', errorMessage);
+    }
     assistantRecord.text = errorMessage;
     assistantRecord.timestamp = Date.now();
     assistantRecord.thinking = thinking.trim() || undefined;
     assistantRecord.status = 'error';
     assistantRecord.error = errorMessage;
-    await persistActiveChatHistory();
+    await persistChatSnapshot(turnMeta, turnStored);
     void logAgentTurnEvent('turn_error', {
       error: errorMessage,
       streamed,
@@ -1558,7 +1593,16 @@ async function scaffoldAndRunPluginBuilder(
   let thinking = '';
   let builderRecord: StoredChatMessage | undefined;
   let builderRun: HTMLElement | undefined;
-  const snapshotPersister = createTurnSnapshotPersister();
+  // Bind this run to the chat it started in. If the user navigates to another
+  // chat mid-build, the run keeps persisting to its own chat and stops touching
+  // the (now different) on-screen transcript.
+  const turnSessionId = activeSessionId;
+  const turnMeta = activeChatMeta;
+  const turnStored = storedMessages;
+  const turnIsActive = () => activeSessionId === turnSessionId;
+  const snapshotPersister = createTurnSnapshotPersister(() =>
+    persistChatSnapshotQuietly(turnMeta, turnStored)
+  );
   isRunning = true;
   setStopButtonVisible(true);
 
@@ -1599,17 +1643,26 @@ async function scaffoldAndRunPluginBuilder(
     builderRun = document.createElement('div');
     body.appendChild(builderRun);
     renderBuilderRun(builderRun, builderRecord, true);
-    await persistActiveChatHistory();
+    await persistChatSnapshot(turnMeta, turnStored);
+
+    // Render + follow-scroll only while this run's chat is on screen. Auto-scroll
+    // stays put unless the user is already near the bottom, so they can freely
+    // scroll up through the tool cards while the build streams.
+    const renderLive = () => {
+      if (!builderRun || !builderRecord || !turnIsActive()) return;
+      const pinned = isNearBottom(messages);
+      renderBuilderRun(builderRun, builderRecord, true);
+      if (pinned) scrollMessagesToBottom();
+    };
 
     const applyToolEvent = (event: BuilderToolEvent) => {
-      if (!builderRecord || !builderRun) return;
+      if (!builderRecord) return;
       builderRecord.builderActivities = applyBuilderToolEvent(
         builderRecord.builderActivities || [],
         event
       );
-      renderBuilderRun(builderRun, builderRecord, true);
       snapshotPersister.schedule();
-      messages?.scrollTo({ top: messages.scrollHeight });
+      renderLive();
     };
 
     const reply = await runPluginBuilderStream(
@@ -1626,21 +1679,19 @@ async function scaffoldAndRunPluginBuilder(
         },
         onDelta: (delta) => {
           streamed += delta;
-          if (builderRecord && builderRun) {
+          if (builderRecord) {
             builderRecord.text = streamed;
-            renderBuilderRun(builderRun, builderRecord, true);
             snapshotPersister.schedule();
+            renderLive();
           }
-          messages?.scrollTo({ top: messages.scrollHeight });
         },
         onThinkingDelta: (delta) => {
           thinking += delta;
-          if (builderRecord && builderRun) {
+          if (builderRecord) {
             builderRecord.thinking = thinking;
-            renderBuilderRun(builderRun, builderRecord, true);
             snapshotPersister.schedule();
+            renderLive();
           }
-          messages?.scrollTo({ top: messages.scrollHeight });
         },
         onToolExecutionStart: (event) => {
           applyToolEvent({ type: 'start', ...event });
@@ -1662,9 +1713,9 @@ async function scaffoldAndRunPluginBuilder(
     builderRecord.model = reply.model;
     builderRecord.status = 'completed';
     builderRecord.timestamp = Date.now();
-    renderBuilderRun(builderRun, builderRecord, false);
-    chatMessages.push({ role: 'assistant', content: finalContent });
-    await persistActiveChatHistory();
+    if (builderRun && turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
+    if (turnIsActive()) chatMessages.push({ role: 'assistant', content: finalContent });
+    await persistChatSnapshot(turnMeta, turnStored);
     await refreshChatHistory();
   } catch (error) {
     const errorMessage = getErrorMessage(error, 'Could not create plugin workspace.');
@@ -1674,9 +1725,9 @@ async function scaffoldAndRunPluginBuilder(
       builderRecord.status = 'error';
       builderRecord.error = errorMessage;
       builderRecord.timestamp = Date.now();
-      renderBuilderRun(builderRun, builderRecord, false);
-      chatMessages.push({ role: 'assistant', content: errorMessage });
-      await persistActiveChatHistory();
+      if (turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
+      if (turnIsActive()) chatMessages.push({ role: 'assistant', content: errorMessage });
+      await persistChatSnapshot(turnMeta, turnStored);
       await refreshChatHistory();
     } else {
       body.textContent = errorMessage;
@@ -1699,47 +1750,122 @@ function renderBuilderRun(
   >,
   live: boolean
 ) {
-  container.innerHTML = '';
-  container.className = 'builder-run';
+  // Incremental reconcile — never tear down the subtree. Rebuilding on every
+  // streaming event (238+ thinking deltas + every tool event) thrashed the main
+  // thread, reset scroll, and wiped each card's expand state. Here we create
+  // nodes once and patch only what changed, keyed by the stable tool call id.
+  if (container.className !== 'builder-run') container.className = 'builder-run';
 
+  // Thinking block.
+  let thinking = container.querySelector<HTMLDetailsElement>(':scope > .builder-thinking');
   if (message.thinking) {
-    const thinking = document.createElement('details');
-    thinking.className = 'builder-thinking';
-    thinking.open = live && message.status === 'running';
-    const summary = document.createElement('summary');
-    summary.textContent = message.status === 'running' ? 'Builder reasoning' : 'Reasoning';
-    thinking.appendChild(summary);
-    const content = document.createElement('div');
-    content.textContent = message.thinking;
-    thinking.appendChild(content);
-    container.appendChild(thinking);
+    if (!thinking) {
+      thinking = document.createElement('details');
+      thinking.className = 'builder-thinking';
+      thinking.open = live && message.status === 'running';
+      thinking.appendChild(document.createElement('summary'));
+      const content = document.createElement('div');
+      content.className = 'builder-thinking-content';
+      thinking.appendChild(content);
+      container.prepend(thinking);
+    }
+    const summary = thinking.querySelector('summary');
+    const label = message.status === 'running' ? 'Builder reasoning' : 'Reasoning';
+    if (summary && summary.textContent !== label) summary.textContent = label;
+    const content = thinking.querySelector('.builder-thinking-content');
+    if (content && content.textContent !== message.thinking) content.textContent = message.thinking;
+  } else if (thinking) {
+    thinking.remove();
   }
 
   const activities = message.builderActivities || [];
+  const summaryEl = () => container.querySelector(':scope > .builder-summary');
+  let timeline = container.querySelector<HTMLElement>(':scope > .builder-timeline');
+  let waiting = container.querySelector<HTMLElement>(':scope > .builder-waiting');
+
   if (activities.length) {
-    const timeline = document.createElement('div');
-    timeline.className = 'builder-timeline';
-    activities.forEach((activity) => timeline.appendChild(renderBuilderToolCard(activity)));
-    container.appendChild(timeline);
-  } else if (message.status === 'running') {
-    const waiting = document.createElement('div');
-    waiting.className = 'builder-waiting';
-    waiting.textContent = 'Starting Pi coding agent...';
-    container.appendChild(waiting);
+    if (waiting) waiting.remove();
+    if (!timeline) {
+      timeline = document.createElement('div');
+      timeline.className = 'builder-timeline';
+      container.insertBefore(timeline, summaryEl());
+    }
+    reconcileBuilderTimeline(timeline, activities);
+  } else {
+    if (timeline) timeline.remove();
+    if (message.status === 'running') {
+      if (!waiting) {
+        waiting = document.createElement('div');
+        waiting.className = 'builder-waiting';
+        container.insertBefore(waiting, summaryEl());
+      }
+      waiting.textContent = 'Starting Pi coding agent…';
+    } else if (waiting) {
+      waiting.remove();
+    }
   }
 
-  if (message.text && (message.text !== 'Plugin builder is running.' || message.status !== 'running')) {
-    const answer = document.createElement('div');
-    answer.className = 'builder-summary message-text';
-    renderMessageText(answer, message.text, message.status !== 'running');
-    container.appendChild(answer);
+  // Liveness heartbeat — proves the run is alive while it waits on the model,
+  // so a stalled streaming call no longer looks identical to a frozen UI.
+  let heartbeat = container.querySelector<HTMLElement>(':scope > .builder-heartbeat');
+  if (live && message.status === 'running') {
+    if (!heartbeat) {
+      heartbeat = document.createElement('div');
+      heartbeat.className = 'builder-heartbeat';
+      const dot = document.createElement('span');
+      dot.className = 'builder-heartbeat-dot';
+      heartbeat.appendChild(dot);
+      heartbeat.appendChild(document.createElement('span'));
+    }
+    container.appendChild(heartbeat); // keep it last
+    const text = heartbeat.querySelector('span:last-child');
+    const label = activities.length ? 'Working — waiting for the model…' : 'Working…';
+    if (text && text.textContent !== label) text.textContent = label;
+  } else if (heartbeat) {
+    heartbeat.remove();
+  }
+
+  // Final summary text.
+  const showSummary = Boolean(
+    message.text && (message.text !== 'Plugin builder is running.' || message.status !== 'running')
+  );
+  let summary = container.querySelector<HTMLElement>(':scope > .builder-summary');
+  if (showSummary) {
+    if (!summary) {
+      summary = document.createElement('div');
+      summary.className = 'builder-summary message-text';
+      container.appendChild(summary);
+    }
+    renderMessageText(summary, message.text || '', message.status !== 'running');
+  } else if (summary) {
+    summary.remove();
+  }
+}
+
+// Reconcile timeline cards against activities. applyBuilderToolEvent keeps
+// activities append-only and updates entries in place, so card index i always
+// maps to activity i: either patch the existing card or append a new one.
+function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderToolActivity[]) {
+  const existingIds = Array.from(timeline.children).map(
+    (child) => (child as HTMLElement).dataset.toolCallId || ''
+  );
+  const { ops, length } = planBuilderTimeline(existingIds, activities);
+  for (const op of ops) {
+    const activity = activities[op.index];
+    if (op.action === 'reuse') {
+      updateBuilderToolCard(timeline.children[op.index] as HTMLDetailsElement, activity);
+    } else {
+      const card = renderBuilderToolCard(activity);
+      timeline.insertBefore(card, timeline.children[op.index] ?? null);
+    }
+  }
+  while (timeline.children.length > length) {
+    timeline.lastElementChild?.remove();
   }
 }
 
 function renderBuilderToolCard(activity: BuilderToolActivity) {
   const details = document.createElement('details');
-  details.className = `builder-tool is-${activity.status}`;
-  details.open = activity.status === 'pending' || activity.status === 'streaming' || activity.isError;
   details.dataset.toolCallId = activity.toolCallId;
 
   const summary = document.createElement('summary');
@@ -1750,22 +1876,54 @@ function renderBuilderToolCard(activity: BuilderToolActivity) {
   identity.appendChild(name);
   const preview = document.createElement('span');
   preview.className = 'builder-tool-preview';
-  preview.textContent = formatBuilderToolArgsPreview(activity.args);
   identity.appendChild(preview);
   summary.appendChild(identity);
-
   const status = document.createElement('span');
   status.className = 'builder-tool-status';
-  status.textContent = activity.status;
   summary.appendChild(status);
   details.appendChild(summary);
 
   const body = document.createElement('div');
   body.className = 'builder-tool-body';
-  appendBuilderCodeBlock(body, 'Arguments', JSON.stringify(activity.args, null, 2));
-  if (activity.output) appendBuilderCodeBlock(body, activity.isError ? 'Error' : 'Output', activity.output);
   details.appendChild(body);
+
+  updateBuilderToolCard(details, activity);
   return details;
+}
+
+function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToolActivity) {
+  const cls = `builder-tool is-${activity.status}`;
+  if (details.className !== cls) details.className = cls;
+
+  // Auto-manage open/closed, but stop once the user has toggled it themselves.
+  // We detect a user toggle by comparing the current open state to the value we
+  // last set programmatically (recorded in data-auto-open).
+  const shouldOpen =
+    activity.status === 'pending' || activity.status === 'streaming' || activity.isError;
+  const lastAuto = details.dataset.autoOpen;
+  const userToggled = lastAuto !== undefined && details.open !== (lastAuto === '1');
+  if (!userToggled) {
+    if (details.open !== shouldOpen) details.open = shouldOpen;
+    details.dataset.autoOpen = shouldOpen ? '1' : '0';
+  }
+
+  const name = details.querySelector('.builder-tool-identity strong');
+  if (name && name.textContent !== activity.toolName) name.textContent = activity.toolName;
+  const preview = details.querySelector('.builder-tool-preview');
+  const previewText = formatBuilderToolArgsPreview(activity.args);
+  if (preview && preview.textContent !== previewText) preview.textContent = previewText;
+  const status = details.querySelector('.builder-tool-status');
+  if (status && status.textContent !== activity.status) status.textContent = activity.status;
+
+  const body = details.querySelector<HTMLElement>('.builder-tool-body');
+  if (body) {
+    setBuilderCodeBlock(body, 'args', 'Arguments', JSON.stringify(activity.args, null, 2));
+    if (activity.output) {
+      setBuilderCodeBlock(body, 'output', activity.isError ? 'Error' : 'Output', activity.output);
+    } else {
+      body.querySelector('[data-block="output"]')?.remove();
+    }
+  }
 }
 
 function formatBuilderToolArgsPreview(args: Record<string, unknown>) {
@@ -1777,16 +1935,25 @@ function formatBuilderToolArgsPreview(args: Record<string, unknown>) {
   return keys.length ? keys.slice(0, 3).join(', ') : 'No arguments';
 }
 
-function appendBuilderCodeBlock(container: HTMLElement, label: string, value: string) {
-  const heading = document.createElement('div');
-  heading.className = 'builder-tool-label';
-  heading.textContent = label;
-  container.appendChild(heading);
-  const pre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.textContent = value;
-  pre.appendChild(code);
-  container.appendChild(pre);
+// Create-or-update a labelled code block identified by `key`, so streaming
+// updates patch text in place instead of re-creating nodes.
+function setBuilderCodeBlock(container: HTMLElement, key: string, label: string, value: string) {
+  let block = container.querySelector<HTMLElement>(`[data-block="${key}"]`);
+  if (!block) {
+    block = document.createElement('div');
+    block.dataset.block = key;
+    const heading = document.createElement('div');
+    heading.className = 'builder-tool-label';
+    block.appendChild(heading);
+    const pre = document.createElement('pre');
+    pre.appendChild(document.createElement('code'));
+    block.appendChild(pre);
+    container.appendChild(block);
+  }
+  const heading = block.querySelector('.builder-tool-label');
+  if (heading && heading.textContent !== label) heading.textContent = label;
+  const code = block.querySelector('code');
+  if (code && code.textContent !== value) code.textContent = value;
 }
 
 function renderPluginConflictResolution(

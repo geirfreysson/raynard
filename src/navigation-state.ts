@@ -8,5 +8,8 @@ export function decideChatNavigation(options: {
   if (options.targetChatId === options.activeChatId) {
     return 'show-active';
   }
-  return options.isRunning ? 'block' : 'load';
+  // A running turn is bound to its own chat and persists there independently, so
+  // viewing another saved chat mid-run is always safe. Starting a new turn is
+  // still gated separately by the caller (isRunning) — navigation never is.
+  return 'load';
 }

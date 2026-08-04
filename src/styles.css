@@ -1020,6 +1020,41 @@ textarea:focus {
   gap: 6px;
 }
 
+.builder-heartbeat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-family-mono);
+}
+
+.builder-heartbeat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #4f8cff);
+  animation: builder-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes builder-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .builder-heartbeat-dot {
+    animation: none;
+  }
+}
+
 .builder-tool {
   border: 1px solid var(--border-soft);
   border-radius: 7px;

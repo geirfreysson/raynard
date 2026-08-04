@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyBuilderToolEvent,
   formatBuilderToolOutput,
+  planBuilderTimeline,
   type BuilderToolActivity
 } from './builder-activity';
 
@@ -77,6 +78,39 @@ describe('applyBuilderToolEvent', () => {
       output: 'File not found',
       isError: true
     });
+  });
+});
+
+describe('planBuilderTimeline', () => {
+  const ids = (list: string[]) => list.map((toolCallId) => ({ toolCallId }));
+
+  it('reuses existing cards in place instead of rebuilding them', () => {
+    const { ops, length } = planBuilderTimeline(['a', 'b'], ids(['a', 'b']));
+    expect(length).toBe(2);
+    expect(ops).toEqual([
+      { action: 'reuse', index: 0, toolCallId: 'a' },
+      { action: 'reuse', index: 1, toolCallId: 'b' }
+    ]);
+  });
+
+  it('only inserts the newly appended card and reuses the rest', () => {
+    const { ops } = planBuilderTimeline(['a', 'b'], ids(['a', 'b', 'c']));
+    expect(ops).toEqual([
+      { action: 'reuse', index: 0, toolCallId: 'a' },
+      { action: 'reuse', index: 1, toolCallId: 'b' },
+      { action: 'insert', index: 2, toolCallId: 'c' }
+    ]);
+  });
+
+  it('inserts every card when nothing is rendered yet', () => {
+    const { ops } = planBuilderTimeline([], ids(['a', 'b']));
+    expect(ops.map((op) => op.action)).toEqual(['insert', 'insert']);
+  });
+
+  it('signals trimming when there are more rendered cards than activities', () => {
+    const { ops, length } = planBuilderTimeline(['a', 'b', 'c'], ids(['a']));
+    expect(ops).toEqual([{ action: 'reuse', index: 0, toolCallId: 'a' }]);
+    expect(length).toBe(1);
   });
 });
 

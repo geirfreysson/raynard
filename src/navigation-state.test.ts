@@ -12,14 +12,14 @@ describe('chat navigation while an agent is running', () => {
     ).toBe('show-active');
   });
 
-  it('blocks switching to another saved chat during the active stream', () => {
+  it('still loads another saved chat while a turn is running (background run persists to its own chat)', () => {
     expect(
       decideChatNavigation({
         targetChatId: 'chat-old',
         activeChatId: 'chat-live',
         isRunning: true
       })
-    ).toBe('block');
+    ).toBe('load');
   });
 
   it('loads another saved chat after the stream has finished', () => {
