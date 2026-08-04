@@ -23,7 +23,8 @@ Hard constraints:
 - Do not rely on skipped network tests or structure-only tests.
 - Run all tests and fix failures before reporting completion.
 - Implement API/client/tool code that fetches data and returns structured, citeable references.
-- Use the existing plugin scaffold and createApiReference().
+- The workspace is pre-scaffolded with shared, vendored plumbing you MUST reuse and MUST NOT edit or re-implement: runtime.ts (createApiReference, apiGet, buildQuery, requireNonEmpty, requirePositiveInt), testing.ts (mockFetch, expectToolResult), tools.ts (an empty registry with ToolResult/ApiTool types to fill), contract.test.ts (keep it), and index.ts (already wires tools + manifest).
+- Do NOT write your own fetch wrapper, HTTP error handling, query-string builder, createApiReference, reference.ts, or test harness — import apiGet/createApiReference from ./runtime.ts and mockFetch from ./testing.ts.
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
 - Treat provided API documentation as a whole API surface. Do not only build the single narrow call implied by the user's latest question unless the docs truly cover only that call.
 - Build a practical suite of focused tools for important list/search, detail, user/account, metadata/status, and update/history endpoints when available.
@@ -33,21 +34,21 @@ Hard constraints:
 - Every exported tool must have a routing-quality description and a JSON parameter schema with descriptions, required fields, enum values, and useful optional limits or filters.
 - Update README.md with implemented tools, the endpoint inventory, future endpoint notes, and source docs.
 
-Canonical tool module. Every generated plugin MUST follow this exact shape. Only
-the endpoints, parameters, descriptions, and rendering differ between plugins:
+Canonical shape. The plumbing is already provided, so only the endpoints,
+parameter schemas, response types, and rendering differ between plugins. Write
+just client.ts, the tools in tools.ts, and mocked tests:
 
-// client.ts — one thin fetch helper per endpoint, no rendering.
-export async function fetchThing(id: number): Promise<Thing> {
-  const response = await fetch(\`https://api.example.com/things/\${id}\`);
-  if (!response.ok) throw new Error(\`Request failed: \${response.status}\`);
-  return (await response.json()) as Thing;
-}
+// client.ts — one thin fetch helper per endpoint using the shared apiGet.
+import { apiGet } from './runtime.ts';
+const BASE = 'https://api.example.com';
+export type Thing = { id: number; name: string };
+export const fetchThing = (id: number) => apiGet<Thing>(\`\${BASE}/things/\${id}\`);
+// Range/filter endpoints: apiGet(url, { query: { min, max } }) drops undefined params.
 
-// tools.ts — tool definitions keyed by the exact tool name.
+// tools.ts — replace the empty registry with real tools. ToolResult/ApiTool are
+// already declared at the top of tools.ts by the scaffold; keep them.
 import { fetchThing } from './client.ts';
-import { createApiReference, type ApiReference } from './index.ts';
-
-export type ToolResult = { text: string; references: ApiReference[] };
+import { createApiReference } from './runtime.ts';
 
 export const tools = {
   example_get_thing: {
@@ -55,38 +56,47 @@ export const tools = {
     parameters: {
       type: 'object',
       required: ['id'],
-      properties: {
-        id: { type: 'integer', description: 'Numeric record id to fetch.' }
-      }
+      properties: { id: { type: 'integer', description: 'Numeric record id to fetch.' } }
     },
     async execute(args: Record<string, unknown>): Promise<ToolResult> {
       const thing = await fetchThing(Number(args?.id));
       return {
         text: \`Thing \${thing.id}: \${thing.name}\`,
-        references: [
-          createApiReference({
-            id: String(thing.id),
-            label: thing.name,
-            sourceUrl: \`https://api.example.com/things/\${thing.id}\`,
-            fetchedAt: new Date().toISOString(),
-            quote: thing.name,
-            payload: thing
-          })
-        ]
+        references: [createApiReference({
+          id: String(thing.id),
+          label: thing.name,
+          sourceUrl: \`\${BASE}/things/\${thing.id}\`,
+          quote: thing.name,
+          payload: thing
+        })]
       };
     }
   }
 };
 
-// index.ts — keeps the scaffold manifest + createApiReference, and exposes tools.
-export { tools } from './tools.ts';
+// client.test.ts / tools.test.ts — mock the network with the shared harness.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mockFetch, expectToolResult } from './testing.ts';
+import { tools } from './tools.ts';
+
+test('example_get_thing renders text and a citation', async () => {
+  const fetchMock = mockFetch(() => ({ body: { id: 1, name: 'Widget' } }));
+  try {
+    const result = await tools.example_get_thing.execute({ id: 1 });
+    expectToolResult(result);
+    assert.match(result.text, /Widget/);
+  } finally {
+    fetchMock.restore();
+  }
+});
 
 Mandatory tool-interface rules (identical across all plugins):
 - The runtime invokes each tool as tools[name].execute(args). The callable MUST be named exactly "execute". Never use "handler", "run", "call", or a default-export function.
-- "tools" is a plain object; each key equals that tool's advertised name string.
-- Each tool has exactly: description (string), parameters (JSON Schema object), and async execute(args).
-- execute returns { text: string, references: ApiReference[] }; every reference is built with createApiReference().
-- Put network calls in client.ts helpers; tools orchestrate the calls and render text. Only endpoints, parameters, and descriptions change between plugins.
+- "tools" is keyed by the exact tool name; each tool has description (string), parameters (JSON Schema object), and async execute(args) returning { text, references }.
+- Build fetch helpers with apiGet from ./runtime.ts (drop to the global fetch only for auth handshakes, non-JSON, or POST/PUT). Build every reference with createApiReference from ./runtime.ts.
+- Test with mockFetch from ./testing.ts and keep the provided contract.test.ts. Cover every fetch helper and every tool with mocked responses.
+- Only endpoints, parameters, response types, and rendering change between plugins.
 
 Source documentation:
 ${sourceBlock}`;
@@ -101,15 +111,14 @@ ${String(request.prompt || request.description || '').trim()}
 Plugin workspace:
 ${String(request.pluginDir || '').trim()}
 
-Expected output:
-- TypeScript plugin code in index.ts.
-- Executable mocked API tests in one or more *.test.ts, *.test.js, or *.test.mjs files.
-- API fetch helpers and focused tool definitions with specific descriptions and JSON parameter schemas.
+Expected output (the workspace is already scaffolded — reuse runtime.ts/testing.ts, do not edit them):
+- client.ts: one thin fetch helper per endpoint, built on apiGet from ./runtime.ts.
+- tools.ts: fill the exported tools registry with focused tools, each with a specific description and JSON parameter schema, returning { text, references } via createApiReference.
+- Executable mocked-fetch tests in *.test.ts files using mockFetch from ./testing.ts; keep contract.test.ts.
 - README.md with an Endpoint Inventory covering implemented and future endpoints.
-- Reference-producing results using createApiReference().
-- No UI code.
+- No UI code and no re-implemented plumbing.
 
-Run node --test with every test file you create. Do not report completion until tests pass and the plugin exports at least one runtime tool.`;
+Run node --test with every test file. Do not report completion until tests pass and the plugin exports at least one runtime tool.`;
 }
 
 export function findPluginTestFiles(files) {

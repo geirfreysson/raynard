@@ -544,6 +544,14 @@ fn scaffold_plugin_capability(
             .map_err(|error| format!("Could not write plugin manifest: {error}"))?;
         fs::write(temp_dir.join("index.ts"), entrypoint)
             .map_err(|error| format!("Could not write plugin entrypoint: {error}"))?;
+        fs::write(temp_dir.join("runtime.ts"), PLUGIN_RUNTIME_TS)
+            .map_err(|error| format!("Could not write plugin runtime: {error}"))?;
+        fs::write(temp_dir.join("testing.ts"), PLUGIN_TESTING_TS)
+            .map_err(|error| format!("Could not write plugin test helpers: {error}"))?;
+        fs::write(temp_dir.join("tools.ts"), build_plugin_tools_stub())
+            .map_err(|error| format!("Could not write plugin tools stub: {error}"))?;
+        fs::write(temp_dir.join("contract.test.ts"), PLUGIN_CONTRACT_TEST_TS)
+            .map_err(|error| format!("Could not write plugin contract test: {error}"))?;
         fs::write(temp_dir.join("README.md"), readme)
             .map_err(|error| format!("Could not write plugin README: {error}"))?;
         fs::rename(&temp_dir, &target_dir)
@@ -2382,9 +2390,65 @@ fn build_plugin_manifest(
     serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())
 }
 
+// Shared, pre-tested plumbing vendored into every generated plugin. The
+// canonical sources live in scripts/plugin-runtime/ and are unit-tested there;
+// include_str! embeds them at compile time so the scaffold can never drift from
+// the tested copy.
+const PLUGIN_RUNTIME_TS: &str = include_str!("../../scripts/plugin-runtime/runtime.ts");
+const PLUGIN_TESTING_TS: &str = include_str!("../../scripts/plugin-runtime/testing.ts");
+const PLUGIN_CONTRACT_TEST_TS: &str =
+    include_str!("../../scripts/plugin-runtime/contract.test.ts.template");
+
+fn build_plugin_tools_stub() -> String {
+    // Raw literal (not format!) so the TypeScript braces need no escaping.
+    r#"// Tool registry: add one entry per API tool, keyed by its exact tool name.
+// Import fetch helpers from ./client.ts and shared helpers from ./runtime.ts.
+//
+// Example tool:
+//   import { fetchThing } from './client.ts';
+//   import { createApiReference } from './runtime.ts';
+//   export const tools = {
+//     example_get_thing: {
+//       description: 'What it answers, what it fetches, limits, follow-up tools.',
+//       parameters: { type: 'object', required: ['id'], properties: { id: { type: 'integer', description: 'Record id.' } } },
+//       async execute(args) {
+//         const thing = await fetchThing(Number(args.id));
+//         return {
+//           text: `Thing ${thing.id}`,
+//           references: [createApiReference({ id: String(thing.id), label: thing.name, sourceUrl: '...', quote: thing.name, payload: thing })]
+//         };
+//       }
+//     }
+//   };
+import type { ApiReference } from './runtime.ts';
+
+export type ToolResult = { text: string; references: ApiReference[] };
+
+export type ApiTool = {
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (args: Record<string, unknown>) => Promise<ToolResult>;
+};
+
+// The builder replaces this empty registry with real tools.
+export const tools: Record<string, ApiTool> = {};
+"#
+    .to_string()
+}
+
 fn build_plugin_entrypoint(slug: &str) -> String {
     format!(
-        r#"export const manifest = {{
+        r#"// Plugin entry point. The builder fills in ./client.ts and ./tools.ts.
+// Shared, pre-tested plumbing lives in ./runtime.ts (createApiReference, apiGet,
+// buildQuery, requireNonEmpty, requirePositiveInt) and ./testing.ts (mockFetch).
+// Both are vendored and must not be edited or re-implemented.
+import {{ tools }} from './tools.ts';
+
+export {{ tools }};
+export {{ createApiReference }} from './runtime.ts';
+export type {{ ApiReference }} from './runtime.ts';
+
+export const manifest = {{
   id: 'raynard.generated.{slug}',
   name: '{name}',
   version: '0.1.0'
@@ -2392,66 +2456,8 @@ fn build_plugin_entrypoint(slug: &str) -> String {
 
 export default {{
   manifest,
-  tools: {{}}
+  tools
 }};
-
-// Build-mode contract for the Pi coding-agent:
-// - Write TypeScript API/client/tool code only.
-// - Do not create React components, pages, routes, CSS, or visual explorer UI.
-// - The runtime UI is Raynard chat; this plugin feeds explore mode with citeable API data.
-// - Treat source API documentation as a whole API surface, not only the latest narrow user query.
-// - Build practical coverage for important endpoints/resources with small focused tools.
-// - If only a subset is implemented, document the broader endpoint inventory and future tool plan in README.md.
-// - Every tool definition must include a specific description and JSON parameter schema.
-// - Tool descriptions are injected into the Explore-mode prompt so the agent can choose the right generated plugin.
-// - Descriptions should state what question the tool answers, what API data it fetches, and important limits or follow-up tools.
-// - Every tool result must include references created through createApiReference().
-// - Keep credentials out of source. Read them from the runtime context when needed.
-//
-// Canonical tool shape (every tool MUST follow this; only endpoints/params differ):
-//   export const tools = {{
-//     <tool_name>: {{
-//       description: '...',
-//       parameters: {{ type: 'object', required: [...], properties: {{ ... }} }},
-//       async execute(args) {{ return {{ text, references: [createApiReference(...)] }}; }}
-//     }}
-//   }};
-// The runtime invokes each tool as tools[name].execute(args). The callable MUST be
-// named exactly 'execute' — never 'handler', 'run', 'call', or a default-export function.
-// 'tools' is keyed by the exact tool name. Put network calls in client.ts helpers.
-
-export type ApiReference = {{
-  id: string;
-  label: string;
-  sourceUrl: string;
-  fetchedAt: string;
-  quote: string;
-  payloadPath?: string;
-  payload?: unknown;
-}};
-
-export function createApiReference(input: ApiReference) {{
-  return {{
-    referenceId: input.id,
-    referenceLabel: input.label,
-    referenceMeta: {{
-      sourceUrl: input.sourceUrl,
-      fetchedAt: input.fetchedAt,
-      payloadPath: input.payloadPath || ''
-    }},
-    modalTitle: input.label,
-    modalHint: input.sourceUrl,
-    compactContent: [
-      {{ type: 'header', state: 'complete', icon: 'check', title: input.label }},
-      {{ type: 'text', text: input.quote }}
-    ],
-    expandedContent: [
-      {{ type: 'header', state: 'complete', icon: 'check', title: input.label }},
-      {{ type: 'text', text: input.quote }},
-      {{ type: 'json', title: 'Raw API payload', text: JSON.stringify(input.payload ?? {{}}, null, 2) }}
-    ]
-  }};
-}}
 "#,
         slug = slug,
         name = plugin_display_name(slug).replace('\'', "\\'")

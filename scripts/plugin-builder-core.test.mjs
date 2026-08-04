@@ -14,20 +14,29 @@ describe('plugin builder core', () => {
 
     expect(prompt).toContain('Work test-first');
     expect(prompt).toContain('Endpoint Inventory');
-    expect(prompt).toContain('createApiReference()');
+    expect(prompt).toContain('createApiReference');
     expect(prompt).toContain('Do not build React components');
   });
 
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {
     const prompt = buildSystemPrompt({ sourceUrls: [] });
 
-    expect(prompt).toContain('Canonical tool module');
+    expect(prompt).toContain('Canonical shape');
     expect(prompt).toContain('async execute(args');
     expect(prompt).toContain('export const tools = {');
     expect(prompt).toContain('tools[name].execute(args)');
     expect(prompt).toContain('MUST be named exactly "execute"');
     expect(prompt).toContain('Never use "handler"');
-    expect(prompt).toContain('references: ApiReference[]');
+  });
+
+  it('directs the builder to reuse the vendored runtime instead of re-implementing plumbing', () => {
+    const prompt = buildSystemPrompt({ sourceUrls: [] });
+
+    expect(prompt).toContain('./runtime.ts');
+    expect(prompt).toContain('apiGet');
+    expect(prompt).toContain('mockFetch');
+    expect(prompt).toContain('./testing.ts');
+    expect(prompt).toMatch(/MUST NOT edit or re-implement/);
   });
 
   it('asks the coding agent to run executable Node tests before completion', () => {

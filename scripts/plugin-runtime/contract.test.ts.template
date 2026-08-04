@@ -1,0 +1,22 @@
+// Auto-generated contract test — verifies the plugin honours the Raynard tool
+// contract regardless of which API it wraps. Keep this file; add your own
+// API-specific tests (with mocked fetch) alongside it.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import plugin from './index.ts';
+
+test('every exported tool honours the Raynard tool contract', () => {
+  const tools = (plugin && plugin.tools) || {};
+  const names = Object.keys(tools);
+  assert.ok(names.length > 0, 'plugin must export at least one tool');
+  for (const name of names) {
+    const tool = tools[name];
+    assert.equal(typeof tool.execute, 'function', name + ' must expose an async execute(args) method');
+    assert.equal(typeof tool.description, 'string', name + ' needs a description');
+    assert.ok(tool.description.trim().length > 0, name + ' needs a non-empty description');
+    assert.ok(
+      tool.parameters && typeof tool.parameters === 'object',
+      name + ' needs a JSON parameter schema'
+    );
+  }
+});
