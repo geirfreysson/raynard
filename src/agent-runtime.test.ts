@@ -52,4 +52,163 @@ describe('applyStreamPayload', () => {
 
     expect(state.streamed).toBe('Right');
   });
+
+  it('forwards native tool lifecycle events without adding them to answer text', () => {
+    const calls: unknown[] = [];
+    const results: unknown[] = [];
+    const state = applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'tool_call',
+        tool_name: 'getStoryList',
+        args: { type: 'top', limit: 15 }
+      },
+      'active',
+      { streamed: 'Looking up stories.' },
+      {
+        onToolCall: (event) => calls.push(event),
+        onToolResult: (event) => results.push(event)
+      }
+    );
+
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'tool_result',
+        tool_name: 'getStoryList',
+        args: { type: 'top', limit: 15 },
+        result: { text: 'Story one' }
+      },
+      'active',
+      state,
+      {
+        onToolCall: (event) => calls.push(event),
+        onToolResult: (event) => results.push(event)
+      }
+    );
+
+    expect(state.streamed).toBe('Looking up stories.');
+    expect(calls).toEqual([
+      {
+        toolName: 'getStoryList',
+        args: { type: 'top', limit: 15 }
+      }
+    ]);
+    expect(results).toEqual([
+      {
+        toolName: 'getStoryList',
+        args: { type: 'top', limit: 15 },
+        result: { text: 'Story one' }
+      }
+    ]);
+  });
+
+  it('forwards complete Pi coding-tool lifecycle events', () => {
+    const events: unknown[] = [];
+    const handlers = {
+      onToolExecutionStart: (event: unknown) => events.push(['start', event]),
+      onToolExecutionUpdate: (event: unknown) => events.push(['update', event]),
+      onToolExecutionEnd: (event: unknown) => events.push(['end', event])
+    };
+
+    applyStreamPayload(
+      {
+        stream_id: 'builder',
+        event_type: 'tool_execution_start',
+        tool_call_id: 'call-7',
+        tool_name: 'write',
+        args: { path: 'index.ts' }
+      },
+      'builder',
+      { streamed: '' },
+      handlers
+    );
+    applyStreamPayload(
+      {
+        stream_id: 'builder',
+        event_type: 'tool_execution_update',
+        tool_call_id: 'call-7',
+        tool_name: 'write',
+        args: { path: 'index.ts' },
+        partial_result: { content: [{ type: 'text', text: 'writing' }] }
+      },
+      'builder',
+      { streamed: '' },
+      handlers
+    );
+    applyStreamPayload(
+      {
+        stream_id: 'builder',
+        event_type: 'tool_execution_end',
+        tool_call_id: 'call-7',
+        tool_name: 'write',
+        result: { content: [{ type: 'text', text: 'done' }] },
+        is_error: false
+      },
+      'builder',
+      { streamed: '' },
+      handlers
+    );
+
+    expect(events).toEqual([
+      [
+        'start',
+        {
+          toolCallId: 'call-7',
+          toolName: 'write',
+          args: { path: 'index.ts' }
+        }
+      ],
+      [
+        'update',
+        {
+          toolCallId: 'call-7',
+          toolName: 'write',
+          args: { path: 'index.ts' },
+          partialResult: { content: [{ type: 'text', text: 'writing' }] }
+        }
+      ],
+      [
+        'end',
+        {
+          toolCallId: 'call-7',
+          toolName: 'write',
+          result: { content: [{ type: 'text', text: 'done' }] },
+          isError: false
+        }
+      ]
+    ]);
+  });
+
+  it('forwards structured build requests from the main agent', () => {
+    const requests: unknown[] = [];
+
+    const state = applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'build_request',
+        build_request: {
+          name: 'hacker-news',
+          description: 'Connect to the Hacker News API',
+          sourceUrls: ['https://github.com/HackerNews/API'],
+          reason: 'No installed tool can access Hacker News.'
+        }
+      },
+      'active',
+      { streamed: '' },
+      {
+        onBuildRequest: (request) => requests.push(request)
+      }
+    );
+
+    expect(state.streamed).toBe('');
+    expect(requests).toEqual([
+      {
+        name: 'hacker-news',
+        description: 'Connect to the Hacker News API',
+        sourceUrls: ['https://github.com/HackerNews/API'],
+        reason: 'No installed tool can access Hacker News.'
+      }
+    ]);
+  });
 });

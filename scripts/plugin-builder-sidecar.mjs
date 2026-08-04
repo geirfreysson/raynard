@@ -1,8 +1,15 @@
 import { createInterface } from 'node:readline';
 import { stdin as input, stdout as output, stderr } from 'node:process';
+import { spawn } from 'node:child_process';
+import { readdir, readFile } from 'node:fs/promises';
 import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  validatePluginArtifacts
+} from './plugin-builder-core.mjs';
 
 function emit(event) {
   output.write(`${JSON.stringify(event)}\n`);
@@ -66,59 +73,6 @@ function createModel(request) {
   };
 }
 
-function buildSystemPrompt(request) {
-  const sourceUrls = Array.isArray(request.sourceUrls)
-    ? request.sourceUrls.map((url) => String(url).trim()).filter(Boolean)
-    : [];
-  const sourceBlock = sourceUrls.length ? sourceUrls.map((url) => `- ${url}`).join('\n') : '- none provided';
-
-  return `You are the Raynard plugin builder running in Build mode.
-
-You may write code only inside the current plugin workspace.
-
-Your job is to implement TypeScript API tooling for Raynard Explore mode.
-
-Hard constraints:
-- Do not build React components.
-- Do not create pages, routes, CSS, visual explorers, or standalone UI.
-- Do not modify the host app.
-- Do not store API keys or secrets in source.
-- Work test-first: create or update tests that fail for the missing API behavior before writing the fetcher implementation.
-- Tests must include mocked fetch coverage for every public API fetch helper and every plugin tool.
-- Tests for story-list tools must assert non-empty mocked story IDs and rendered story text.
-- Do not rely only on skipped network tests or structure-only tests.
-- After implementation, run the tests and fix failures before reporting completion.
-- Implement API/client/tool code that fetches data and returns structured, citeable references.
-- Use the existing plugin scaffold and reference helper.
-- Every API-derived result must expose enough raw payload and source metadata for the explorer agent to quote or cite it.
-- Prefer small, focused tools over one broad generic tool.
-- Every exported tool definition must include a routing-quality description and a JSON parameter schema. Descriptions must say what user questions the tool answers, what API data it fetches, and any important limits or follow-up tools.
-- Tool descriptions are injected into the Explore-mode prompt so the agent can pick between generated plugins. Do not use vague descriptions like "fetch data"; make each description specific and distinct.
-- Parameter schemas must include property descriptions, required fields, enum values where applicable, and sensible optional fields such as limit, query, symbol, id, date range, or type.
-- Update README.md with the implemented tools and source docs used.
-- If tests are practical without credentials, add a small smoke test or fixture.
-
-Source documentation:
-${sourceBlock}`;
-}
-
-function buildUserPrompt(request) {
-  return `Implement this Raynard Explore-mode API plugin.
-
-User request:
-${String(request.prompt || request.description || '').trim()}
-
-Plugin workspace:
-${String(request.pluginDir || '').trim()}
-
-Expected output:
-- TypeScript plugin code in index.ts.
-- API fetch helpers as needed.
-- Tool definitions for the API explorer, each with a specific description and JSON parameter schema that Explore mode can inject into its prompt.
-- Reference-producing results using createApiReference().
-- No UI code.`;
-}
-
 function extractAssistantText(message) {
   if (!message || message.role !== 'assistant' || !Array.isArray(message.content)) return '';
   return message.content
@@ -126,6 +80,63 @@ function extractAssistantText(message) {
     .map((block) => block.text)
     .join('')
     .trim();
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: pluginDir,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderrText = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderrText += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderrText.trim() || stdout.trim() || `${command} exited with ${code}.`));
+        return;
+      }
+      resolve({ stdout, stderr: stderrText });
+    });
+    if (options.stdin) child.stdin.end(options.stdin);
+    else child.stdin.end();
+  });
+}
+
+async function validatePluginWorkspace() {
+  const files = await readdir(pluginDir);
+  const readme = await readFile(`${pluginDir}/README.md`, 'utf8');
+  const runnerPath = String(request.pluginRunnerPath || '').trim();
+  if (!runnerPath) throw new Error('Plugin tool runner path is missing.');
+  const listed = await runCommand('node', [runnerPath], {
+    stdin: JSON.stringify({ pluginDir, listTools: true })
+  });
+  const lastLine = listed.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  const payload = JSON.parse(lastLine || '{}');
+  if (!payload.ok) throw new Error(payload.error || 'Could not load plugin tools.');
+  const validation = validatePluginArtifacts({
+    files,
+    readme,
+    tools: payload.result?.tools
+  });
+  emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });
+  await runCommand('node', ['--test', ...validation.testFiles]);
+  emit({
+    type: 'status',
+    status: `validation_passed:${validation.testFiles.length}_tests:${validation.toolCount}_tools`
+  });
 }
 
 const request = await readRequest();
@@ -163,6 +174,9 @@ const unsubscribe = agent.subscribe((event) => {
     if (assistantEvent && assistantEvent.type === 'text_delta' && assistantEvent.delta) {
       emit({ type: 'delta', delta: assistantEvent.delta });
     }
+    if (assistantEvent && assistantEvent.type === 'thinking_delta' && assistantEvent.delta) {
+      emit({ type: 'thinking_delta', delta: assistantEvent.delta });
+    }
     if (assistantEvent && assistantEvent.type === 'toolcall_start') {
       emit({ type: 'tool_call', toolName: assistantEvent.toolName || '' });
     }
@@ -170,12 +184,34 @@ const unsubscribe = agent.subscribe((event) => {
   }
 
   if (event.type === 'tool_execution_start') {
-    emit({ type: 'tool_execution_start', toolName: event.toolName || '' });
+    emit({
+      type: 'tool_execution_start',
+      toolCallId: event.toolCallId || '',
+      toolName: event.toolName || '',
+      args: event.args || {}
+    });
+    return;
+  }
+
+  if (event.type === 'tool_execution_update') {
+    emit({
+      type: 'tool_execution_update',
+      toolCallId: event.toolCallId || '',
+      toolName: event.toolName || '',
+      args: event.args || {},
+      partialResult: event.partialResult
+    });
     return;
   }
 
   if (event.type === 'tool_execution_end') {
-    emit({ type: 'tool_execution_end', toolName: event.toolName || '', isError: Boolean(event.isError) });
+    emit({
+      type: 'tool_execution_end',
+      toolCallId: event.toolCallId || '',
+      toolName: event.toolName || '',
+      result: event.result,
+      isError: Boolean(event.isError)
+    });
     return;
   }
 
@@ -187,6 +223,15 @@ const unsubscribe = agent.subscribe((event) => {
 try {
   emit({ type: 'status', status: 'builder_started' });
   await agent.prompt(buildUserPrompt(request));
+  try {
+    await validatePluginWorkspace();
+  } catch (validationError) {
+    emit({ type: 'status', status: 'validation_failed_retrying' });
+    await agent.prompt(
+      `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
+    );
+    await validatePluginWorkspace();
+  }
   unsubscribe();
   emit({ type: 'done', text: finalText || 'Plugin builder completed.' });
 } catch (error) {

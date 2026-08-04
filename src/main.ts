@@ -2,12 +2,21 @@ import { invoke } from '@tauri-apps/api/core';
 import { getErrorMessage } from './errors';
 import {
   cancelAgentTurnStream,
-  runAgentTurnStream,
+  runMainAgentStream,
   runPluginBuilderStream,
+  type AgentBuildRequest,
   type ChatMessage
 } from './agent-runtime';
-import { detectCapabilityRequest, type CapabilityRequest } from './plugin-capabilities';
+import { continueBuildRequest, nextBuildRequestStep } from './build-request-flow';
+import {
+  applyBuilderToolEvent,
+  type BuilderToolActivity,
+  type BuilderToolEvent
+} from './builder-activity';
+import { decideChatNavigation } from './navigation-state';
 import './styles.css';
+
+type CapabilityRequest = AgentBuildRequest;
 
 type LlmEnvStatus = {
   found: boolean;
@@ -15,17 +24,26 @@ type LlmEnvStatus = {
   keys: string[];
   provider: string;
   model: string;
+  codingProvider: string;
+  codingModel: string;
   configured: boolean;
+  codingConfigured: boolean;
 };
 
 type ModelProvider = {
   id: string;
   name: string;
-  base_url: string;
-  default_model: string;
-  active: boolean;
+  baseUrl: string;
+  defaultChatModel: string;
+  defaultCodingModel: string;
+  chatModel: string;
+  codingModel: string;
+  chatActive: boolean;
+  codingActive: boolean;
   connected: boolean;
 };
+
+type ModelRole = 'chat' | 'coding';
 
 type ModelProviderList = {
   providers: ModelProvider[];
@@ -40,6 +58,8 @@ type StoredChatMessage = {
   model?: string;
   status?: 'running' | 'completed' | 'error';
   error?: string;
+  builderRun?: boolean;
+  builderActivities?: BuilderToolActivity[];
 };
 
 type ChatHistoryRow = {
@@ -95,27 +115,13 @@ type GeneratedPluginDetail = {
   readme: string;
 };
 
-type PluginToolResult = {
-  text?: string;
-  references?: unknown[];
-};
-
-type ParsedToolCall = {
-  toolName: string;
-  args: Record<string, unknown>;
-};
-
-type ExploreLoopHandlers = {
-  onStreamId: (streamId: string) => void;
-  onDelta: (delta: string) => void;
-  onThinkingDelta: (delta: string) => void;
-  onToolCall?: (toolCall: ParsedToolCall, step: number, content: string) => void;
-  onToolResult?: (toolCall: ParsedToolCall, step: number, result: PluginToolResult) => void;
-  onToolError?: (toolCall: ParsedToolCall, step: number, error: unknown) => void;
-};
-
 type AppMode = 'explore' | 'build';
 type PluginConflictStrategy = 'error' | 'replace' | 'rename';
+type PluginScaffoldStatus = {
+  normalizedName: string;
+  exists: boolean;
+  nextAvailableName: string;
+};
 type SidebarView = 'chats' | 'plugins';
 
 type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'updatedAt'>;
@@ -126,12 +132,6 @@ const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
 const MAX_MARKDOWN_TABLE_COLUMNS = 8;
-const TOOL_CALL_BLOCK_PATTERNS = [
-  /```tool_call\s+([A-Za-z0-9_.-]+)(?::\d+)?\s+([\s\S]*?)```/m,
-  /```functions\.([A-Za-z0-9_.-]+)(?::\d+)?\s*([\s\S]*?)```/m
-];
-const MAX_TOOL_LOOP_STEPS = 6;
-
 const app = document.querySelector<HTMLDivElement>('#app');
 
 if (!app) {
@@ -241,6 +241,19 @@ app.innerHTML = `
           <div id="modelsModalContent" class="models-modal-content"></div>
         </div>
       </section>
+
+      <section id="extensionDeleteModal" class="extension-delete-modal-overlay is-hidden" aria-hidden="true">
+        <div class="extension-delete-modal" role="dialog" aria-modal="true" aria-labelledby="extensionDeleteTitle">
+          <header class="extension-delete-header">
+            <h2 id="extensionDeleteTitle">Delete Extension</h2>
+            <p id="extensionDeleteText">This removes the generated extension files.</p>
+          </header>
+          <div class="extension-delete-actions">
+            <button id="extensionDeleteCancel" class="extension-delete-secondary" type="button">Cancel</button>
+            <button id="extensionDeleteConfirm" class="extension-delete-primary" type="button">Delete</button>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
 `;
@@ -273,6 +286,10 @@ const modelsModalTitle = document.querySelector<HTMLElement>('#modelsModalTitle'
 const modelsModalHint = document.querySelector<HTMLElement>('#modelsModalHint');
 const modelsModalContent = document.querySelector<HTMLElement>('#modelsModalContent');
 const modelsModalClose = document.querySelector<HTMLButtonElement>('#modelsModalClose');
+const extensionDeleteModal = document.querySelector<HTMLElement>('#extensionDeleteModal');
+const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
+const extensionDeleteCancel = document.querySelector<HTMLButtonElement>('#extensionDeleteCancel');
+const extensionDeleteConfirm = document.querySelector<HTMLButtonElement>('#extensionDeleteConfirm');
 
 let activeSessionId = createSessionId();
 let activeChatMeta = createChatMeta(activeSessionId);
@@ -286,6 +303,13 @@ let isRunning = false;
 let activeStreamId = '';
 let appMode: AppMode = loadAppMode();
 let modelProviders: ModelProvider[] = [];
+let llmEnvStatus: LlmEnvStatus | null = null;
+let mainViewRevision = 0;
+let pendingExtensionDelete:
+  | {
+      resolve: (confirmed: boolean) => void;
+    }
+  | null = null;
 
 window.setTimeout(() => {
   shell?.classList.remove('is-booting');
@@ -355,10 +379,25 @@ modelsModal?.addEventListener('click', (event) => {
     closeModelsModal();
   }
 });
+extensionDeleteCancel?.addEventListener('click', () => resolveExtensionDelete(false));
+extensionDeleteConfirm?.addEventListener('click', () => resolveExtensionDelete(true));
+extensionDeleteModal?.addEventListener('click', (event) => {
+  if (event.target === extensionDeleteModal) {
+    resolveExtensionDelete(false);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && pendingExtensionDelete) {
+    resolveExtensionDelete(false);
+  }
+});
 
 chatsToggle?.addEventListener('click', () => {
   if (sidebarView !== 'chats') {
     setSidebarView('chats');
+    if (shell?.classList.contains('plugin-view')) {
+      showConversation();
+    }
     return;
   }
   setSidebarOpen(!shell?.classList.contains('sidebar-open'));
@@ -397,15 +436,8 @@ stopStreamButton?.addEventListener('click', () => {
 
 async function loadEnvStatus() {
   const status = await invoke<LlmEnvStatus>('load_llm_env_status');
-  if (!status.found) {
-    setEnvLabel(`no .env loaded - ${status.provider}/${status.model}`);
-    return;
-  }
-
-  const keyLabel = status.configured
-    ? `${status.provider}/${status.model}`
-    : `.env found - missing ${status.provider} key`;
-  setEnvLabel(keyLabel);
+  llmEnvStatus = status;
+  renderComposerModelLabel();
 }
 
 function iconSvg(name: string) {
@@ -433,6 +465,25 @@ function setEnvLabel(label: string) {
   if (chatEnvLabel) chatEnvLabel.textContent = `${label} · ${modeSuffix}`;
 }
 
+function renderComposerModelLabel() {
+  if (!llmEnvStatus) {
+    setEnvLabel('no .env loaded');
+    return;
+  }
+
+  const isBuild = appMode === 'build';
+  const provider = isBuild ? llmEnvStatus.codingProvider : llmEnvStatus.provider;
+  const model = isBuild ? llmEnvStatus.codingModel : llmEnvStatus.model;
+  const configured = isBuild ? llmEnvStatus.codingConfigured : llmEnvStatus.configured;
+
+  if (!llmEnvStatus.found) {
+    setEnvLabel(`no .env loaded - ${provider}/${model}`);
+    return;
+  }
+
+  setEnvLabel(configured ? `${provider}/${model}` : `.env found - missing ${provider} key`);
+}
+
 function loadAppMode(): AppMode {
   try {
     return localStorage.getItem('raynard-app-mode') === 'build' ? 'build' : 'explore';
@@ -447,6 +498,7 @@ function setAppMode(mode: AppMode) {
     localStorage.setItem('raynard-app-mode', mode);
   } catch {}
   syncModeControls();
+  renderComposerModelLabel();
   void loadEnvStatus().catch(() => {
     setEnvLabel('no .env loaded');
   });
@@ -528,51 +580,73 @@ function renderModelsError(message: string) {
 function renderProviderList() {
   if (!modelsModalContent) return;
   if (modelsModalTitle) modelsModalTitle.textContent = 'Model Providers';
-  if (modelsModalHint) modelsModalHint.textContent = 'Select a provider.';
+  if (modelsModalHint) modelsModalHint.textContent = 'Select separate models for chat/explore and coding/build.';
   modelsModalContent.innerHTML = '';
 
   for (const provider of modelProviders) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `models-provider-row${provider.active ? ' is-active' : ''}`;
-    button.innerHTML = `
+    const row = document.createElement('section');
+    row.className = `models-provider-row${provider.chatActive || provider.codingActive ? ' is-active' : ''}`;
+    row.innerHTML = `
       <span class="models-provider-icon" aria-hidden="true">${providerIcon(provider.id)}</span>
       <span class="models-provider-main">
         <strong>${escapeHtml(provider.name)}</strong>
-        <span>${escapeHtml(provider.default_model)} · ${escapeHtml(provider.base_url.replace(/^https?:\/\//, ''))}</span>
+        <span>${escapeHtml(provider.baseUrl.replace(/^https?:\/\//, ''))}</span>
       </span>
-      <span class="models-provider-state${provider.active ? ' is-active' : ''}">
-        ${provider.connected ? (provider.active ? 'Active' : 'Saved') : 'Add key'}
-      </span>
-      <span class="models-provider-chevron" aria-hidden="true">›</span>
+      <div class="models-provider-controls">
+        <label class="models-role-field">
+          <span>Chat</span>
+          <input class="models-role-input" data-role="chat" value="${escapeHtml(provider.chatModel || provider.defaultChatModel)}" spellcheck="false" />
+        </label>
+        <button type="button" class="models-role-action${provider.chatActive ? ' is-active' : ''}" data-role="chat">
+          ${provider.connected ? (provider.chatActive ? 'Chat active' : 'Use for chat') : 'Add key'}
+        </button>
+        <label class="models-role-field">
+          <span>Coding</span>
+          <input class="models-role-input" data-role="coding" value="${escapeHtml(provider.codingModel || provider.defaultCodingModel)}" spellcheck="false" />
+        </label>
+        <button type="button" class="models-role-action${provider.codingActive ? ' is-active' : ''}" data-role="coding">
+          ${provider.connected ? (provider.codingActive ? 'Coding active' : 'Use for coding') : 'Add key'}
+        </button>
+      </div>
     `;
-    button.addEventListener('click', () => {
-      if (provider.connected) {
-        void selectProvider(provider);
-      } else {
-        renderApiKeyStep(provider);
-      }
+    row.querySelectorAll<HTMLButtonElement>('.models-role-action').forEach((button) => {
+      button.addEventListener('click', () => {
+        const role = button.dataset.role === 'coding' ? 'coding' : 'chat';
+        const input = row.querySelector<HTMLInputElement>(`.models-role-input[data-role="${role}"]`);
+        const model =
+          input?.value.trim() ||
+          (role === 'coding' ? provider.defaultCodingModel : provider.defaultChatModel);
+        void selectProvider(provider, role, model);
+      });
     });
-    modelsModalContent.appendChild(button);
+    modelsModalContent.appendChild(row);
   }
 }
 
-async function selectProvider(provider: ModelProvider) {
+async function selectProvider(provider: ModelProvider, role: ModelRole, model: string) {
+  if (!provider.connected) {
+    renderApiKeyStep(provider, role, model);
+    return;
+  }
+
   try {
-    const result = await invoke<ModelProviderList>('set_active_provider', { providerId: provider.id });
+    const result = await invoke<ModelProviderList>('set_active_model_provider', {
+      providerId: provider.id,
+      role,
+      model
+    });
     modelProviders = result.providers;
-    const active = modelProviders.find((item) => item.active);
-    setEnvLabel(active ? `${active.id}/${active.default_model}` : `${provider.id}/${provider.default_model}`);
+    setEnvLabel(labelFromProvidersForMode(modelProviders) || `${provider.id}/${model}`);
     closeModelsModal();
   } catch (error) {
     if (modelsModalHint) modelsModalHint.textContent = getErrorMessage(error, `Could not select ${provider.name}.`);
   }
 }
 
-function renderApiKeyStep(provider: ModelProvider) {
+function renderApiKeyStep(provider: ModelProvider, role: ModelRole, model: string) {
   if (!modelsModalContent) return;
   if (modelsModalTitle) modelsModalTitle.textContent = provider.name;
-  if (modelsModalHint) modelsModalHint.textContent = 'Paste your API key. It will be saved in the OS keychain.';
+  if (modelsModalHint) modelsModalHint.textContent = `Paste your API key to use ${model} for ${role}.`;
   modelsModalContent.innerHTML = '';
 
   const form = document.createElement('form');
@@ -614,12 +688,13 @@ function renderApiKeyStep(provider: ModelProvider) {
     try {
       const result = await invoke<ModelProviderList>('save_provider_api_key', {
         providerId: provider.id,
-        apiKey
+        apiKey,
+        role,
+        model
       });
       input.value = '';
       modelProviders = result.providers;
-      const active = modelProviders.find((item) => item.active);
-      setEnvLabel(active ? `${active.id}/${active.default_model}` : `${provider.id}/${provider.default_model}`);
+      setEnvLabel(labelFromProvidersForMode(modelProviders) || `${provider.id}/${model}`);
       closeModelsModal();
     } catch (error) {
       if (modelsModalHint) modelsModalHint.textContent = getErrorMessage(error, `Could not save ${provider.name} key.`);
@@ -628,6 +703,12 @@ function renderApiKeyStep(provider: ModelProvider) {
 
   modelsModalContent.appendChild(form);
   setTimeout(() => input.focus(), 0);
+}
+
+function labelFromProvidersForMode(providers: ModelProvider[]) {
+  const active = providers.find((provider) => (appMode === 'build' ? provider.codingActive : provider.chatActive));
+  if (!active) return '';
+  return appMode === 'build' ? `${active.id}/${active.codingModel}` : `${active.id}/${active.chatModel}`;
 }
 
 function providerIcon(providerId: string) {
@@ -771,7 +852,9 @@ function renderGeneratedPlugins() {
 
 async function openGeneratedPlugin(pluginId: string) {
   if (!pluginDetailView || !messages) return;
+  const viewRevision = ++mainViewRevision;
   const detail = await invoke<GeneratedPluginDetail>('read_generated_plugin', { pluginId });
+  if (viewRevision !== mainViewRevision) return;
   selectedPluginId = detail.plugin.id;
   renderGeneratedPlugins();
   renderPluginDetail(detail);
@@ -786,7 +869,8 @@ async function openGeneratedPlugin(pluginId: string) {
 async function deleteGeneratedPlugin(pluginId: string) {
   const plugin = generatedPlugins.find((item) => item.id === pluginId);
   const label = plugin?.name || pluginId;
-  if (!window.confirm(`Delete generated plugin "${label}"? This removes its files from the generated plugins folder.`)) {
+  const confirmed = await confirmExtensionDelete(label);
+  if (!confirmed) {
     return;
   }
 
@@ -799,6 +883,38 @@ async function deleteGeneratedPlugin(pluginId: string) {
     shell?.classList.remove('plugin-view');
   }
   await refreshGeneratedPlugins();
+}
+
+function confirmExtensionDelete(label: string) {
+  if (!extensionDeleteModal || !extensionDeleteText || !extensionDeleteConfirm) {
+    return Promise.resolve(
+      window.confirm(`Delete extension "${label}"? This removes its generated files.`)
+    );
+  }
+
+  if (pendingExtensionDelete) {
+    pendingExtensionDelete.resolve(false);
+  }
+
+  extensionDeleteText.textContent = `Delete "${label}"? This removes the generated extension files and cannot be undone.`;
+  extensionDeleteConfirm.disabled = false;
+  extensionDeleteModal.classList.remove('is-hidden');
+  extensionDeleteModal.setAttribute('aria-hidden', 'false');
+  extensionDeleteConfirm.focus();
+
+  return new Promise<boolean>((resolve) => {
+    pendingExtensionDelete = { resolve };
+  });
+}
+
+function resolveExtensionDelete(confirmed: boolean) {
+  if (!pendingExtensionDelete) return;
+  const pending = pendingExtensionDelete;
+  pendingExtensionDelete = null;
+  if (extensionDeleteConfirm) extensionDeleteConfirm.disabled = true;
+  extensionDeleteModal?.classList.add('is-hidden');
+  extensionDeleteModal?.setAttribute('aria-hidden', 'true');
+  pending.resolve(confirmed);
 }
 
 function renderPluginDetail(detail: GeneratedPluginDetail) {
@@ -875,6 +991,14 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
 
   pluginDetailView.appendChild(createPluginCodeSection('plugin.json', detail.manifestText));
   pluginDetailView.appendChild(createPluginCodeSection('index.ts', detail.code || '// No index.ts found.'));
+}
+
+function stringifyPromptJson(value: unknown) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '{}';
+  }
 }
 
 function createPluginCodeSection(title: string, codeText: string) {
@@ -1016,10 +1140,25 @@ function logAgentTurnEvent(eventType: string, payload: Record<string, unknown>) 
 }
 
 async function openSavedChat(chatId: string) {
-  if (isRunning || !messages) return;
+  if (!messages) return;
+  const decision = decideChatNavigation({
+    targetChatId: chatId,
+    activeChatId: activeSessionId,
+    isRunning
+  });
+  if (decision === 'show-active') {
+    showConversation();
+    renderChatHistory();
+    chatInput?.focus();
+    return;
+  }
+  if (decision === 'block') return;
+
+  const viewRevision = ++mainViewRevision;
   await persistActiveChatHistory();
 
   const chat = await invoke<ChatHistoryPayload>('read_chat_history', { chatId });
+  if (viewRevision !== mainViewRevision) return;
   activeSessionId = chat.chatId;
   activeChatMeta = {
     chatId: chat.chatId,
@@ -1059,6 +1198,7 @@ async function deleteSavedChat(chatId: string) {
 
 async function startNewConversation(options: { showPreChat: boolean }) {
   if (isRunning) return;
+  mainViewRevision += 1;
   await persistActiveChatHistory();
   resetConversationState();
   messages?.replaceChildren();
@@ -1087,7 +1227,10 @@ function resetConversationState() {
 }
 
 function renderStoredMessage(message: StoredChatMessage) {
-  addMessage(message.role, message.text, false, message.role === 'assistant');
+  const article = addMessage(message.role, message.builderRun ? '' : message.text, false, message.role === 'assistant');
+  if (message.role !== 'assistant' || !message.builderRun) return;
+  const body = article.querySelector<HTMLElement>('.message-text');
+  if (body) renderBuilderRun(body, message, false);
 }
 
 async function submitMessage(input: HTMLTextAreaElement | null) {
@@ -1112,16 +1255,6 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   });
   await persistActiveChatHistory();
   await refreshChatHistory();
-
-  const capabilityRequest = detectCapabilityRequest(content);
-  if (capabilityRequest.requested) {
-    if (appMode === 'explore') {
-      renderExploreModeCapabilityNotice(capabilityRequest);
-      return;
-    }
-    renderCapabilityConfirmation(capabilityRequest);
-    return;
-  }
 
   const pending = addMessage('assistant', '', true);
   const pendingBody = pending.querySelector<HTMLElement>('.message-text');
@@ -1148,7 +1281,8 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   });
 
   try {
-    const reply = await runExploreAgentLoop(chatMessages, {
+    let requestedBuild: AgentBuildRequest | undefined;
+    const reply = await runMainAgentStream(chatMessages, appMode, {
       onStreamId: (streamId) => {
         activeStreamId = streamId;
         void logAgentTurnEvent('stream_id', { streamId });
@@ -1180,48 +1314,61 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         thinkingPreview.textContent = formatThinkingPreview(thinking);
         messages.scrollTop = messages.scrollHeight;
       },
-      onToolCall: (toolCall, step, toolContent) => {
-        assistantRecord.text = streamed || toolContent || 'Running tool...';
+      onToolCall: (toolCall) => {
+        assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
         snapshotPersister.schedule(true);
         void logAgentTurnEvent('tool_call', {
-          step,
           toolName: toolCall.toolName,
-          args: toolCall.args,
-          assistantContent: toolContent
+          args: toolCall.args
         });
       },
-      onToolResult: (toolCall, step, result) => {
+      onToolResult: (toolCall) => {
         assistantRecord.text = streamed || `Ran ${toolCall.toolName}.`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
         snapshotPersister.schedule(true);
         void logAgentTurnEvent('tool_result', {
-          step,
           toolName: toolCall.toolName,
           args: toolCall.args,
-          result
+          result: toolCall.result
         });
       },
-      onToolError: (toolCall, step, error) => {
-        assistantRecord.text = getErrorMessage(error, `Tool failed: ${toolCall.toolName}`);
+      onToolError: (toolCall) => {
+        assistantRecord.text = toolCall.error || `Tool failed: ${toolCall.toolName}`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'error';
         assistantRecord.error = assistantRecord.text;
         snapshotPersister.schedule(true);
         void logAgentTurnEvent('tool_error', {
-          step,
           toolName: toolCall.toolName,
           args: toolCall.args,
-          error: getErrorMessage(error)
+          error: toolCall.error
         });
+      },
+      onBuildRequest: (request) => {
+        requestedBuild = request;
+        void logAgentTurnEvent('build_request', { request, mode: appMode });
       }
     });
     if (thinkingPreview.parentElement) {
       thinkingPreview.remove();
     }
-    let finalContent = reply.content || streamed || 'The model returned an empty response.';
+    requestedBuild = reply.buildRequest ?? requestedBuild;
+    if (requestedBuild) {
+      pending.remove();
+      const recordIndex = storedMessages.indexOf(assistantRecord);
+      if (recordIndex >= 0) storedMessages.splice(recordIndex, 1);
+      if (nextBuildRequestStep(appMode) === 'offer-switch') {
+        renderExploreModeCapabilityNotice(requestedBuild);
+      } else {
+        renderCapabilityConfirmation(requestedBuild);
+      }
+      return;
+    }
+
+    const finalContent = reply.content || streamed || 'The model returned an empty response.';
     if (pendingBody) {
       renderMessageText(pendingBody, finalContent, true);
     }
@@ -1270,174 +1417,11 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   }
 }
 
-async function runExploreAgentLoop(
-  baseMessages: ChatMessage[],
-  handlers: ExploreLoopHandlers
-) {
-  const scratchMessages = await buildExploreMessagesForModel(baseMessages);
-  let reply = await runAgentTurnStream(scratchMessages, handlers);
-  let content = reply.content || '';
-  let provider = reply.provider;
-  let model = reply.model;
-
-  if (appMode !== 'explore') {
-    return reply;
-  }
-
-  for (let step = 0; step < MAX_TOOL_LOOP_STEPS; step += 1) {
-    const toolCall = parseToolCallBlock(content);
-    if (!toolCall) break;
-
-    handlers.onToolCall?.(toolCall, step, content);
-    handlers.onThinkingDelta(`\nRunning ${toolCall.toolName}...\n`);
-    let toolResult: PluginToolResult;
-    try {
-      toolResult = await executeGeneratedToolCall(toolCall);
-    } catch (error) {
-      handlers.onToolError?.(toolCall, step, error);
-      throw error;
-    }
-    handlers.onToolResult?.(toolCall, step, toolResult);
-    const toolResultMessage = formatToolResultForModel(toolCall, toolResult);
-
-    scratchMessages.push(
-      {
-        role: 'assistant',
-        content
-      },
-      {
-        role: 'user',
-        content: toolResultMessage
-      }
-    );
-
-    reply = await runAgentTurnStream(scratchMessages, handlers);
-    content = reply.content || '';
-    provider = reply.provider ?? provider;
-    model = reply.model ?? model;
-  }
-
-  if (parseToolCallBlock(content)) {
-    return {
-      content:
-        'I reached the tool-call limit before composing a final answer. Try narrowing the request or asking for fewer items.',
-      provider,
-      model
-    };
-  }
-
-  return {
-    content,
-    provider,
-    model
-  };
-}
-
 function setStopButtonVisible(visible: boolean) {
   if (!stopStreamButton) return;
   stopStreamButton.classList.toggle('is-hidden', !visible);
   stopStreamButton.disabled = !visible;
   stopStreamButton.textContent = 'Stop';
-}
-
-function parseToolCallBlock(content: string): ParsedToolCall | null {
-  const match = TOOL_CALL_BLOCK_PATTERNS.map((pattern) => pattern.exec(content)).find(Boolean);
-  if (!match) return null;
-  const toolName = normalizeToolName(match[1]?.trim() || '');
-  const rawArgs = match[2]?.trim() || '{}';
-  if (!toolName) return null;
-  try {
-    const args = JSON.parse(rawArgs);
-    if (!args || typeof args !== 'object' || Array.isArray(args)) {
-      return { toolName, args: {} };
-    }
-    return { toolName, args };
-  } catch {
-    return null;
-  }
-}
-
-function normalizeToolName(toolName: string) {
-  return toolName.replace(/^functions\./, '').trim();
-}
-
-async function executeGeneratedToolCall(toolCall: ParsedToolCall) {
-  const result = await invoke<PluginToolResult>('execute_generated_plugin_tool', {
-    request: {
-      toolName: toolCall.toolName,
-      args: toolCall.args
-    }
-  });
-  return result;
-}
-
-function formatToolResultForModel(toolCall: ParsedToolCall, result: PluginToolResult) {
-  const references = Array.isArray(result.references) ? result.references : [];
-  const payload = {
-    toolName: toolCall.toolName,
-    args: toolCall.args,
-    text: result.text || '',
-    references
-  };
-
-  return [
-    `Tool result for ${toolCall.toolName}:`,
-    'Use this result to answer the user. If the result contains references, inspect their referenceMeta and expandedContent payloads for facts you need.',
-    'If the user request still requires more data, output exactly one more fenced tool_call block. Otherwise provide the final answer with concrete details.',
-    '```json',
-    JSON.stringify(payload, null, 2),
-    '```'
-  ].join('\n');
-}
-
-async function buildExploreMessagesForModel(messagesForConversation: ChatMessage[]) {
-  if (appMode !== 'explore') return messagesForConversation;
-
-  try {
-    const result = await invoke<GeneratedPluginList>('list_generated_plugins');
-    generatedPlugins = result.plugins;
-    renderGeneratedPlugins();
-  } catch {
-    return messagesForConversation;
-  }
-
-  const toolLines = generatedPlugins.flatMap((plugin) =>
-    plugin.tools.map((tool) => {
-      const description = tool.description || plugin.description || 'No description provided.';
-      return [
-        `Tool: ${tool.name}`,
-        `Plugin: ${plugin.name} (${plugin.id})`,
-        `Description: ${description}`,
-        `Arguments JSON schema: ${stringifyPromptJson(tool.parameters || { type: 'object', properties: {} })}`
-      ].join('\n');
-    })
-  );
-
-  if (!toolLines.length) return messagesForConversation;
-
-  const toolCatalog = [
-    'Raynard Explore mode context:',
-    'Generated API tools are available. Before answering API/data questions, choose the relevant tool from this catalog.',
-    'Be thorough: if a result only identifies IDs or a user profile and the user asked for story details, keep using tools until you have enough data to answer.',
-    'When a tool is needed, output exactly one fenced block and no extra prose:',
-    '```tool_call toolName',
-    '{"argument":"value"}',
-    '```',
-    'Do not invent tools. Do not ask to build code in Explore mode.',
-    '<available_generated_tools>',
-    ...toolLines.map((line) => `${line}\n---`),
-    '</available_generated_tools>'
-  ].join('\n');
-
-  return [{ role: 'user' as const, content: toolCatalog }, ...messagesForConversation];
-}
-
-function stringifyPromptJson(value: unknown) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '{}';
-  }
 }
 
 function renderExploreModeCapabilityNotice(request: CapabilityRequest) {
@@ -1473,9 +1457,10 @@ function renderExploreModeCapabilityNotice(request: CapabilityRequest) {
     switchMode.className = 'capability-primary-action';
     switchMode.textContent = 'Switch to Build mode';
     switchMode.addEventListener('click', () => {
-      setAppMode('build');
+      const continuation = continueBuildRequest(request);
+      setAppMode(continuation.mode);
       article.remove();
-      renderCapabilityConfirmation(request);
+      renderCapabilityConfirmation(continuation.request);
       switchMode.disabled = true;
     });
     actions.appendChild(switchMode);
@@ -1571,10 +1556,27 @@ async function scaffoldAndRunPluginBuilder(
 ) {
   let streamed = '';
   let thinking = '';
+  let builderRecord: StoredChatMessage | undefined;
+  let builderRun: HTMLElement | undefined;
+  const snapshotPersister = createTurnSnapshotPersister();
   isRunning = true;
   setStopButtonVisible(true);
 
   try {
+    if (options.conflictStrategy === 'error') {
+      const status = await invoke<PluginScaffoldStatus>('get_plugin_scaffold_status', {
+        name: options.name || request.name
+      });
+      if (status.exists) {
+        renderPluginConflictResolution(
+          body,
+          { ...request, name: status.normalizedName },
+          persistAssistantStatus,
+          status.nextAvailableName
+        );
+        return;
+      }
+    }
     body.querySelector('.capability-confirmation p')?.replaceChildren('Creating plugin workspace...');
     const plugin = await invoke<GeneratedPlugin>('scaffold_plugin_capability', {
       request: {
@@ -1585,10 +1587,30 @@ async function scaffoldAndRunPluginBuilder(
       }
     });
     renderPluginScaffoldResult(body, plugin);
-    const builderOutput = document.createElement('div');
-    builderOutput.className = 'builder-output';
-    builderOutput.textContent = 'Starting plugin builder...';
-    body.appendChild(builderOutput);
+    builderRecord = {
+      role: 'assistant',
+      text: 'Plugin builder is running.',
+      timestamp: Date.now(),
+      status: 'running',
+      builderRun: true,
+      builderActivities: []
+    };
+    storedMessages.push(builderRecord);
+    builderRun = document.createElement('div');
+    body.appendChild(builderRun);
+    renderBuilderRun(builderRun, builderRecord, true);
+    await persistActiveChatHistory();
+
+    const applyToolEvent = (event: BuilderToolEvent) => {
+      if (!builderRecord || !builderRun) return;
+      builderRecord.builderActivities = applyBuilderToolEvent(
+        builderRecord.builderActivities || [],
+        event
+      );
+      renderBuilderRun(builderRun, builderRecord, true);
+      snapshotPersister.schedule();
+      messages?.scrollTo({ top: messages.scrollHeight });
+    };
 
     const reply = await runPluginBuilderStream(
       {
@@ -1604,30 +1626,64 @@ async function scaffoldAndRunPluginBuilder(
         },
         onDelta: (delta) => {
           streamed += delta;
-          builderOutput.textContent = streamed;
+          if (builderRecord && builderRun) {
+            builderRecord.text = streamed;
+            renderBuilderRun(builderRun, builderRecord, true);
+            snapshotPersister.schedule();
+          }
           messages?.scrollTo({ top: messages.scrollHeight });
         },
         onThinkingDelta: (delta) => {
           thinking += delta;
-          if (!streamed.trim()) {
-            builderOutput.textContent = formatThinkingPreview(thinking);
+          if (builderRecord && builderRun) {
+            builderRecord.thinking = thinking;
+            renderBuilderRun(builderRun, builderRecord, true);
+            snapshotPersister.schedule();
           }
           messages?.scrollTo({ top: messages.scrollHeight });
+        },
+        onToolExecutionStart: (event) => {
+          applyToolEvent({ type: 'start', ...event });
+          void logAgentTurnEvent('builder_tool_start', event);
+        },
+        onToolExecutionUpdate: (event) => {
+          applyToolEvent({ type: 'update', ...event });
+        },
+        onToolExecutionEnd: (event) => {
+          applyToolEvent({ type: 'end', ...event });
+          void logAgentTurnEvent('builder_tool_end', event);
         }
       }
     );
     const finalContent = reply.content || streamed || 'Plugin builder completed.';
-    builderOutput.textContent = finalContent;
-    await persistAssistantStatus(finalContent);
+    builderRecord.text = finalContent;
+    builderRecord.thinking = thinking.trim() || undefined;
+    builderRecord.provider = reply.provider;
+    builderRecord.model = reply.model;
+    builderRecord.status = 'completed';
+    builderRecord.timestamp = Date.now();
+    renderBuilderRun(builderRun, builderRecord, false);
+    chatMessages.push({ role: 'assistant', content: finalContent });
+    await persistActiveChatHistory();
+    await refreshChatHistory();
   } catch (error) {
     const errorMessage = getErrorMessage(error, 'Could not create plugin workspace.');
-    if (/Generated plugin already exists:/i.test(errorMessage)) {
-      renderPluginConflictResolution(body, request, persistAssistantStatus);
-      return;
+    if (builderRecord && builderRun) {
+      builderRecord.text = errorMessage;
+      builderRecord.thinking = thinking.trim() || undefined;
+      builderRecord.status = 'error';
+      builderRecord.error = errorMessage;
+      builderRecord.timestamp = Date.now();
+      renderBuilderRun(builderRun, builderRecord, false);
+      chatMessages.push({ role: 'assistant', content: errorMessage });
+      await persistActiveChatHistory();
+      await refreshChatHistory();
+    } else {
+      body.textContent = errorMessage;
+      await persistAssistantStatus(errorMessage);
     }
-    body.textContent = errorMessage;
-    await persistAssistantStatus(errorMessage);
   } finally {
+    snapshotPersister.flush();
     isRunning = false;
     activeStreamId = '';
     setStopButtonVisible(false);
@@ -1635,10 +1691,109 @@ async function scaffoldAndRunPluginBuilder(
   }
 }
 
+function renderBuilderRun(
+  container: HTMLElement,
+  message: Pick<
+    StoredChatMessage,
+    'text' | 'thinking' | 'status' | 'error' | 'builderActivities'
+  >,
+  live: boolean
+) {
+  container.innerHTML = '';
+  container.className = 'builder-run';
+
+  if (message.thinking) {
+    const thinking = document.createElement('details');
+    thinking.className = 'builder-thinking';
+    thinking.open = live && message.status === 'running';
+    const summary = document.createElement('summary');
+    summary.textContent = message.status === 'running' ? 'Builder reasoning' : 'Reasoning';
+    thinking.appendChild(summary);
+    const content = document.createElement('div');
+    content.textContent = message.thinking;
+    thinking.appendChild(content);
+    container.appendChild(thinking);
+  }
+
+  const activities = message.builderActivities || [];
+  if (activities.length) {
+    const timeline = document.createElement('div');
+    timeline.className = 'builder-timeline';
+    activities.forEach((activity) => timeline.appendChild(renderBuilderToolCard(activity)));
+    container.appendChild(timeline);
+  } else if (message.status === 'running') {
+    const waiting = document.createElement('div');
+    waiting.className = 'builder-waiting';
+    waiting.textContent = 'Starting Pi coding agent...';
+    container.appendChild(waiting);
+  }
+
+  if (message.text && (message.text !== 'Plugin builder is running.' || message.status !== 'running')) {
+    const answer = document.createElement('div');
+    answer.className = 'builder-summary message-text';
+    renderMessageText(answer, message.text, message.status !== 'running');
+    container.appendChild(answer);
+  }
+}
+
+function renderBuilderToolCard(activity: BuilderToolActivity) {
+  const details = document.createElement('details');
+  details.className = `builder-tool is-${activity.status}`;
+  details.open = activity.status === 'pending' || activity.status === 'streaming' || activity.isError;
+  details.dataset.toolCallId = activity.toolCallId;
+
+  const summary = document.createElement('summary');
+  const identity = document.createElement('span');
+  identity.className = 'builder-tool-identity';
+  const name = document.createElement('strong');
+  name.textContent = activity.toolName;
+  identity.appendChild(name);
+  const preview = document.createElement('span');
+  preview.className = 'builder-tool-preview';
+  preview.textContent = formatBuilderToolArgsPreview(activity.args);
+  identity.appendChild(preview);
+  summary.appendChild(identity);
+
+  const status = document.createElement('span');
+  status.className = 'builder-tool-status';
+  status.textContent = activity.status;
+  summary.appendChild(status);
+  details.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.className = 'builder-tool-body';
+  appendBuilderCodeBlock(body, 'Arguments', JSON.stringify(activity.args, null, 2));
+  if (activity.output) appendBuilderCodeBlock(body, activity.isError ? 'Error' : 'Output', activity.output);
+  details.appendChild(body);
+  return details;
+}
+
+function formatBuilderToolArgsPreview(args: Record<string, unknown>) {
+  for (const key of ['path', 'command', 'query', 'pattern']) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return value.trim().replace(/\s+/g, ' ').slice(0, 90);
+  }
+  const keys = Object.keys(args);
+  return keys.length ? keys.slice(0, 3).join(', ') : 'No arguments';
+}
+
+function appendBuilderCodeBlock(container: HTMLElement, label: string, value: string) {
+  const heading = document.createElement('div');
+  heading.className = 'builder-tool-label';
+  heading.textContent = label;
+  container.appendChild(heading);
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = value;
+  pre.appendChild(code);
+  container.appendChild(pre);
+}
+
 function renderPluginConflictResolution(
   body: HTMLElement,
   request: CapabilityRequest,
-  persistAssistantStatus: (text: string) => Promise<void>
+  persistAssistantStatus: (text: string) => Promise<void>,
+  suggestedName = `${request.name}-2`
 ) {
   body.innerHTML = '';
   const panel = document.createElement('section');
@@ -1655,7 +1810,7 @@ function renderPluginConflictResolution(
   const input = document.createElement('input');
   input.className = 'plugin-name-input';
   input.type = 'text';
-  input.value = `${request.name}-2`;
+  input.value = suggestedName;
   input.placeholder = 'New plugin name';
   input.spellcheck = false;
   panel.appendChild(input);
@@ -1761,6 +1916,7 @@ function formatThinkingPreview(text: string) {
 }
 
 function showConversation() {
+  mainViewRevision += 1;
   shell?.classList.remove('pre-chat');
   shell?.classList.remove('plugin-view');
   selectedPluginId = '';

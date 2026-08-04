@@ -3,8 +3,7 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -20,25 +19,35 @@ const KEYRING_SERVICE: &str = "ai.raynard";
 #[derive(Default)]
 struct StreamCancelState {
     canceled: Mutex<HashSet<String>>,
+    process_ids: Mutex<HashMap<String, u32>>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LlmEnvStatus {
     found: bool,
     path: Option<String>,
     keys: Vec<String>,
     provider: String,
     model: String,
+    coding_provider: String,
+    coding_model: String,
     configured: bool,
+    coding_configured: bool,
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ModelProvider {
     id: String,
     name: String,
     base_url: String,
-    default_model: String,
-    active: bool,
+    default_chat_model: String,
+    default_coding_model: String,
+    chat_model: String,
+    coding_model: String,
+    chat_active: bool,
+    coding_active: bool,
     connected: bool,
 }
 
@@ -50,6 +59,9 @@ struct ModelProviderList {
 #[derive(Deserialize, Default, Serialize)]
 struct AppConfig {
     active_provider: Option<String>,
+    active_model: Option<String>,
+    active_coding_provider: Option<String>,
+    active_coding_model: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -62,6 +74,10 @@ struct StoredChatMessage {
     model: Option<String>,
     status: Option<String>,
     error: Option<String>,
+    #[serde(rename = "builderRun", default)]
+    builder_run: Option<bool>,
+    #[serde(rename = "builderActivities", default)]
+    builder_activities: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -109,6 +125,14 @@ struct PluginScaffoldRequest {
     description: String,
     source_urls: Option<Vec<String>>,
     conflict_strategy: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginScaffoldStatus {
+    normalized_name: String,
+    exists: bool,
+    next_available_name: String,
 }
 
 #[derive(Deserialize)]
@@ -173,6 +197,7 @@ struct GeneratedPluginDetail {
 #[tauri::command]
 fn load_llm_env_status(app: tauri::AppHandle) -> Result<LlmEnvStatus, String> {
     let config = resolve_model_config(Some(&app))?;
+    let coding_config = resolve_coding_model_config(Some(&app))?;
     let env_path = find_env_file();
     let Some(path) = env_path else {
         return Ok(LlmEnvStatus {
@@ -181,7 +206,10 @@ fn load_llm_env_status(app: tauri::AppHandle) -> Result<LlmEnvStatus, String> {
             keys: Vec::new(),
             provider: config.provider,
             model: config.model,
+            coding_provider: coding_config.provider,
+            coding_model: coding_config.model,
             configured: !config.api_key.is_empty(),
+            coding_configured: !coding_config.api_key.is_empty(),
         });
     };
 
@@ -196,7 +224,10 @@ fn load_llm_env_status(app: tauri::AppHandle) -> Result<LlmEnvStatus, String> {
         keys: entries.keys().cloned().collect(),
         provider: config.provider,
         model: config.model,
+        coding_provider: coding_config.provider,
+        coding_model: coding_config.model,
         configured: !config.api_key.is_empty(),
+        coding_configured: !coding_config.api_key.is_empty(),
     })
 }
 
@@ -372,6 +403,15 @@ fn cancel_model_chat_stream(
         .lock()
         .map_err(|_| "Could not lock stream cancel state.".to_string())?
         .insert(stream_id.to_string());
+    let process_id = state
+        .process_ids
+        .lock()
+        .map_err(|_| "Could not lock stream process state.".to_string())?
+        .get(stream_id)
+        .copied();
+    if let Some(process_id) = process_id {
+        terminate_process(process_id);
+    }
     Ok(())
 }
 
@@ -437,6 +477,21 @@ fn read_generated_plugin(
 fn delete_generated_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
     fs::remove_dir_all(plugin_dir).map_err(|error| format!("Could not delete plugin: {error}"))
+}
+
+#[tauri::command]
+fn get_plugin_scaffold_status(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<PluginScaffoldStatus, String> {
+    let root = generated_plugins_dir(&app)?;
+    ensure_dir(&root)?;
+    let normalized_name = normalize_plugin_slug(&name);
+    Ok(PluginScaffoldStatus {
+        exists: root.join(&normalized_name).exists(),
+        next_available_name: next_available_plugin_slug(&root, &normalized_name),
+        normalized_name,
+    })
 }
 
 #[tauri::command]
@@ -573,16 +628,17 @@ async fn run_plugin_builder_stream(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, StreamCancelState>,
     stream_id: String,
-    on_event: Channel<StreamEvent>,
+    on_event: Channel<BuilderStreamEvent>,
     request: PluginBuilderRequest,
 ) -> Result<ChatReply, String> {
-    let config = resolve_model_config(Some(&app))?;
+    let config = resolve_coding_model_config(Some(&app))?;
     if config.api_key.is_empty() {
         return Err("Save a model API key before running Build mode.".to_string());
     }
 
     let plugin_dir = validate_generated_plugin_dir(&app, &request.plugin_dir)?;
     let sidecar_path = resolve_plugin_builder_sidecar_path()?;
+    let plugin_runner_path = resolve_plugin_tool_runner_path()?;
     let sidecar_request = json!({
         "pluginDir": plugin_dir.to_string_lossy().to_string(),
         "name": request.name,
@@ -592,7 +648,8 @@ async fn run_plugin_builder_stream(
         "provider": config.provider,
         "baseUrl": config.base_url,
         "model": config.model,
-        "apiKey": config.api_key
+        "apiKey": config.api_key,
+        "pluginRunnerPath": plugin_runner_path.to_string_lossy().to_string()
     });
 
     let mut child = Command::new("node")
@@ -603,6 +660,7 @@ async fn run_plugin_builder_stream(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("Could not start plugin builder sidecar: {error}"))?;
+    register_stream_process(&cancel_state, &stream_id, child.id())?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let raw = serde_json::to_vec(&sidecar_request)
@@ -613,7 +671,7 @@ async fn run_plugin_builder_stream(
             .map_err(|error| format!("Could not send request to plugin builder: {error}"))?;
     }
 
-    emit_stream_event(
+    emit_builder_stream_event(
         &on_event,
         StreamEvent {
             stream_id: stream_id.clone(),
@@ -642,7 +700,7 @@ async fn run_plugin_builder_stream(
             } else {
                 answer
             };
-            emit_stream_event(
+            emit_builder_stream_event(
                 &on_event,
                 StreamEvent {
                     stream_id: stream_id.clone(),
@@ -673,7 +731,7 @@ async fn run_plugin_builder_stream(
                     continue;
                 }
                 answer.push_str(delta);
-                emit_stream_event(
+                emit_builder_stream_event(
                     &on_event,
                     StreamEvent {
                         stream_id: stream_id.clone(),
@@ -686,7 +744,58 @@ async fn run_plugin_builder_stream(
                     },
                 );
             }
-            "tool_call" | "tool_execution_start" | "tool_execution_end" | "status" => {
+            "thinking_delta" => {
+                let delta = payload.get("delta").and_then(Value::as_str).unwrap_or("");
+                if delta.is_empty() {
+                    continue;
+                }
+                emit_builder_stream_event(
+                    &on_event,
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type: "thinking_delta".to_string(),
+                        delta: Some(delta.to_string()),
+                        text: None,
+                        error: None,
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                );
+            }
+            "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+                let tool_call_id = payload
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let tool_name = payload
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if tool_call_id.is_empty() || tool_name.is_empty() {
+                    continue;
+                }
+                let event_type = event_type.to_string();
+                let _ = on_event.send(BuilderStreamEvent {
+                    base: StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type,
+                        delta: None,
+                        text: None,
+                        error: None,
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                    tool_call_id: Some(tool_call_id),
+                    tool_name: Some(tool_name),
+                    args: payload.get("args").cloned(),
+                    partial_result: payload.get("partialResult").cloned(),
+                    result: payload.get("result").cloned(),
+                    is_error: payload.get("isError").and_then(Value::as_bool),
+                });
+            }
+            "status" => {
                 let tool_name = payload
                     .get("toolName")
                     .and_then(Value::as_str)
@@ -700,7 +809,7 @@ async fn run_plugin_builder_stream(
                 } else {
                     format!("{status}: {tool_name}\n")
                 };
-                emit_stream_event(
+                emit_builder_stream_event(
                     &on_event,
                     StreamEvent {
                         stream_id: stream_id.clone(),
@@ -725,7 +834,7 @@ async fn run_plugin_builder_stream(
                     .and_then(Value::as_str)
                     .unwrap_or("Plugin builder failed.")
                     .to_string();
-                emit_stream_event(
+                emit_builder_stream_event(
                     &on_event,
                     StreamEvent {
                         stream_id: stream_id.clone(),
@@ -737,6 +846,8 @@ async fn run_plugin_builder_stream(
                         model: Some(config.model.clone()),
                     },
                 );
+                let _ = child.kill();
+                clear_stream_canceled(&cancel_state, &stream_id);
                 return Err(error);
             }
             _ => {}
@@ -746,7 +857,32 @@ async fn run_plugin_builder_stream(
     let status = child
         .wait()
         .map_err(|error| format!("Could not read plugin builder exit status: {error}"))?;
+    let was_canceled = is_stream_canceled(&cancel_state, &stream_id);
     clear_stream_canceled(&cancel_state, &stream_id);
+    if was_canceled {
+        let content = if answer.trim().is_empty() {
+            "Plugin builder stopped.".to_string()
+        } else {
+            answer
+        };
+        emit_builder_stream_event(
+            &on_event,
+            StreamEvent {
+                stream_id,
+                event_type: "done".to_string(),
+                delta: None,
+                text: Some(content.clone()),
+                error: None,
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()),
+            },
+        );
+        return Ok(ChatReply {
+            content,
+            provider: config.provider,
+            model: config.model,
+        });
+    }
     if !status.success() {
         return Err(format!("Plugin builder exited with {status}."));
     }
@@ -756,7 +892,7 @@ async fn run_plugin_builder_stream(
     } else {
         answer
     };
-    emit_stream_event(
+    emit_builder_stream_event(
         &on_event,
         StreamEvent {
             stream_id: stream_id.clone(),
@@ -788,6 +924,8 @@ fn save_provider_api_key(
     app: tauri::AppHandle,
     provider_id: String,
     api_key: String,
+    role: Option<String>,
+    model: Option<String>,
 ) -> Result<ModelProviderList, String> {
     let provider_id = canonical_provider_id(&provider_id);
     if provider_preset(&provider_id).is_none() {
@@ -803,11 +941,11 @@ fn save_provider_api_key(
         .set_password(cleaned_key)
         .map_err(|error| format!("Could not store API key in the OS keychain: {error}"))?;
 
-    save_app_config(
+    save_role_model_config(
         &app,
-        AppConfig {
-            active_provider: Some(provider_id),
-        },
+        &role.unwrap_or_else(|| "chat".to_string()),
+        &provider_id,
+        model,
     )?;
 
     list_model_providers(app)
@@ -818,6 +956,16 @@ fn set_active_provider(
     app: tauri::AppHandle,
     provider_id: String,
 ) -> Result<ModelProviderList, String> {
+    set_active_model_provider(app, provider_id, "chat".to_string(), None)
+}
+
+#[tauri::command]
+fn set_active_model_provider(
+    app: tauri::AppHandle,
+    provider_id: String,
+    role: String,
+    model: Option<String>,
+) -> Result<ModelProviderList, String> {
     let provider_id = canonical_provider_id(&provider_id);
     if provider_preset(&provider_id).is_none() {
         return Err(format!("Unsupported provider: {provider_id}"));
@@ -827,12 +975,7 @@ fn set_active_provider(
         return Err("Save an API key for this provider first.".to_string());
     }
 
-    save_app_config(
-        &app,
-        AppConfig {
-            active_provider: Some(provider_id),
-        },
-    )?;
+    save_role_model_config(&app, &role, &provider_id, model)?;
 
     list_model_providers(app)
 }
@@ -850,6 +993,15 @@ struct ChatReply {
     model: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MainAgentReply {
+    content: String,
+    provider: String,
+    model: String,
+    build_request: Option<Value>,
+}
+
 #[derive(Serialize, Clone)]
 struct StreamEvent {
     stream_id: String,
@@ -859,6 +1011,33 @@ struct StreamEvent {
     error: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct BuilderStreamEvent {
+    #[serde(flatten)]
+    base: StreamEvent,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    args: Option<Value>,
+    partial_result: Option<Value>,
+    result: Option<Value>,
+    is_error: Option<bool>,
+}
+
+#[derive(Serialize, Clone)]
+struct MainAgentStreamEvent {
+    stream_id: String,
+    event_type: String,
+    delta: Option<String>,
+    text: Option<String>,
+    error: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    tool_name: Option<String>,
+    args: Option<Value>,
+    result: Option<Value>,
+    build_request: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -874,7 +1053,8 @@ struct ProviderPreset {
     id: &'static str,
     name: &'static str,
     base_url: &'static str,
-    default_model: &'static str,
+    default_chat_model: &'static str,
+    default_coding_model: &'static str,
     api_key_names: &'static [&'static str],
 }
 
@@ -947,6 +1127,233 @@ async fn run_model_chat(
         },
         provider: config.provider,
         model: config.model,
+    })
+}
+
+#[tauri::command]
+async fn run_main_agent_stream(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, StreamCancelState>,
+    stream_id: String,
+    on_event: Channel<MainAgentStreamEvent>,
+    messages: Vec<ChatMessage>,
+    mode: String,
+) -> Result<MainAgentReply, String> {
+    let config = resolve_model_config(Some(&app))?;
+    if config.api_key.is_empty() {
+        return Err("Save a chat model API key before running the agent.".to_string());
+    }
+
+    let sidecar_path = resolve_main_agent_sidecar_path()?;
+    let plugin_runner_path = resolve_plugin_tool_runner_path()?;
+    let plugin_root = generated_plugins_dir(&app)?;
+    ensure_dir(&plugin_root)?;
+    let mut plugins = Vec::new();
+    for entry in fs::read_dir(&plugin_root)
+        .map_err(|error| format!("Could not read generated plugins: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = plugin_dir.join("plugin.json");
+        let Some(mut plugin) = read_generated_plugin_manifest(&plugin_dir, &manifest_path) else {
+            continue;
+        };
+        enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
+        plugins.push(
+            serde_json::to_value(plugin)
+                .map_err(|error| format!("Could not serialize generated plugin: {error}"))?,
+        );
+    }
+    let sidecar_request = json!({
+        "messages": messages
+            .iter()
+            .map(|message| json!({ "role": message.role, "content": message.content }))
+            .collect::<Vec<_>>(),
+        "mode": if mode.trim().eq_ignore_ascii_case("build") { "build" } else { "explore" },
+        "provider": config.provider,
+        "baseUrl": config.base_url,
+        "model": config.model,
+        "apiKey": config.api_key,
+        "pluginRunnerPath": plugin_runner_path.to_string_lossy().to_string(),
+        "plugins": plugins
+    });
+
+    let mut child = Command::new("node")
+        .arg(sidecar_path)
+        .current_dir(
+            env::current_dir()
+                .map_err(|error| format!("Could not read current directory: {error}"))?,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start main agent sidecar: {error}"))?;
+    register_stream_process(&cancel_state, &stream_id, child.id())?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let raw = serde_json::to_vec(&sidecar_request)
+            .map_err(|error| format!("Could not serialize main agent request: {error}"))?;
+        stdin
+            .write_all(&raw)
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|error| format!("Could not send request to main agent: {error}"))?;
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Main agent stdout was unavailable.".to_string())?;
+    let reader = BufReader::new(stdout);
+    let mut answer = String::new();
+    let mut build_request = None;
+
+    for line in reader.lines() {
+        if is_stream_canceled(&cancel_state, &stream_id) {
+            let _ = child.kill();
+            clear_stream_canceled(&cancel_state, &stream_id);
+            let content = if answer.trim().is_empty() {
+                "Stopped.".to_string()
+            } else {
+                answer
+            };
+            let _ = on_event.send(MainAgentStreamEvent {
+                stream_id: stream_id.clone(),
+                event_type: "done".to_string(),
+                delta: None,
+                text: Some(content.clone()),
+                error: None,
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()),
+                tool_name: None,
+                args: None,
+                result: None,
+                build_request: None,
+            });
+            return Ok(MainAgentReply {
+                content,
+                provider: config.provider,
+                model: config.model,
+                build_request,
+            });
+        }
+
+        let line = line.map_err(|error| format!("Main agent stream failed: {error}"))?;
+        let Ok(payload) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let delta = payload
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if event_type == "delta" {
+            if let Some(value) = delta.as_deref() {
+                answer.push_str(value);
+            }
+        }
+        if event_type == "done" && answer.trim().is_empty() {
+            answer = payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+        }
+        if event_type == "build_request" {
+            build_request = payload.get("buildRequest").cloned();
+        }
+        if event_type == "error" {
+            let error = payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Main agent failed.")
+                .to_string();
+            let _ = on_event.send(MainAgentStreamEvent {
+                stream_id: stream_id.clone(),
+                event_type: "error".to_string(),
+                delta: None,
+                text: None,
+                error: Some(error.clone()),
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()),
+                tool_name: None,
+                args: None,
+                result: None,
+                build_request: None,
+            });
+            let _ = child.kill();
+            clear_stream_canceled(&cancel_state, &stream_id);
+            return Err(error);
+        }
+
+        let _ = on_event.send(MainAgentStreamEvent {
+            stream_id: stream_id.clone(),
+            event_type: event_type.to_string(),
+            delta,
+            text: payload
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error: payload
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            provider: Some(config.provider.clone()),
+            model: Some(config.model.clone()),
+            tool_name: payload
+                .get("toolName")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            args: payload.get("args").cloned(),
+            result: payload.get("result").cloned(),
+            build_request: payload.get("buildRequest").cloned(),
+        });
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not read main agent exit status: {error}"))?;
+    let was_canceled = is_stream_canceled(&cancel_state, &stream_id);
+    clear_stream_canceled(&cancel_state, &stream_id);
+    if was_canceled {
+        let content = if answer.trim().is_empty() {
+            "Stopped.".to_string()
+        } else {
+            answer
+        };
+        let _ = on_event.send(MainAgentStreamEvent {
+            stream_id,
+            event_type: "done".to_string(),
+            delta: None,
+            text: Some(content.clone()),
+            error: None,
+            provider: Some(config.provider.clone()),
+            model: Some(config.model.clone()),
+            tool_name: None,
+            args: None,
+            result: None,
+            build_request: None,
+        });
+        return Ok(MainAgentReply {
+            content,
+            provider: config.provider,
+            model: config.model,
+            build_request,
+        });
+    }
+    if !status.success() {
+        return Err(format!("Main agent exited with {status}."));
+    }
+
+    Ok(MainAgentReply {
+        content: answer,
+        provider: config.provider,
+        model: config.model,
+        build_request,
     })
 }
 
@@ -1158,6 +1565,18 @@ fn emit_stream_event(channel: &Channel<StreamEvent>, event: StreamEvent) {
     let _ = channel.send(event);
 }
 
+fn emit_builder_stream_event(channel: &Channel<BuilderStreamEvent>, event: StreamEvent) {
+    let _ = channel.send(BuilderStreamEvent {
+        base: event,
+        tool_call_id: None,
+        tool_name: None,
+        args: None,
+        partial_result: None,
+        result: None,
+        is_error: None,
+    });
+}
+
 fn is_stream_canceled(state: &tauri::State<'_, StreamCancelState>, stream_id: &str) -> bool {
     state
         .canceled
@@ -1166,9 +1585,41 @@ fn is_stream_canceled(state: &tauri::State<'_, StreamCancelState>, stream_id: &s
         .unwrap_or(false)
 }
 
+fn register_stream_process(
+    state: &tauri::State<'_, StreamCancelState>,
+    stream_id: &str,
+    process_id: u32,
+) -> Result<(), String> {
+    state
+        .process_ids
+        .lock()
+        .map_err(|_| "Could not lock stream process state.".to_string())?
+        .insert(stream_id.to_string(), process_id);
+    Ok(())
+}
+
+fn terminate_process(process_id: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(process_id.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &process_id.to_string(), "/T", "/F"])
+            .status();
+    }
+}
+
 fn clear_stream_canceled(state: &tauri::State<'_, StreamCancelState>, stream_id: &str) {
     if let Ok(mut canceled) = state.canceled.lock() {
         canceled.remove(stream_id);
+    }
+    if let Ok(mut process_ids) = state.process_ids.lock() {
+        process_ids.remove(stream_id);
     }
 }
 
@@ -1605,6 +2056,22 @@ fn resolve_plugin_builder_sidecar_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not find scripts/plugin-builder-sidecar.mjs.".to_string())
 }
 
+fn resolve_main_agent_sidecar_path() -> Result<PathBuf, String> {
+    let current =
+        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
+    let candidates = [
+        current.join("scripts").join("main-agent-sidecar.mjs"),
+        current
+            .join("..")
+            .join("scripts")
+            .join("main-agent-sidecar.mjs"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "Could not find scripts/main-agent-sidecar.mjs.".to_string())
+}
+
 fn resolve_plugin_tool_runner_path() -> Result<PathBuf, String> {
     let current =
         env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
@@ -1932,11 +2399,26 @@ export default {{
 // - Write TypeScript API/client/tool code only.
 // - Do not create React components, pages, routes, CSS, or visual explorer UI.
 // - The runtime UI is Raynard chat; this plugin feeds explore mode with citeable API data.
+// - Treat source API documentation as a whole API surface, not only the latest narrow user query.
+// - Build practical coverage for important endpoints/resources with small focused tools.
+// - If only a subset is implemented, document the broader endpoint inventory and future tool plan in README.md.
 // - Every tool definition must include a specific description and JSON parameter schema.
 // - Tool descriptions are injected into the Explore-mode prompt so the agent can choose the right generated plugin.
 // - Descriptions should state what question the tool answers, what API data it fetches, and important limits or follow-up tools.
 // - Every tool result must include references created through createApiReference().
 // - Keep credentials out of source. Read them from the runtime context when needed.
+//
+// Canonical tool shape (every tool MUST follow this; only endpoints/params differ):
+//   export const tools = {{
+//     <tool_name>: {{
+//       description: '...',
+//       parameters: {{ type: 'object', required: [...], properties: {{ ... }} }},
+//       async execute(args) {{ return {{ text, references: [createApiReference(...)] }}; }}
+//     }}
+//   }};
+// The runtime invokes each tool as tools[name].execute(args). The callable MUST be
+// named exactly 'execute' — never 'handler', 'run', 'call', or a default-export function.
+// 'tools' is keyed by the exact tool name. Put network calls in client.ts helpers.
 
 export type ApiReference = {{
   id: string;
@@ -1986,7 +2468,7 @@ fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) ->
             .collect::<String>()
     };
     format!(
-        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n",
+        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## API Surface Contract\n\nTreat the source API documentation as a whole API surface, not only the latest narrow user query. Build a practical suite of small, focused tools for important endpoints/resources such as list/search, detail-by-id, user/profile/account, metadata/status, and update/history endpoints when available. If only a subset is implemented, keep an `Endpoint Inventory` in this README that records each relevant endpoint path, purpose, required and optional parameters, response shape summary, pagination/rate-limit notes, status (`Implemented`, `Planned`, or `Not applicable`), and the future tool that should expose it.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n",
         plugin_display_name(slug),
         description,
         source_block
@@ -2043,6 +2525,8 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                     .error
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                builder_run: message.builder_run,
+                builder_activities: message.builder_activities,
             })
         })
         .collect()
@@ -2081,7 +2565,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
             id: "openai",
             name: "OpenAI",
             base_url: "https://api.openai.com/v1",
-            default_model: "gpt-4.1-mini",
+            default_chat_model: "gpt-4.1-mini",
+            default_coding_model: "gpt-4.1-mini",
             api_key_names: &[
                 "STOCKBOT_MODEL_API_KEY",
                 "STOCKBOT_OPENAI_API_KEY",
@@ -2092,7 +2577,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
             id: "claude",
             name: "Claude",
             base_url: "https://api.anthropic.com/v1",
-            default_model: "claude-3-5-sonnet-latest",
+            default_chat_model: "claude-3-5-sonnet-latest",
+            default_coding_model: "claude-3-5-sonnet-latest",
             api_key_names: &[
                 "STOCKBOT_MODEL_API_KEY",
                 "STOCKBOT_CLAUDE_API_KEY",
@@ -2103,7 +2589,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
             id: "moonshot",
             name: "Moonshot / Kimi",
             base_url: "https://api.moonshot.ai/v1",
-            default_model: "kimi-k2.5",
+            default_chat_model: "kimi-k2.5",
+            default_coding_model: "kimi-k3",
             api_key_names: &[
                 "STOCKBOT_MODEL_API_KEY",
                 "STOCKBOT_MOONSHOT_API_KEY",
@@ -2115,7 +2602,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
             id: "kimi-coding",
             name: "Kimi Coding",
             base_url: "https://api.kimi.com/coding/",
-            default_model: "k2p5",
+            default_chat_model: "k2p5",
+            default_coding_model: "k2p5",
             api_key_names: &[
                 "STOCKBOT_MODEL_API_KEY",
                 "STOCKBOT_KIMI_API_KEY",
@@ -2141,22 +2629,51 @@ fn canonical_provider_id(provider_id: &str) -> String {
 fn provider_presets(app: &tauri::AppHandle) -> Result<Vec<ModelProvider>, String> {
     let config = load_app_config(app)?;
     let entries = read_env_file()?;
-    let active_provider = config
+    let active_chat_provider = config
         .active_provider
         .as_deref()
         .map(canonical_provider_id)
         .unwrap_or_else(|| "moonshot".to_string());
+    let active_coding_provider = config
+        .active_coding_provider
+        .as_deref()
+        .map(canonical_provider_id)
+        .unwrap_or_else(|| active_chat_provider.clone());
 
     ["openai", "claude", "moonshot"]
         .iter()
         .map(|provider_id| {
             let preset = provider_preset(provider_id).expect("static provider should exist");
+            let chat_model = if active_chat_provider == preset.id {
+                config
+                    .active_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(preset.default_chat_model)
+            } else {
+                preset.default_chat_model
+            };
+            let coding_model = if active_coding_provider == preset.id {
+                config
+                    .active_coding_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(preset.default_coding_model)
+            } else {
+                preset.default_coding_model
+            };
             Ok(ModelProvider {
                 id: preset.id.to_string(),
                 name: preset.name.to_string(),
                 base_url: preset.base_url.to_string(),
-                default_model: preset.default_model.to_string(),
-                active: active_provider == preset.id,
+                default_chat_model: preset.default_chat_model.to_string(),
+                default_coding_model: preset.default_coding_model.to_string(),
+                chat_model: chat_model.to_string(),
+                coding_model: coding_model.to_string(),
+                chat_active: active_chat_provider == preset.id,
+                coding_active: active_coding_provider == preset.id,
                 connected: !read_provider_api_key(preset.id).is_empty()
                     || !first_env_value(&entries, preset.api_key_names).is_empty(),
             })
@@ -2192,6 +2709,38 @@ fn save_app_config(app: &tauri::AppHandle, config: AppConfig) -> Result<(), Stri
     let raw = serde_json::to_string_pretty(&config)
         .map_err(|error| format!("Could not serialize app config: {error}"))?;
     fs::write(path, raw).map_err(|error| format!("Could not write app config: {error}"))
+}
+
+fn save_role_model_config(
+    app: &tauri::AppHandle,
+    role: &str,
+    provider_id: &str,
+    model: Option<String>,
+) -> Result<(), String> {
+    let mut config = load_app_config(app)?;
+    let preset = provider_preset(provider_id)
+        .ok_or_else(|| format!("Unsupported provider: {provider_id}"))?;
+    let cleaned_model = model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    match role.trim().to_lowercase().as_str() {
+        "coding" | "build" => {
+            config.active_coding_provider = Some(provider_id.to_string());
+            config.active_coding_model =
+                Some(cleaned_model.unwrap_or_else(|| preset.default_coding_model.to_string()));
+        }
+        "chat" | "explore" => {
+            config.active_provider = Some(provider_id.to_string());
+            config.active_model =
+                Some(cleaned_model.unwrap_or_else(|| preset.default_chat_model.to_string()));
+        }
+        _ => return Err("Model role must be chat or coding.".to_string()),
+    }
+
+    save_app_config(app, config)
 }
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
@@ -2242,14 +2791,46 @@ fn first_env_value(entries: &BTreeMap<String, String>, keys: &[&str]) -> String 
 }
 
 fn resolve_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, String> {
+    resolve_model_config_for_role(app, "chat")
+}
+
+fn resolve_coding_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, String> {
+    resolve_model_config_for_role(app, "coding")
+}
+
+fn resolve_model_config_for_role(
+    app: Option<&tauri::AppHandle>,
+    role: &str,
+) -> Result<ModelConfig, String> {
     let entries = read_env_file()?;
-    let env_provider = first_env_value(
-        &entries,
-        &["STOCKBOT_DEFAULT_PROVIDER", "STOCKBOT_MODEL_PROVIDER"],
-    );
-    let app_provider = app
-        .and_then(|handle| load_app_config(handle).ok())
-        .and_then(|config| config.active_provider);
+    let is_coding = matches!(role, "coding" | "build");
+    let env_provider = if is_coding {
+        first_env_value(
+            &entries,
+            &[
+                "STOCKBOT_CODING_PROVIDER",
+                "STOCKBOT_BUILD_PROVIDER",
+                "STOCKBOT_DEFAULT_PROVIDER",
+                "STOCKBOT_MODEL_PROVIDER",
+            ],
+        )
+    } else {
+        first_env_value(
+            &entries,
+            &["STOCKBOT_DEFAULT_PROVIDER", "STOCKBOT_MODEL_PROVIDER"],
+        )
+    };
+    let app_config = app.and_then(|handle| load_app_config(handle).ok());
+    let app_provider = app_config.as_ref().and_then(|config| {
+        if is_coding {
+            config
+                .active_coding_provider
+                .clone()
+                .or_else(|| config.active_provider.clone())
+        } else {
+            config.active_provider.clone()
+        }
+    });
     let configured_provider = app_provider.clone().unwrap_or(env_provider);
     let provider = canonical_provider_id(&configured_provider);
     let preset = provider_preset(&provider)
@@ -2257,16 +2838,53 @@ fn resolve_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, S
     let keyring_api_key = read_provider_api_key(preset.id);
     let env_api_key = first_env_value(&entries, preset.api_key_names);
 
-    let configured_base_url = first_env_value(&entries, &["STOCKBOT_MODEL_BASE_URL"]);
+    let configured_base_url = if is_coding {
+        first_env_value(
+            &entries,
+            &[
+                "STOCKBOT_CODING_BASE_URL",
+                "STOCKBOT_BUILD_BASE_URL",
+                "STOCKBOT_MODEL_BASE_URL",
+            ],
+        )
+    } else {
+        first_env_value(&entries, &["STOCKBOT_MODEL_BASE_URL"])
+    };
     let provider_model_keys = match preset.id {
         "openai" => &["OPENAI_MODEL"][..],
         "claude" => &["ANTHROPIC_MODEL", "CLAUDE_MODEL"][..],
         "moonshot" => &["MOONSHOT_MODEL", "KIMI_MODEL"][..],
         _ => &[][..],
     };
-    let configured_model = first_env_value(&entries, provider_model_keys);
+    let configured_model = app_config
+        .as_ref()
+        .and_then(|config| {
+            if is_coding {
+                config.active_coding_model.clone()
+            } else {
+                config.active_model.clone()
+            }
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if is_coding {
+                first_env_value(
+                    &entries,
+                    &[
+                        "STOCKBOT_CODING_MODEL",
+                        "STOCKBOT_BUILD_MODEL",
+                        "KIMI_CODING_MODEL",
+                    ],
+                )
+            } else {
+                first_env_value(&entries, provider_model_keys)
+            }
+        });
     let legacy_configured_model = if app_provider.is_some() {
         String::new()
+    } else if is_coding {
+        first_env_value(&entries, &["STOCKBOT_CODING_MODEL", "STOCKBOT_BUILD_MODEL"])
     } else {
         first_env_value(&entries, &["STOCKBOT_DEFAULT_MODEL"])
     };
@@ -2284,7 +2902,11 @@ fn resolve_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, S
             configured_base_url.trim_end_matches('/').to_string()
         },
         model: if configured_model.is_empty() {
-            preset.default_model.to_string()
+            if is_coding {
+                preset.default_coding_model.to_string()
+            } else {
+                preset.default_chat_model.to_string()
+            }
         } else {
             configured_model
         },
@@ -2294,6 +2916,87 @@ fn resolve_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, S
             keyring_api_key
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
+        BuilderStreamEvent, StoredChatMessage, StreamEvent,
+    };
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn plugin_slug_and_conflict_name_are_deterministic() {
+        assert_eq!(
+            normalize_plugin_slug(" Hacker News API "),
+            "hacker-news-api"
+        );
+
+        let root = std::env::temp_dir().join(format!("raynard-plugin-status-{}", now_millis()));
+        fs::create_dir_all(root.join("hacker-news")).expect("create first plugin");
+        fs::create_dir_all(root.join("hacker-news-2")).expect("create second plugin");
+        assert_eq!(
+            next_available_plugin_slug(&root, "hacker-news"),
+            "hacker-news-3"
+        );
+        fs::remove_dir_all(root).expect("remove test plugin root");
+    }
+
+    #[test]
+    fn builder_events_serialize_native_pi_tool_fields() {
+        let value = serde_json::to_value(BuilderStreamEvent {
+            base: StreamEvent {
+                stream_id: "builder-1".to_string(),
+                event_type: "tool_execution_start".to_string(),
+                delta: None,
+                text: None,
+                error: None,
+                provider: Some("moonshot".to_string()),
+                model: Some("kimi-k3".to_string()),
+            },
+            tool_call_id: Some("call-1".to_string()),
+            tool_name: Some("write".to_string()),
+            args: Some(json!({ "path": "src/index.ts" })),
+            partial_result: None,
+            result: None,
+            is_error: None,
+        })
+        .expect("serialize builder stream event");
+
+        assert_eq!(value["stream_id"], "builder-1");
+        assert_eq!(value["tool_call_id"], "call-1");
+        assert_eq!(value["tool_name"], "write");
+        assert_eq!(value["args"]["path"], "src/index.ts");
+    }
+
+    #[test]
+    fn chat_normalization_preserves_builder_activity() {
+        let activities = json!([{
+            "toolCallId": "call-1",
+            "toolName": "write",
+            "args": { "path": "src/index.ts" },
+            "status": "complete",
+            "output": "Wrote file",
+            "isError": false
+        }]);
+        let normalized = normalize_stored_messages(vec![StoredChatMessage {
+            role: "assistant".to_string(),
+            text: "Plugin built.".to_string(),
+            timestamp: 1,
+            thinking: None,
+            provider: None,
+            model: None,
+            status: Some("completed".to_string()),
+            error: None,
+            builder_run: Some(true),
+            builder_activities: Some(activities.clone()),
+        }]);
+
+        assert_eq!(normalized[0].builder_run, Some(true));
+        assert_eq!(normalized[0].builder_activities, Some(activities));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2306,18 +3009,21 @@ pub fn run() {
             delete_chat_history,
             delete_generated_plugin,
             execute_generated_plugin_tool,
+            get_plugin_scaffold_status,
             load_llm_env_status,
             list_generated_plugins,
             list_chat_history,
             list_model_providers,
             read_generated_plugin,
             read_chat_history,
+            run_main_agent_stream,
             run_plugin_builder_stream,
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,
             save_provider_api_key,
             scaffold_plugin_capability,
+            set_active_model_provider,
             set_active_provider
         ])
         .run(tauri::generate_context!())

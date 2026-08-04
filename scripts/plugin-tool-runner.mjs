@@ -1,6 +1,6 @@
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
@@ -36,24 +36,50 @@ if (!toolName && !listTools) {
   process.exit(1);
 }
 
-const sourcePath = join(pluginDir, 'index.ts');
-const source = await import('node:fs/promises').then((fs) => fs.readFile(sourcePath, 'utf8'));
-const transpiled = ts.transpileModule(source, {
-  compilerOptions: {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ES2022,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    esModuleInterop: true,
-    skipLibCheck: true
-  },
-  fileName: sourcePath
-}).outputText;
-
 const tempDir = await mkdtemp(join(tmpdir(), 'raynard-plugin-tool-'));
-const modulePath = join(tempDir, 'plugin.mjs');
+const modulePath = join(tempDir, 'index.js');
+
+async function preparePluginModuleDirectory(sourceDir, targetDir) {
+  const entries = await readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const sourcePath = join(sourceDir, entry.name);
+    const targetPath = join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      await mkdir(targetPath, { recursive: true });
+      await preparePluginModuleDirectory(sourcePath, targetPath);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+
+    const extension = extname(entry.name).toLowerCase();
+    if (extension === '.ts') {
+      if (/\.(?:test|spec)\.ts$/i.test(entry.name)) continue;
+      const source = await readFile(sourcePath, 'utf8');
+      const transpiled = ts.transpileModule(source, {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.ES2022,
+          moduleResolution: ts.ModuleResolutionKind.NodeNext,
+          esModuleInterop: true,
+          skipLibCheck: true
+        },
+        fileName: sourcePath
+      }).outputText;
+      const javascriptPath = targetPath.slice(0, -3) + '.js';
+      await writeFile(javascriptPath, transpiled, 'utf8');
+      await writeFile(targetPath, transpiled, 'utf8');
+      continue;
+    }
+    if (['.js', '.mjs', '.json'].includes(extension)) {
+      await copyFile(sourcePath, targetPath);
+    }
+  }
+}
 
 try {
-  await writeFile(modulePath, transpiled, 'utf8');
+  await writeFile(join(tempDir, 'package.json'), '{"type":"module"}\n', 'utf8');
+  await preparePluginModuleDirectory(pluginDir, tempDir);
   const loaded = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const plugin = loaded.default || loaded;
   if (listTools) {
@@ -68,7 +94,8 @@ try {
           parameters:
             definition && definition.parameters && typeof definition.parameters === 'object'
               ? definition.parameters
-              : { type: 'object', properties: {} }
+              : { type: 'object', properties: {} },
+          callable: Boolean(definition && typeof definition.execute === 'function')
         }))
       }
     });
