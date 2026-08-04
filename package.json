@@ -16,6 +16,7 @@
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.73.1",
     "@mariozechner/pi-ai": "^0.73.1",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
     "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {

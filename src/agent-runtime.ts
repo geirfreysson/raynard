@@ -24,6 +24,15 @@ export type StreamPayload = {
 export type AgentStreamHandlers = {
   onDelta?: (delta: string) => void;
   onThinkingDelta?: (delta: string) => void;
+  onStreamId?: (streamId: string) => void;
+};
+
+export type PluginBuilderRequest = {
+  pluginDir: string;
+  name: string;
+  description: string;
+  sourceUrls: string[];
+  prompt: string;
 };
 
 export async function runAgentTurn(messages: ChatMessage[]): Promise<AgentReply> {
@@ -38,6 +47,7 @@ export async function runAgentTurnStream(
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `stream-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  handlers.onStreamId?.(streamId);
 
   let streamed = '';
   let provider: string | undefined;
@@ -54,6 +64,46 @@ export async function runAgentTurnStream(
     streamId,
     onEvent,
     messages
+  });
+
+  return {
+    content: reply.content || streamed,
+    provider: reply.provider ?? provider,
+    model: reply.model ?? model
+  };
+}
+
+export async function cancelAgentTurnStream(streamId: string): Promise<void> {
+  const normalized = streamId.trim();
+  if (!normalized) return;
+  await invoke('cancel_model_chat_stream', { streamId: normalized });
+}
+
+export async function runPluginBuilderStream(
+  request: PluginBuilderRequest,
+  handlers: AgentStreamHandlers = {}
+): Promise<AgentReply> {
+  const streamId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `builder-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  handlers.onStreamId?.(streamId);
+
+  let streamed = '';
+  let provider: string | undefined;
+  let model: string | undefined;
+
+  const onEvent = new Channel<StreamPayload>((payload) => {
+    const nextState = applyStreamPayload(payload, streamId, { streamed, provider, model }, handlers);
+    streamed = nextState.streamed;
+    provider = nextState.provider;
+    model = nextState.model;
+  });
+
+  const reply = await invoke<AgentReply>('run_plugin_builder_stream', {
+    streamId,
+    onEvent,
+    request
   });
 
   return {

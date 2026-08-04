@@ -4,14 +4,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    collections::HashSet,
     env, fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::ipc::Channel;
 use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "ai.raynard";
+
+#[derive(Default)]
+struct StreamCancelState {
+    canceled: Mutex<HashSet<String>>,
+}
 
 #[derive(Serialize)]
 struct LlmEnvStatus {
@@ -51,6 +60,8 @@ struct StoredChatMessage {
     thinking: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    status: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -80,6 +91,83 @@ struct ChatHistoryRow {
 struct ChatHistoryList {
     folder: String,
     chats: Vec<ChatHistoryRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentTurnLogEvent {
+    chat_id: String,
+    event_type: String,
+    timestamp: Option<i64>,
+    payload: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginScaffoldRequest {
+    name: String,
+    description: String,
+    source_urls: Option<Vec<String>>,
+    conflict_strategy: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginBuilderRequest {
+    plugin_dir: String,
+    name: String,
+    description: String,
+    source_urls: Option<Vec<String>>,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginToolRequest {
+    plugin_dir: Option<String>,
+    plugin_id: Option<String>,
+    tool_name: String,
+    args: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedPlugin {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    directory: String,
+    entry_path: String,
+    manifest_path: String,
+    created_at: String,
+    status: String,
+    tools: Vec<GeneratedPluginTool>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedPluginTool {
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedPluginList {
+    folder: String,
+    plugins: Vec<GeneratedPlugin>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedPluginDetail {
+    plugin: GeneratedPlugin,
+    manifest_json: Value,
+    manifest_text: String,
+    code: String,
+    readme: String,
 }
 
 #[tauri::command]
@@ -233,6 +321,34 @@ fn save_chat_history(
 }
 
 #[tauri::command]
+fn append_agent_turn_log(app: tauri::AppHandle, event: AgentTurnLogEvent) -> Result<(), String> {
+    let dir = agent_turn_log_dir(&app)?;
+    ensure_dir(&dir)?;
+    let safe_chat_id = normalize_chat_id(&event.chat_id);
+    let event_type = event.event_type.trim();
+    if event_type.is_empty() {
+        return Err("eventType is required.".to_string());
+    }
+    let payload = json!({
+        "chatId": safe_chat_id,
+        "eventType": event_type,
+        "timestamp": event.timestamp.unwrap_or_else(now_millis),
+        "payload": event.payload
+    });
+    let raw = serde_json::to_string(&payload)
+        .map_err(|error| format!("Could not serialize agent turn log event: {error}"))?;
+    let path = dir.join(format!("{safe_chat_id}.jsonl"));
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("Could not open agent turn log: {error}"))?;
+    file.write_all(raw.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|error| format!("Could not write agent turn log: {error}"))
+}
+
+#[tauri::command]
 fn delete_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<(), String> {
     let safe_chat_id = normalize_chat_id(&chat_id);
     let path = chat_history_path(&app, &safe_chat_id)?;
@@ -240,6 +356,424 @@ fn delete_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<(), Str
         fs::remove_file(path).map_err(|error| format!("Could not delete chat: {error}"))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn cancel_model_chat_stream(
+    state: tauri::State<StreamCancelState>,
+    stream_id: String,
+) -> Result<(), String> {
+    let stream_id = stream_id.trim();
+    if stream_id.is_empty() {
+        return Ok(());
+    }
+    state
+        .canceled
+        .lock()
+        .map_err(|_| "Could not lock stream cancel state.".to_string())?
+        .insert(stream_id.to_string());
+    Ok(())
+}
+
+#[tauri::command]
+fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, String> {
+    let dir = generated_plugins_dir(&app)?;
+    ensure_dir(&dir)?;
+    let mut plugins = Vec::new();
+
+    let entries =
+        fs::read_dir(&dir).map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = plugin_dir.join("plugin.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        if let Some(mut plugin) = read_generated_plugin_manifest(&plugin_dir, &manifest_path) {
+            enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
+            plugins.push(plugin);
+        }
+    }
+
+    plugins.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(GeneratedPluginList {
+        folder: dir.to_string_lossy().to_string(),
+        plugins,
+    })
+}
+
+#[tauri::command]
+fn read_generated_plugin(
+    app: tauri::AppHandle,
+    plugin_id: String,
+) -> Result<GeneratedPluginDetail, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let manifest_path = plugin_dir.join("plugin.json");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
+    let manifest_json: Value = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
+    let mut plugin = read_generated_plugin_manifest(&plugin_dir, &manifest_path)
+        .ok_or_else(|| "Could not read generated plugin metadata.".to_string())?;
+    enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
+    let code = fs::read_to_string(plugin_dir.join("index.ts")).unwrap_or_default();
+    let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap_or_default();
+
+    Ok(GeneratedPluginDetail {
+        plugin,
+        manifest_json,
+        manifest_text,
+        code,
+        readme,
+    })
+}
+
+#[tauri::command]
+fn delete_generated_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    fs::remove_dir_all(plugin_dir).map_err(|error| format!("Could not delete plugin: {error}"))
+}
+
+#[tauri::command]
+fn scaffold_plugin_capability(
+    app: tauri::AppHandle,
+    request: PluginScaffoldRequest,
+) -> Result<GeneratedPlugin, String> {
+    let slug = normalize_plugin_slug(&request.name);
+    let description = normalize_plugin_description(&request.description);
+    if description.is_empty() {
+        return Err("Plugin description is required.".to_string());
+    }
+
+    let root = generated_plugins_dir(&app)?;
+    ensure_dir(&root)?;
+    let conflict_strategy = request
+        .conflict_strategy
+        .as_deref()
+        .unwrap_or("error")
+        .trim()
+        .to_lowercase();
+    let slug = if conflict_strategy == "rename" {
+        next_available_plugin_slug(&root, &slug)
+    } else {
+        slug
+    };
+    let target_dir = root.join(&slug);
+    if target_dir.exists() {
+        if conflict_strategy == "replace" {
+            fs::remove_dir_all(&target_dir)
+                .map_err(|error| format!("Could not overwrite generated plugin: {error}"))?;
+        } else if conflict_strategy != "rename" {
+            return Err(format!("Generated plugin already exists: {slug}"));
+        }
+    }
+    if target_dir.exists() {
+        return Err(format!("Generated plugin already exists: {slug}"));
+    }
+
+    let temp_dir = root.join(format!(".tmp-{slug}-{}", now_millis()));
+    ensure_dir(&temp_dir)?;
+    let created_at = now_iso();
+    let source_urls = normalize_source_urls(request.source_urls.unwrap_or_default());
+    let manifest = build_plugin_manifest(&slug, &description, &created_at, &source_urls);
+    let entrypoint = build_plugin_entrypoint(&slug);
+    let readme = build_plugin_readme(&slug, &description, &source_urls);
+
+    let write_result = (|| -> Result<(), String> {
+        fs::write(temp_dir.join("plugin.json"), format!("{manifest}\n"))
+            .map_err(|error| format!("Could not write plugin manifest: {error}"))?;
+        fs::write(temp_dir.join("index.ts"), entrypoint)
+            .map_err(|error| format!("Could not write plugin entrypoint: {error}"))?;
+        fs::write(temp_dir.join("README.md"), readme)
+            .map_err(|error| format!("Could not write plugin README: {error}"))?;
+        fs::rename(&temp_dir, &target_dir)
+            .map_err(|error| format!("Could not install plugin scaffold: {error}"))?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+
+    read_generated_plugin_manifest(&target_dir, &target_dir.join("plugin.json"))
+        .ok_or_else(|| "Plugin scaffold was created but could not be read.".to_string())
+}
+
+#[tauri::command]
+async fn execute_generated_plugin_tool(
+    app: tauri::AppHandle,
+    request: PluginToolRequest,
+) -> Result<Value, String> {
+    let tool_name = request.tool_name.trim();
+    if tool_name.is_empty() {
+        return Err("toolName is required.".to_string());
+    }
+    let plugin_dir = if let Some(plugin_dir) = request.plugin_dir.as_deref() {
+        validate_generated_plugin_dir(&app, plugin_dir)?
+    } else if let Some(plugin_id) = request.plugin_id.as_deref() {
+        resolve_generated_plugin_by_id(&app, plugin_id)?
+    } else {
+        resolve_generated_plugin_by_tool(&app, tool_name)?
+    };
+
+    let runner_path = resolve_plugin_tool_runner_path()?;
+    let runner_request = json!({
+        "pluginDir": plugin_dir.to_string_lossy().to_string(),
+        "toolName": tool_name,
+        "args": request.args
+    });
+
+    let mut child = Command::new("node")
+        .arg(runner_path)
+        .current_dir(&plugin_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start plugin tool runner: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let raw = serde_json::to_vec(&runner_request)
+            .map_err(|error| format!("Could not serialize plugin tool request: {error}"))?;
+        stdin
+            .write_all(&raw)
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|error| format!("Could not send request to plugin tool runner: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not read plugin tool output: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .last()
+        .ok_or_else(|| "Plugin tool runner returned no output.".to_string())?;
+    let payload: Value = serde_json::from_str(last_line)
+        .map_err(|error| format!("Plugin tool runner returned invalid JSON: {error}"))?;
+    if payload.get("ok").and_then(Value::as_bool) != Some(true) {
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Plugin tool failed.");
+        return Err(error.to_string());
+    }
+    Ok(payload.get("result").cloned().unwrap_or_else(|| json!({})))
+}
+
+#[tauri::command]
+async fn run_plugin_builder_stream(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, StreamCancelState>,
+    stream_id: String,
+    on_event: Channel<StreamEvent>,
+    request: PluginBuilderRequest,
+) -> Result<ChatReply, String> {
+    let config = resolve_model_config(Some(&app))?;
+    if config.api_key.is_empty() {
+        return Err("Save a model API key before running Build mode.".to_string());
+    }
+
+    let plugin_dir = validate_generated_plugin_dir(&app, &request.plugin_dir)?;
+    let sidecar_path = resolve_plugin_builder_sidecar_path()?;
+    let sidecar_request = json!({
+        "pluginDir": plugin_dir.to_string_lossy().to_string(),
+        "name": request.name,
+        "description": request.description,
+        "sourceUrls": normalize_source_urls(request.source_urls.unwrap_or_default()),
+        "prompt": request.prompt,
+        "provider": config.provider,
+        "baseUrl": config.base_url,
+        "model": config.model,
+        "apiKey": config.api_key
+    });
+
+    let mut child = Command::new("node")
+        .arg(sidecar_path)
+        .current_dir(&plugin_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start plugin builder sidecar: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let raw = serde_json::to_vec(&sidecar_request)
+            .map_err(|error| format!("Could not serialize builder request: {error}"))?;
+        stdin
+            .write_all(&raw)
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|error| format!("Could not send request to plugin builder: {error}"))?;
+    }
+
+    emit_stream_event(
+        &on_event,
+        StreamEvent {
+            stream_id: stream_id.clone(),
+            event_type: "thinking_delta".to_string(),
+            delta: Some("Starting plugin builder...\n".to_string()),
+            text: None,
+            error: None,
+            provider: Some(config.provider.clone()),
+            model: Some(config.model.clone()),
+        },
+    );
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Plugin builder stdout was unavailable.".to_string())?;
+    let reader = BufReader::new(stdout);
+    let mut answer = String::new();
+
+    for line in reader.lines() {
+        if is_stream_canceled(&cancel_state, &stream_id) {
+            let _ = child.kill();
+            clear_stream_canceled(&cancel_state, &stream_id);
+            let content = if answer.trim().is_empty() {
+                "Plugin builder stopped.".to_string()
+            } else {
+                answer
+            };
+            emit_stream_event(
+                &on_event,
+                StreamEvent {
+                    stream_id: stream_id.clone(),
+                    event_type: "done".to_string(),
+                    delta: None,
+                    text: Some(content.clone()),
+                    error: None,
+                    provider: Some(config.provider.clone()),
+                    model: Some(config.model.clone()),
+                },
+            );
+            return Ok(ChatReply {
+                content,
+                provider: config.provider,
+                model: config.model,
+            });
+        }
+
+        let line = line.map_err(|error| format!("Plugin builder stream failed: {error}"))?;
+        let Ok(payload) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        match event_type {
+            "delta" => {
+                let delta = payload.get("delta").and_then(Value::as_str).unwrap_or("");
+                if delta.is_empty() {
+                    continue;
+                }
+                answer.push_str(delta);
+                emit_stream_event(
+                    &on_event,
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type: "delta".to_string(),
+                        delta: Some(delta.to_string()),
+                        text: None,
+                        error: None,
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                );
+            }
+            "tool_call" | "tool_execution_start" | "tool_execution_end" | "status" => {
+                let tool_name = payload
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let status = payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or(event_type);
+                let message = if tool_name.is_empty() {
+                    format!("{status}\n")
+                } else {
+                    format!("{status}: {tool_name}\n")
+                };
+                emit_stream_event(
+                    &on_event,
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type: "thinking_delta".to_string(),
+                        delta: Some(message),
+                        text: None,
+                        error: None,
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                );
+            }
+            "done" => {
+                let final_text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+                if answer.trim().is_empty() && !final_text.is_empty() {
+                    answer = final_text.to_string();
+                }
+            }
+            "error" => {
+                let error = payload
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Plugin builder failed.")
+                    .to_string();
+                emit_stream_event(
+                    &on_event,
+                    StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type: "error".to_string(),
+                        delta: None,
+                        text: None,
+                        error: Some(error.clone()),
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                );
+                return Err(error);
+            }
+            _ => {}
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not read plugin builder exit status: {error}"))?;
+    clear_stream_canceled(&cancel_state, &stream_id);
+    if !status.success() {
+        return Err(format!("Plugin builder exited with {status}."));
+    }
+
+    let content = if answer.trim().is_empty() {
+        "Plugin builder completed.".to_string()
+    } else {
+        answer
+    };
+    emit_stream_event(
+        &on_event,
+        StreamEvent {
+            stream_id: stream_id.clone(),
+            event_type: "done".to_string(),
+            delta: None,
+            text: Some(content.clone()),
+            error: None,
+            provider: Some(config.provider.clone()),
+            model: Some(config.model.clone()),
+        },
+    );
+
+    Ok(ChatReply {
+        content,
+        provider: config.provider,
+        model: config.model,
+    })
 }
 
 #[tauri::command]
@@ -419,6 +953,7 @@ async fn run_model_chat(
 #[tauri::command]
 async fn run_model_chat_stream(
     app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, StreamCancelState>,
     stream_id: String,
     on_event: Channel<StreamEvent>,
     messages: Vec<ChatMessage>,
@@ -459,7 +994,7 @@ async fn run_model_chat_stream(
     }
 
     if config.provider == "claude" {
-        return run_claude_chat_stream(config, stream_id, on_event, messages).await;
+        return run_claude_chat_stream(config, cancel_state, stream_id, on_event, messages).await;
     }
 
     let upstream_messages = build_upstream_messages(messages)?;
@@ -510,6 +1045,31 @@ async fn run_model_chat_stream(
     let mut stream = response.bytes_stream();
 
     while let Some(next) = stream.next().await {
+        if is_stream_canceled(&cancel_state, &stream_id) {
+            clear_stream_canceled(&cancel_state, &stream_id);
+            let content = if answer.trim().is_empty() {
+                "Stopped.".to_string()
+            } else {
+                answer
+            };
+            emit_stream_event(
+                &on_event,
+                StreamEvent {
+                    stream_id,
+                    event_type: "done".to_string(),
+                    delta: None,
+                    text: Some(content.clone()),
+                    error: None,
+                    provider: Some(config.provider.clone()),
+                    model: Some(config.model.clone()),
+                },
+            );
+            return Ok(ChatReply {
+                content,
+                provider: config.provider,
+                model: config.model,
+            });
+        }
         let chunk = next.map_err(|error| format!("Model stream failed: {error}"))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
 
@@ -576,7 +1136,7 @@ async fn run_model_chat_stream(
     emit_stream_event(
         &on_event,
         StreamEvent {
-            stream_id,
+            stream_id: stream_id.clone(),
             event_type: "done".to_string(),
             delta: None,
             text: Some(content.clone()),
@@ -585,6 +1145,7 @@ async fn run_model_chat_stream(
             model: Some(config.model.clone()),
         },
     );
+    clear_stream_canceled(&cancel_state, &stream_id);
 
     Ok(ChatReply {
         content,
@@ -595,6 +1156,20 @@ async fn run_model_chat_stream(
 
 fn emit_stream_event(channel: &Channel<StreamEvent>, event: StreamEvent) {
     let _ = channel.send(event);
+}
+
+fn is_stream_canceled(state: &tauri::State<'_, StreamCancelState>, stream_id: &str) -> bool {
+    state
+        .canceled
+        .lock()
+        .map(|canceled| canceled.contains(stream_id))
+        .unwrap_or(false)
+}
+
+fn clear_stream_canceled(state: &tauri::State<'_, StreamCancelState>, stream_id: &str) {
+    if let Ok(mut canceled) = state.canceled.lock() {
+        canceled.remove(stream_id);
+    }
 }
 
 async fn run_claude_chat(
@@ -645,6 +1220,7 @@ async fn run_claude_chat(
 
 async fn run_claude_chat_stream(
     config: ModelConfig,
+    cancel_state: tauri::State<'_, StreamCancelState>,
     stream_id: String,
     on_event: Channel<StreamEvent>,
     messages: Vec<ChatMessage>,
@@ -682,6 +1258,31 @@ async fn run_claude_chat_stream(
     let mut stream = response.bytes_stream();
 
     while let Some(next) = stream.next().await {
+        if is_stream_canceled(&cancel_state, &stream_id) {
+            clear_stream_canceled(&cancel_state, &stream_id);
+            let content = if answer.trim().is_empty() {
+                "Stopped.".to_string()
+            } else {
+                answer
+            };
+            emit_stream_event(
+                &on_event,
+                StreamEvent {
+                    stream_id,
+                    event_type: "done".to_string(),
+                    delta: None,
+                    text: Some(content.clone()),
+                    error: None,
+                    provider: Some(config.provider.clone()),
+                    model: Some(config.model.clone()),
+                },
+            );
+            return Ok(ChatReply {
+                content,
+                provider: config.provider,
+                model: config.model,
+            });
+        }
         let chunk = next.map_err(|error| format!("Claude stream failed: {error}"))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
 
@@ -732,7 +1333,7 @@ async fn run_claude_chat_stream(
     emit_stream_event(
         &on_event,
         StreamEvent {
-            stream_id,
+            stream_id: stream_id.clone(),
             event_type: "done".to_string(),
             delta: None,
             text: Some(content.clone()),
@@ -741,6 +1342,7 @@ async fn run_claude_chat_stream(
             model: Some(config.model.clone()),
         },
     );
+    clear_stream_canceled(&cancel_state, &stream_id);
 
     Ok(ChatReply {
         content,
@@ -879,6 +1481,146 @@ fn chat_history_path(app: &tauri::AppHandle, chat_id: &str) -> Result<PathBuf, S
     Ok(path)
 }
 
+fn agent_turn_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("agent-turn-logs"))
+}
+
+fn generated_plugins_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("generated-plugins"))
+}
+
+fn validate_generated_plugin_dir(
+    app: &tauri::AppHandle,
+    raw_path: &str,
+) -> Result<PathBuf, String> {
+    let plugin_dir = PathBuf::from(raw_path.trim());
+    if plugin_dir.as_os_str().is_empty() {
+        return Err("Plugin directory is required.".to_string());
+    }
+    if !plugin_dir.is_dir() {
+        return Err("Plugin directory does not exist.".to_string());
+    }
+    let root = generated_plugins_dir(app)?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve generated plugin root: {error}"))?;
+    let plugin_dir = plugin_dir
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve plugin directory: {error}"))?;
+    if !plugin_dir.starts_with(&root) || plugin_dir == root {
+        return Err("Plugin builder can only run inside a generated plugin workspace.".to_string());
+    }
+    if !plugin_dir.join("plugin.json").is_file() {
+        return Err("Plugin workspace is missing plugin.json.".to_string());
+    }
+    Ok(plugin_dir)
+}
+
+fn resolve_generated_plugin_by_id(app: &tauri::AppHandle, raw_id: &str) -> Result<PathBuf, String> {
+    let target = raw_id.trim();
+    if target.is_empty() {
+        return Err("Plugin id is required.".to_string());
+    }
+    let root = generated_plugins_dir(app)?;
+    let entries = fs::read_dir(&root)
+        .map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = plugin_dir.join("plugin.json");
+        let Some(plugin) = read_generated_plugin_manifest(&plugin_dir, &manifest_path) else {
+            continue;
+        };
+        let dir_name_matches = plugin_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value == target)
+            .unwrap_or(false);
+        if plugin.id == target || plugin.name.eq_ignore_ascii_case(target) || dir_name_matches {
+            return validate_generated_plugin_dir(app, &plugin_dir.to_string_lossy());
+        }
+    }
+    Err(format!("Generated plugin not found: {target}"))
+}
+
+fn resolve_generated_plugin_by_tool(
+    app: &tauri::AppHandle,
+    tool_name: &str,
+) -> Result<PathBuf, String> {
+    let root = generated_plugins_dir(app)?;
+    let entries = fs::read_dir(&root)
+        .map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = plugin_dir.join("plugin.json");
+        let Some(plugin) = read_generated_plugin_manifest(&plugin_dir, &manifest_path) else {
+            continue;
+        };
+        if plugin.tools.iter().any(|tool| tool.name == tool_name) {
+            matches.push(plugin_dir);
+        }
+    }
+    if matches.len() == 1 {
+        return validate_generated_plugin_dir(app, &matches[0].to_string_lossy());
+    }
+    if matches.is_empty() {
+        return Err(format!("No generated plugin provides tool: {tool_name}"));
+    }
+    Err(format!(
+        "Multiple generated plugins provide tool: {tool_name}"
+    ))
+}
+
+fn resolve_plugin_builder_sidecar_path() -> Result<PathBuf, String> {
+    let current =
+        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
+    let candidates = [
+        current.join("scripts").join("plugin-builder-sidecar.mjs"),
+        current
+            .join("..")
+            .join("scripts")
+            .join("plugin-builder-sidecar.mjs"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "Could not find scripts/plugin-builder-sidecar.mjs.".to_string())
+}
+
+fn resolve_plugin_tool_runner_path() -> Result<PathBuf, String> {
+    let current =
+        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
+    let candidates = [
+        current.join("scripts").join("plugin-tool-runner.mjs"),
+        current
+            .join("..")
+            .join("scripts")
+            .join("plugin-tool-runner.mjs"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "Could not find scripts/plugin-tool-runner.mjs.".to_string())
+}
+
 fn normalize_chat_id(raw: &str) -> String {
     let mut output = String::new();
     for ch in raw.trim().to_lowercase().chars() {
@@ -894,6 +1636,361 @@ fn normalize_chat_id(raw: &str) -> String {
     } else {
         output
     }
+}
+
+fn normalize_plugin_slug(raw: &str) -> String {
+    let mut output = String::new();
+    for ch in raw.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch);
+        } else if (ch == '-' || ch == '_' || ch == '.' || ch.is_whitespace())
+            && !output.ends_with('-')
+        {
+            output.push('-');
+        }
+    }
+    let output = output.trim_matches('-').to_string();
+    if output.is_empty() {
+        format!("generated-capability-{}", now_millis())
+    } else {
+        output.chars().take(64).collect()
+    }
+}
+
+fn next_available_plugin_slug(root: &Path, slug: &str) -> String {
+    if !root.join(slug).exists() {
+        return slug.to_string();
+    }
+    for index in 2..1000 {
+        let candidate = format!("{slug}-{index}");
+        if !root.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{slug}-{}", now_millis())
+}
+
+fn normalize_plugin_description(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
+}
+
+fn normalize_source_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::new();
+    for url in urls {
+        let cleaned = url.trim().trim_end_matches(['.', ',', ';']).to_string();
+        if cleaned.starts_with("https://") || cleaned.starts_with("http://") {
+            seen.insert(cleaned.clone(), cleaned);
+        }
+    }
+    seen.into_values().take(8).collect()
+}
+
+fn plugin_display_name(slug: &str) -> String {
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn read_generated_plugin_manifest(
+    plugin_dir: &Path,
+    manifest_path: &Path,
+) -> Option<GeneratedPlugin> {
+    let raw = fs::read_to_string(manifest_path).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let id = parsed.get("id").and_then(Value::as_str)?.trim().to_string();
+    let name = parsed
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&id)
+        .to_string();
+    let description = parsed
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let version = parsed
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("0.1.0")
+        .trim()
+        .to_string();
+    let created_at = parsed
+        .get("createdAt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let status = parsed
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("scaffolded")
+        .trim()
+        .to_string();
+    let tools = parsed
+        .pointer("/contributes/tools")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(name) = item.as_str() {
+                        return Some(GeneratedPluginTool {
+                            name: name.trim().to_string(),
+                            description: String::new(),
+                            parameters: json!({
+                                "type": "object",
+                                "properties": {}
+                            }),
+                        });
+                    }
+                    let name = item.get("name").and_then(Value::as_str)?.trim().to_string();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    Some(GeneratedPluginTool {
+                        name,
+                        description: item
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                        parameters: item.get("parameters").cloned().unwrap_or_else(|| {
+                            json!({
+                                "type": "object",
+                                "properties": {}
+                            })
+                        }),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(GeneratedPlugin {
+        id,
+        name,
+        description,
+        version,
+        directory: plugin_dir.to_string_lossy().to_string(),
+        entry_path: plugin_dir.join("index.ts").to_string_lossy().to_string(),
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        created_at,
+        status,
+        tools,
+    })
+}
+
+fn enrich_generated_plugin_tools_from_runtime(plugin: &mut GeneratedPlugin, plugin_dir: &Path) {
+    let Ok(runtime_tools) = read_generated_plugin_runtime_tools(plugin_dir) else {
+        return;
+    };
+    if runtime_tools.is_empty() {
+        return;
+    }
+    plugin.tools = runtime_tools;
+}
+
+fn read_generated_plugin_runtime_tools(
+    plugin_dir: &Path,
+) -> Result<Vec<GeneratedPluginTool>, String> {
+    let runner_path = resolve_plugin_tool_runner_path()?;
+    let runner_request = json!({
+        "pluginDir": plugin_dir.to_string_lossy().to_string(),
+        "listTools": true
+    });
+    let mut child = Command::new("node")
+        .arg(runner_path)
+        .current_dir(plugin_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start plugin tool runner: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let raw = serde_json::to_vec(&runner_request)
+            .map_err(|error| format!("Could not serialize plugin tool list request: {error}"))?;
+        stdin
+            .write_all(&raw)
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|error| format!("Could not send request to plugin tool runner: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not read plugin tool list output: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("Plugin tool runner exited with {}.", output.status));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .last()
+        .ok_or_else(|| "Plugin tool runner returned no output.".to_string())?;
+    let payload: Value = serde_json::from_str(last_line)
+        .map_err(|error| format!("Plugin tool runner returned invalid JSON: {error}"))?;
+    if payload.get("ok").and_then(Value::as_bool) != Some(true) {
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Plugin tool list failed.");
+        return Err(error.to_string());
+    }
+
+    Ok(payload
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name").and_then(Value::as_str)?.trim().to_string();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    Some(GeneratedPluginTool {
+                        name,
+                        description: item
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                        parameters: item.get("parameters").cloned().unwrap_or_else(|| {
+                            json!({
+                                "type": "object",
+                                "properties": {}
+                            })
+                        }),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default())
+}
+
+fn build_plugin_manifest(
+    slug: &str,
+    description: &str,
+    created_at: &str,
+    source_urls: &[String],
+) -> String {
+    let manifest = json!({
+        "id": format!("raynard.generated.{slug}"),
+        "name": plugin_display_name(slug),
+        "description": description,
+        "version": "0.1.0",
+        "status": "scaffolded",
+        "createdAt": created_at,
+        "capabilities": ["api-reference-tool"],
+        "permissions": ["network:api"],
+        "contributes": {
+            "tools": [],
+            "cards": ["api-reference"]
+        },
+        "sourceUrls": source_urls,
+        "provenance": {
+            "createdBy": "raynard-plugin-builder",
+            "builder": "manual-scaffold"
+        }
+    });
+    serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn build_plugin_entrypoint(slug: &str) -> String {
+    format!(
+        r#"export const manifest = {{
+  id: 'raynard.generated.{slug}',
+  name: '{name}',
+  version: '0.1.0'
+}};
+
+export default {{
+  manifest,
+  tools: {{}}
+}};
+
+// Build-mode contract for the Pi coding-agent:
+// - Write TypeScript API/client/tool code only.
+// - Do not create React components, pages, routes, CSS, or visual explorer UI.
+// - The runtime UI is Raynard chat; this plugin feeds explore mode with citeable API data.
+// - Every tool definition must include a specific description and JSON parameter schema.
+// - Tool descriptions are injected into the Explore-mode prompt so the agent can choose the right generated plugin.
+// - Descriptions should state what question the tool answers, what API data it fetches, and important limits or follow-up tools.
+// - Every tool result must include references created through createApiReference().
+// - Keep credentials out of source. Read them from the runtime context when needed.
+
+export type ApiReference = {{
+  id: string;
+  label: string;
+  sourceUrl: string;
+  fetchedAt: string;
+  quote: string;
+  payloadPath?: string;
+  payload?: unknown;
+}};
+
+export function createApiReference(input: ApiReference) {{
+  return {{
+    referenceId: input.id,
+    referenceLabel: input.label,
+    referenceMeta: {{
+      sourceUrl: input.sourceUrl,
+      fetchedAt: input.fetchedAt,
+      payloadPath: input.payloadPath || ''
+    }},
+    modalTitle: input.label,
+    modalHint: input.sourceUrl,
+    compactContent: [
+      {{ type: 'header', state: 'complete', icon: 'check', title: input.label }},
+      {{ type: 'text', text: input.quote }}
+    ],
+    expandedContent: [
+      {{ type: 'header', state: 'complete', icon: 'check', title: input.label }},
+      {{ type: 'text', text: input.quote }},
+      {{ type: 'json', title: 'Raw API payload', text: JSON.stringify(input.payload ?? {{}}, null, 2) }}
+    ]
+  }};
+}}
+"#,
+        slug = slug,
+        name = plugin_display_name(slug).replace('\'', "\\'")
+    )
+}
+
+fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) -> String {
+    let source_block = if source_urls.is_empty() {
+        "- No source documentation URL was captured.\n".to_string()
+    } else {
+        source_urls
+            .iter()
+            .map(|url| format!("- {url}\n"))
+            .collect::<String>()
+    };
+    format!(
+        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n",
+        plugin_display_name(slug),
+        description,
+        source_block
+    )
 }
 
 fn normalize_chat_name(raw: &str) -> String {
@@ -936,6 +2033,14 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                     .filter(|value| !value.is_empty()),
                 model: message
                     .model
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                status: message
+                    .status
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                error: message
+                    .error
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
             })
@@ -1194,16 +2299,25 @@ fn resolve_model_config(app: Option<&tauri::AppHandle>) -> Result<ModelConfig, S
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(StreamCancelState::default())
         .invoke_handler(tauri::generate_handler![
+            append_agent_turn_log,
+            cancel_model_chat_stream,
             delete_chat_history,
+            delete_generated_plugin,
+            execute_generated_plugin_tool,
             load_llm_env_status,
+            list_generated_plugins,
             list_chat_history,
             list_model_providers,
+            read_generated_plugin,
             read_chat_history,
+            run_plugin_builder_stream,
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,
             save_provider_api_key,
+            scaffold_plugin_capability,
             set_active_provider
         ])
         .run(tauri::generate_context!())
