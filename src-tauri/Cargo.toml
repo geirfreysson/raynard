@@ -1,0 +1,21 @@
+[package]
+name = "raynard"
+version = "0.1.0"
+description = "Barebones Raynard-inspired Tauri desktop chat app"
+authors = ["Raynard"]
+edition = "2021"
+
+[lib]
+name = "raynard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dotenvy = "0.15"
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
