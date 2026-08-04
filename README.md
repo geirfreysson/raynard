@@ -11,6 +11,7 @@ Barebones Tauri v2 desktop chat app inspired by the first Raynard screen and the
 - Shows explicit provider-supplied reasoning deltas as a short live thinking preview when the upstream model sends them.
 - Falls back to a deterministic hello-world response if no model key is configured.
 - Reads `.env` from the Tauri backend without exposing secret values in the UI.
+- Supports `/models` to connect or switch providers.
 
 ## Run
 
@@ -41,6 +42,18 @@ Supported provider/config variables:
 - `STOCKBOT_MODEL_BASE_URL`, default `https://api.moonshot.ai/v1`
 - `STOCKBOT_DEFAULT_MODEL`, default `kimi-k2.5`
 - `STOCKBOT_MODEL_API_KEY`, or provider-specific keys such as `STOCKBOT_MOONSHOT_API_KEY` and `MOONSHOT_API_KEY`
+
+## Model Settings
+
+Type `/models` in the composer to open the provider picker.
+
+Current providers:
+
+- OpenAI
+- Claude
+- Moonshot / Kimi
+
+API keys entered through `/models` are stored in the operating system credential vault through the Rust `keyring` crate. The app config JSON stores only the active provider preference, not the secret values. Existing `.env` keys still work during the transition, but keychain storage takes precedence.
 
 ## Agent Runtime
 
