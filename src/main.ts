@@ -15,6 +15,7 @@ import {
   type BuilderToolEvent
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
+import foxLogoMarkup from './assets/northfox-fox-logo.svg?raw';
 import './styles.css';
 
 type CapabilityRequest = AgentBuildRequest;
@@ -143,7 +144,7 @@ app.innerHTML = `
   <main class="app-shell pre-chat is-booting sidebar-open" aria-label="Raynard">
     <section class="boot-overlay" role="status" aria-live="polite" aria-label="Starting Raynard">
       <div class="boot-overlay-inner">
-        <div class="brand-mark" aria-hidden="true">n</div>
+        <div class="brand-mark" aria-hidden="true">${foxLogoMarkup}</div>
         <p class="boot-overlay-brand">raynard</p>
         <div class="boot-overlay-spinner" aria-hidden="true"></div>
       </div>
@@ -178,7 +179,7 @@ app.innerHTML = `
     <section class="chat-shell">
       <section class="intro-stage">
         <div class="intro-logo" aria-hidden="true">
-          <div class="brand-mark">n</div>
+          <div class="brand-mark">${foxLogoMarkup}</div>
           <span>raynard</span>
         </div>
 
