@@ -169,12 +169,19 @@ struct GeneratedPlugin {
     tools: Vec<GeneratedPluginTool>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct GeneratedPluginTool {
     name: String,
     description: String,
     parameters: Value,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeToolsCache {
+    source_mtime: u128,
+    tools: Vec<GeneratedPluginTool>,
 }
 
 #[derive(Serialize)]
@@ -419,10 +426,9 @@ fn cancel_model_chat_stream(
 fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, String> {
     let dir = generated_plugins_dir(&app)?;
     ensure_dir(&dir)?;
-    let mut plugins = Vec::new();
-
     let entries =
         fs::read_dir(&dir).map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    let mut plugin_dirs = Vec::new();
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
@@ -430,15 +436,31 @@ fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, 
         if !plugin_dir.is_dir() {
             continue;
         }
-        let manifest_path = plugin_dir.join("plugin.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        if let Some(mut plugin) = read_generated_plugin_manifest(&plugin_dir, &manifest_path) {
-            enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
-            plugins.push(plugin);
+        if plugin_dir.join("plugin.json").is_file() {
+            plugin_dirs.push(plugin_dir);
         }
     }
+
+    // Runtime tool discovery spawns Node per plugin; run them concurrently so a
+    // cold load costs one Node startup, not one per plugin.
+    let mut plugins: Vec<GeneratedPlugin> = std::thread::scope(|scope| {
+        let handles: Vec<_> = plugin_dirs
+            .iter()
+            .map(|plugin_dir| {
+                scope.spawn(move || {
+                    let manifest_path = plugin_dir.join("plugin.json");
+                    read_generated_plugin_manifest(plugin_dir, &manifest_path).map(|mut plugin| {
+                        enrich_generated_plugin_tools_from_runtime(&mut plugin, plugin_dir);
+                        plugin
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    });
 
     plugins.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     Ok(GeneratedPluginList {
@@ -2273,13 +2295,47 @@ fn read_generated_plugin_manifest(
 }
 
 fn enrich_generated_plugin_tools_from_runtime(plugin: &mut GeneratedPlugin, plugin_dir: &Path) {
-    let Ok(runtime_tools) = read_generated_plugin_runtime_tools(plugin_dir) else {
+    let Some(runtime_tools) = load_generated_plugin_runtime_tools_cached(plugin_dir) else {
         return;
     };
     if runtime_tools.is_empty() {
         return;
     }
     plugin.tools = runtime_tools;
+}
+
+/// Runtime tool discovery spawns a Node process that transpiles the plugin
+/// (~0.3s each), so we cache the result next to the plugin and only re-run it
+/// when `index.ts` changes. This keeps the plugins sidebar instant after the
+/// first load instead of re-spawning Node for every plugin on every open.
+fn load_generated_plugin_runtime_tools_cached(plugin_dir: &Path) -> Option<Vec<GeneratedPluginTool>> {
+    let source_mtime = generated_plugin_source_mtime_millis(plugin_dir);
+    let cache_path = plugin_dir.join(".runtime-tools.json");
+
+    if let (Some(source_mtime), Ok(raw)) = (source_mtime, fs::read_to_string(&cache_path)) {
+        if let Ok(cache) = serde_json::from_str::<RuntimeToolsCache>(&raw) {
+            if cache.source_mtime == source_mtime {
+                return Some(cache.tools);
+            }
+        }
+    }
+
+    let tools = read_generated_plugin_runtime_tools(plugin_dir).ok()?;
+    if let Some(source_mtime) = source_mtime {
+        let cache = RuntimeToolsCache {
+            source_mtime,
+            tools: tools.clone(),
+        };
+        if let Ok(serialized) = serde_json::to_string(&cache) {
+            let _ = fs::write(&cache_path, serialized);
+        }
+    }
+    Some(tools)
+}
+
+fn generated_plugin_source_mtime_millis(plugin_dir: &Path) -> Option<u128> {
+    let modified = fs::metadata(plugin_dir.join("index.ts")).ok()?.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis())
 }
 
 fn read_generated_plugin_runtime_tools(
@@ -2927,11 +2983,47 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
+        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
         next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        BuilderStreamEvent, StoredChatMessage, StreamEvent,
+        BuilderStreamEvent, GeneratedPluginTool, RuntimeToolsCache, StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn runtime_tools_cache_is_used_when_source_is_unchanged() {
+        let plugin_dir =
+            std::env::temp_dir().join(format!("raynard-runtime-cache-{}", now_millis()));
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        fs::write(plugin_dir.join("index.ts"), "export const noop = true;\n")
+            .expect("write index.ts");
+
+        let source_mtime = generated_plugin_source_mtime_millis(&plugin_dir)
+            .expect("read index.ts mtime");
+        let cache = RuntimeToolsCache {
+            source_mtime,
+            tools: vec![GeneratedPluginTool {
+                name: "getThing".to_string(),
+                description: "Fetch a thing".to_string(),
+                parameters: json!({ "type": "object", "properties": {} }),
+            }],
+        };
+        fs::write(
+            plugin_dir.join(".runtime-tools.json"),
+            serde_json::to_string(&cache).expect("serialize cache"),
+        )
+        .expect("write cache");
+
+        // A fresh cache short-circuits before any Node spawn; there is no
+        // index.ts a runner could load, so a non-empty result proves the cache
+        // was used.
+        let tools = load_generated_plugin_runtime_tools_cached(&plugin_dir)
+            .expect("cached tools returned");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "getThing");
+
+        fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+    }
 
     #[test]
     fn plugin_slug_and_conflict_name_are_deterministic() {
