@@ -13,9 +13,15 @@ export const tools = {
         }
       }
     },
+    card: {
+      name: { singular: 'example', plural: 'examples' },
+      title: '{{name}} (#{{id}})',
+      layout: [{ component: 'KeyValue', pairs: [{ label: 'Name', field: 'name' }] }]
+    },
     async execute(args: { id: number }) {
       return {
         text: formatExample(args.id),
+        data: { id: args.id, name: `Example ${args.id}` },
         references: [
           {
             title: `Example ${args.id}`,

@@ -5,9 +5,15 @@ import {
   runMainAgentStream,
   runPluginBuilderStream,
   type AgentBuildRequest,
-  type ChatMessage
+  type ChatMessage,
+  type PluginBuilderRequest
 } from './agent-runtime';
-import { continueBuildRequest, nextBuildRequestStep } from './build-request-flow';
+import {
+  automaticModeForUserTurn,
+  confirmedPluginWriteMode,
+  modeSwitchStatus,
+  pluginWriteConfirmationCopy
+} from './build-request-flow';
 import {
   applyBuilderToolEvent,
   planBuilderTimeline,
@@ -15,6 +21,15 @@ import {
   type BuilderToolEvent
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
+import { renderResultCards } from './result-card/mount';
+import { buildExampleData } from './result-card/example';
+import type { CardTemplate, StoredResultCard } from './result-card/types';
+import {
+  buildMentionItems,
+  filterMentionItems,
+  getReferenceQueryAtCursor,
+  type MentionItem
+} from './mention';
 import foxLogoMarkup from './assets/northfox-fox-logo.svg?raw';
 import './styles.css';
 
@@ -55,6 +70,7 @@ type StoredChatMessage = {
   role: 'user' | 'assistant';
   text: string;
   timestamp: number;
+  modeStatus?: boolean;
   thinking?: string;
   provider?: string;
   model?: string;
@@ -62,6 +78,7 @@ type StoredChatMessage = {
   error?: string;
   builderRun?: boolean;
   builderActivities?: BuilderToolActivity[];
+  cards?: StoredResultCard[];
 };
 
 type ChatHistoryRow = {
@@ -78,6 +95,7 @@ type ChatHistoryPayload = {
   createdAt: string;
   updatedAt: string;
   messages: StoredChatMessage[];
+  activeBuildPlugin?: ActiveBuildPlugin;
 };
 
 type ChatHistoryList = {
@@ -102,6 +120,7 @@ type GeneratedPluginTool = {
   name: string;
   description: string;
   parameters: unknown;
+  card?: CardTemplate;
 };
 
 type GeneratedPluginList = {
@@ -118,7 +137,7 @@ type GeneratedPluginDetail = {
 };
 
 type AppMode = 'explore' | 'build';
-type PluginConflictStrategy = 'error' | 'replace' | 'rename';
+type PluginConflictStrategy = 'error' | 'replace' | 'rename' | 'edit';
 type PluginScaffoldStatus = {
   normalizedName: string;
   exists: boolean;
@@ -126,7 +145,13 @@ type PluginScaffoldStatus = {
 };
 type SidebarView = 'chats' | 'plugins';
 
-type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'updatedAt'>;
+// The plugin a Build-mode chat is actively editing. Once set, later Build-mode
+// messages route straight to the coding agent for this plugin.
+type ActiveBuildPlugin = { dir: string; name: string };
+
+type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'updatedAt'> & {
+  activeBuildPlugin?: ActiveBuildPlugin;
+};
 
 const INLINE_MARKDOWN_PATTERN =
   /(?:`([^`]+)`)|(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(?:\*\*([^*]+)\*\*)|(?:__([^_]+)__)|(?:\*([^*]+)\*)|(?:_([^_]+)_)/g;
@@ -231,6 +256,8 @@ app.innerHTML = `
         </button>
       </div>
 
+      <div id="mentionMenu" class="mention-menu is-hidden" aria-hidden="true"></div>
+
       <section id="modelsModal" class="models-modal-overlay is-hidden" aria-hidden="true">
         <div class="models-modal" role="dialog" aria-modal="true" aria-labelledby="modelsModalTitle">
           <header class="models-modal-header">
@@ -283,6 +310,14 @@ const modeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[da
 const suggestionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-suggestion]'));
 const slashMenu = document.querySelector<HTMLElement>('#slashMenu');
 const slashMenuItem = document.querySelector<HTMLButtonElement>('[data-command="/models"]');
+const mentionMenu = document.querySelector<HTMLElement>('#mentionMenu');
+type MentionState = {
+  input: HTMLTextAreaElement;
+  items: MentionItem[];
+  active: number;
+  range: { replaceStart: number; replaceEnd: number };
+};
+let mentionState: MentionState | null = null;
 const modelsModal = document.querySelector<HTMLElement>('#modelsModal');
 const modelsModalTitle = document.querySelector<HTMLElement>('#modelsModalTitle');
 const modelsModalHint = document.querySelector<HTMLElement>('#modelsModalHint');
@@ -346,9 +381,22 @@ for (const button of suggestionButtons) {
 for (const input of [introInput, chatInput]) {
   input?.addEventListener('input', () => {
     syncSlashMenu(input);
+    syncMentionMenu(input);
+  });
+
+  // Re-evaluate the @menu when the caret moves (arrow keys, clicks).
+  input?.addEventListener('keyup', (event) => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) syncMentionMenu(input);
+  });
+  input?.addEventListener('click', () => syncMentionMenu(input));
+  input?.addEventListener('blur', () => {
+    window.setTimeout(hideMentionMenu, 120);
   });
 
   input?.addEventListener('keydown', (event) => {
+    // The open @menu owns arrow/enter/tab/escape before anything else.
+    if (handleMentionKeydown(event)) return;
+
     if (event.key === 'Escape') {
       hideSlashMenu();
       closeModelsModal();
@@ -423,10 +471,8 @@ newChatRail?.addEventListener('click', () => {
   void startNewConversation({ showPreChat: true });
 });
 for (const button of modeButtons) {
-  button.addEventListener('click', () => {
-    const mode = button.dataset.modeOption === 'build' ? 'build' : 'explore';
-    setAppMode(mode);
-  });
+  button.disabled = true;
+  button.title = 'Mode switches automatically';
 }
 stopStreamButton?.addEventListener('click', () => {
   const streamId = activeStreamId;
@@ -506,6 +552,22 @@ function setAppMode(mode: AppMode) {
   });
 }
 
+async function switchAppModeWithStatus(mode: AppMode) {
+  const status = modeSwitchStatus(appMode, mode);
+  setAppMode(mode);
+  if (!status) return;
+
+  const article = addMessage('assistant', status);
+  article.classList.add('mode-status-message');
+  storedMessages.push({
+    role: 'assistant',
+    text: status,
+    timestamp: Date.now(),
+    modeStatus: true
+  });
+  await persistActiveChatHistory();
+}
+
 function syncModeControls() {
   for (const button of modeButtons) {
     const selected = button.dataset.modeOption === appMode;
@@ -536,6 +598,110 @@ function syncSlashMenu(input: HTMLTextAreaElement | null) {
 function hideSlashMenu() {
   slashMenu?.classList.add('is-hidden');
   slashMenu?.setAttribute('aria-hidden', 'true');
+}
+
+function mentionMenuIsOpen(): boolean {
+  return Boolean(mentionMenu && !mentionMenu.classList.contains('is-hidden'));
+}
+
+function hideMentionMenu() {
+  mentionMenu?.classList.add('is-hidden');
+  mentionMenu?.setAttribute('aria-hidden', 'true');
+  mentionState = null;
+}
+
+// Show the "@" reference menu when the cursor is inside an @token, listing the
+// installed plugins / tools / cards filtered by what's typed so far.
+function syncMentionMenu(input: HTMLTextAreaElement | null) {
+  if (!input || !mentionMenu) return;
+  const ref = getReferenceQueryAtCursor(input.value, input.selectionStart ?? input.value.length);
+  if (!ref) {
+    hideMentionMenu();
+    return;
+  }
+  const items = filterMentionItems(buildMentionItems(generatedPlugins), ref.query);
+  if (!items.length) {
+    hideMentionMenu();
+    return;
+  }
+  mentionState = { input, items, active: 0, range: { replaceStart: ref.replaceStart, replaceEnd: ref.replaceEnd } };
+  renderMentionMenu();
+  const rect = input.getBoundingClientRect();
+  mentionMenu.style.left = `${Math.round(rect.left)}px`;
+  mentionMenu.style.width = `${Math.round(rect.width)}px`;
+  mentionMenu.classList.remove('is-hidden');
+  mentionMenu.setAttribute('aria-hidden', 'false');
+  // Anchor above the input now that its height is known.
+  const menuRect = mentionMenu.getBoundingClientRect();
+  mentionMenu.style.top = `${Math.max(8, Math.round(rect.top - menuRect.height - 8))}px`;
+}
+
+function renderMentionMenu() {
+  if (!mentionMenu || !mentionState) return;
+  mentionMenu.innerHTML = '';
+  mentionState.items.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `mention-item${index === mentionState!.active ? ' is-active' : ''}`;
+    const kind = document.createElement('span');
+    kind.className = `mention-kind mention-kind-${item.kind}`;
+    kind.textContent = item.kind;
+    const label = document.createElement('span');
+    label.className = 'mention-label';
+    label.textContent = item.label;
+    const desc = document.createElement('span');
+    desc.className = 'mention-desc';
+    desc.textContent = item.description;
+    button.append(kind, label, desc);
+    // mousedown fires before the textarea blur, so clicking selects cleanly.
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      applyMention(item);
+    });
+    mentionMenu.appendChild(button);
+  });
+}
+
+function applyMention(item: MentionItem) {
+  if (!mentionState) return;
+  const { input, range } = mentionState;
+  const before = input.value.slice(0, range.replaceStart);
+  const after = input.value.slice(range.replaceEnd);
+  const insert = `${item.insertText} `;
+  input.value = `${before}${insert}${after}`;
+  const cursor = before.length + insert.length;
+  hideMentionMenu();
+  input.focus();
+  input.setSelectionRange(cursor, cursor);
+}
+
+// Returns true when the keystroke was consumed by the open mention menu.
+function handleMentionKeydown(event: KeyboardEvent): boolean {
+  if (!mentionMenuIsOpen() || !mentionState) return false;
+  const count = mentionState.items.length;
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    mentionState.active = (mentionState.active + 1) % count;
+    renderMentionMenu();
+    return true;
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    mentionState.active = (mentionState.active - 1 + count) % count;
+    renderMentionMenu();
+    return true;
+  }
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault();
+    applyMention(mentionState.items[mentionState.active]);
+    return true;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    hideMentionMenu();
+    return true;
+  }
+  return false;
 }
 
 async function openModelsCommandFlow(input: HTMLTextAreaElement | null) {
@@ -980,6 +1146,8 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   }
   pluginDetailView.appendChild(tools);
 
+  renderPluginCardPreviews(plugin);
+
   if (detail.readme.trim()) {
     const readme = document.createElement('section');
     readme.className = 'plugin-detail-section plugin-readme';
@@ -993,6 +1161,53 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
 
   pluginDetailView.appendChild(createPluginCodeSection('plugin.json', detail.manifestText));
   pluginDetailView.appendChild(createPluginCodeSection('index.ts', detail.code || '// No index.ts found.'));
+}
+
+// Preview the result cards a plugin's tools render, using synthesized example
+// data (no API call). Only tools that declare a `card` appear.
+function renderPluginCardPreviews(plugin: GeneratedPlugin) {
+  if (!pluginDetailView) return;
+  const cardTools = plugin.tools.filter(
+    (tool) => tool.card && typeof tool.card === 'object' && Array.isArray(tool.card.layout)
+  );
+
+  const section = document.createElement('section');
+  section.className = 'plugin-detail-section';
+  section.innerHTML = '<h2>Result cards</h2>';
+
+  if (!cardTools.length) {
+    const empty = document.createElement('p');
+    empty.className = 'plugin-detail-empty';
+    empty.textContent =
+      'No result cards yet. In Build mode, ask to add cards to this plugin’s detail tools.';
+    section.appendChild(empty);
+    pluginDetailView.appendChild(section);
+    return;
+  }
+
+  const hint = document.createElement('p');
+  hint.className = 'plugin-detail-hint';
+  hint.textContent = 'How these tools render their results, shown with example data.';
+  section.appendChild(hint);
+
+  for (const tool of cardTools) {
+    const template = tool.card as CardTemplate;
+    const block = document.createElement('div');
+    block.className = 'plugin-card-preview';
+    const label = document.createElement('code');
+    label.className = 'plugin-card-preview-tool';
+    label.textContent = tool.name;
+    block.appendChild(label);
+    const mount = document.createElement('div');
+    block.appendChild(mount);
+    renderResultCards(
+      mount,
+      [{ toolName: tool.name, template, data: buildExampleData(template) }],
+      { collapsible: false }
+    );
+    section.appendChild(block);
+  }
+  pluginDetailView.appendChild(section);
 }
 
 function stringifyPromptJson(value: unknown) {
@@ -1186,13 +1401,16 @@ async function openSavedChat(chatId: string) {
     chatId: chat.chatId,
     name: chat.name,
     createdAt: chat.createdAt,
-    updatedAt: chat.updatedAt
+    updatedAt: chat.updatedAt,
+    activeBuildPlugin: chat.activeBuildPlugin
   };
   storedMessages = chat.messages;
-  chatMessages = storedMessages.map((message) => ({
-    role: message.role,
-    content: message.text
-  }));
+  chatMessages = storedMessages
+    .filter((message) => !message.modeStatus)
+    .map((message) => ({
+      role: message.role,
+      content: message.text
+    }));
 
   messages.innerHTML = '';
   for (const message of storedMessages) {
@@ -1250,9 +1468,46 @@ function resetConversationState() {
 
 function renderStoredMessage(message: StoredChatMessage) {
   const article = addMessage(message.role, message.builderRun ? '' : message.text, false, message.role === 'assistant');
-  if (message.role !== 'assistant' || !message.builderRun) return;
-  const body = article.querySelector<HTMLElement>('.message-text');
-  if (body) renderBuilderRun(body, message, false);
+  if (message.modeStatus) article.classList.add('mode-status-message');
+  if (message.role === 'assistant' && message.builderRun) {
+    const body = article.querySelector<HTMLElement>('.message-text');
+    if (body) renderBuilderRun(body, message, false);
+  }
+  if (message.role === 'assistant' && message.cards?.length) {
+    renderMessageCards(article, message.cards);
+  }
+}
+
+/** Find or create the card container appended after a message's text body. */
+function ensureCardContainer(article: HTMLElement): HTMLElement {
+  let container = article.querySelector<HTMLElement>(':scope > .message-cards');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'message-cards';
+    article.appendChild(container);
+  }
+  return container;
+}
+
+/** Mount (or re-mount) result cards beneath a message article. */
+function renderMessageCards(article: HTMLElement, cards: StoredResultCard[] | undefined) {
+  if (!cards || !cards.length) return;
+  renderResultCards(ensureCardContainer(article), cards);
+}
+
+/** Pull a storable result card out of a tool-result event, if the tool has one. */
+function extractResultCard(event: { toolName: string; result: unknown }): StoredResultCard | null {
+  const result = event.result;
+  if (!result || typeof result !== 'object') return null;
+  const card = (result as Record<string, unknown>).card;
+  if (!card || typeof card !== 'object' || !Array.isArray((card as Record<string, unknown>).layout)) {
+    return null;
+  }
+  return {
+    toolName: event.toolName,
+    template: card as StoredResultCard['template'],
+    data: (result as Record<string, unknown>).data ?? {}
+  };
 }
 
 async function submitMessage(input: HTMLTextAreaElement | null) {
@@ -1277,6 +1532,10 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   });
   await persistActiveChatHistory();
   await refreshChatHistory();
+
+  // Every ordinary user turn starts in Explore. Build is entered only from the
+  // explicit plugin-writing confirmation below.
+  await switchAppModeWithStatus(automaticModeForUserTurn());
 
   const pending = addMessage('assistant', '', true);
   const pendingBody = pending.querySelector<HTMLElement>('.message-text');
@@ -1360,6 +1619,11 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         assistantRecord.text = streamed || `Ran ${toolCall.toolName}.`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
+        const resultCard = extractResultCard(toolCall);
+        if (resultCard) {
+          (assistantRecord.cards ??= []).push(resultCard);
+          if (turnIsActive()) renderMessageCards(pending, assistantRecord.cards);
+        }
         snapshotPersister.schedule(true);
         void logAgentTurnEvent('tool_result', {
           toolName: toolCall.toolName,
@@ -1393,11 +1657,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
       if (recordIndex >= 0) turnStored.splice(recordIndex, 1);
       if (turnIsActive()) {
         pending.remove();
-        if (nextBuildRequestStep(appMode) === 'offer-switch') {
-          renderExploreModeCapabilityNotice(requestedBuild);
-        } else {
-          renderCapabilityConfirmation(requestedBuild);
-        }
+        renderCapabilityConfirmation(requestedBuild);
       }
       return;
     }
@@ -1460,77 +1720,22 @@ function setStopButtonVisible(visible: boolean) {
   stopStreamButton.textContent = 'Stop';
 }
 
-function renderExploreModeCapabilityNotice(request: CapabilityRequest) {
-  const article = addMessage('assistant', '');
-  const body = article.querySelector<HTMLElement>('.message-text');
-  const text =
-    `Explorer mode cannot build or modify plugins. Switch to Build mode to create "${request.name}", or stay in Explorer mode to query installed API capabilities.`;
-
-  if (body) {
-    body.innerHTML = '';
-    const panel = document.createElement('section');
-    panel.className = 'capability-confirmation';
-
-    const title = document.createElement('h3');
-    title.textContent = 'Build request blocked in Explorer mode';
-    panel.appendChild(title);
-
-    const description = document.createElement('p');
-    description.textContent =
-      'Explorer mode never invokes the Pi coding-agent or writes plugin code.';
-    panel.appendChild(description);
-
-    const summary = document.createElement('p');
-    summary.className = 'capability-request-summary';
-    summary.textContent = request.description;
-    panel.appendChild(summary);
-
-    const actions = document.createElement('div');
-    actions.className = 'capability-actions';
-
-    const switchMode = document.createElement('button');
-    switchMode.type = 'button';
-    switchMode.className = 'capability-primary-action';
-    switchMode.textContent = 'Switch to Build mode';
-    switchMode.addEventListener('click', () => {
-      const continuation = continueBuildRequest(request);
-      setAppMode(continuation.mode);
-      article.remove();
-      renderCapabilityConfirmation(continuation.request);
-      switchMode.disabled = true;
-    });
-    actions.appendChild(switchMode);
-
-    panel.appendChild(actions);
-    body.appendChild(panel);
-  }
-
-  chatMessages.push({ role: 'assistant', content: text });
-  storedMessages.push({
-    role: 'assistant',
-    text,
-    timestamp: Date.now()
-  });
-  void persistActiveChatHistory();
-  void refreshChatHistory();
-}
-
 function renderCapabilityConfirmation(request: CapabilityRequest) {
   const article = addMessage('assistant', '');
   const body = article.querySelector<HTMLElement>('.message-text');
   if (!body) return;
+  const copy = pluginWriteConfirmationCopy(request.name);
 
   body.innerHTML = '';
   const panel = document.createElement('section');
   panel.className = 'capability-confirmation';
 
   const title = document.createElement('h3');
-  title.textContent = `Create plugin: ${request.name}`;
+  title.textContent = copy.title;
   panel.appendChild(title);
 
   const description = document.createElement('p');
-  description.textContent =
-    'This requires writing code. Raynard will create a plugin workspace first; the Pi coding-agent sidecar can fill in the API tool code in the next step.';
+  description.textContent = copy.description;
   panel.appendChild(description);
 
   const summary = document.createElement('p');
@@ -1544,7 +1749,7 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   const confirm = document.createElement('button');
   confirm.type = 'button';
   confirm.className = 'capability-primary-action';
-  confirm.textContent = 'Create plugin workspace';
+  confirm.textContent = copy.confirmLabel;
   actions.appendChild(confirm);
 
   const cancel = document.createElement('button');
@@ -1570,7 +1775,7 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   cancel.addEventListener('click', () => {
     confirm.disabled = true;
     cancel.disabled = true;
-    const text = 'Canceled plugin creation. No code was written.';
+    const text = 'Canceled plugin write. No code was written.';
     body.textContent = text;
     void persistAssistantStatus(text);
   });
@@ -1578,7 +1783,12 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   confirm.addEventListener('click', async () => {
     confirm.disabled = true;
     cancel.disabled = true;
-    void scaffoldAndRunPluginBuilder(request, body, persistAssistantStatus, {
+    article.remove();
+    await switchAppModeWithStatus(confirmedPluginWriteMode());
+    const output = addMessage('assistant', '');
+    const outputBody = output.querySelector<HTMLElement>('.message-text');
+    if (!outputBody) return;
+    void scaffoldAndRunPluginBuilder(request, outputBody, persistAssistantStatus, {
       conflictStrategy: 'error'
     });
   });
@@ -1588,10 +1798,14 @@ async function scaffoldAndRunPluginBuilder(
   request: CapabilityRequest,
   body: HTMLElement,
   persistAssistantStatus: (text: string) => Promise<void>,
-  options: { conflictStrategy: PluginConflictStrategy; name?: string }
+  options: {
+    conflictStrategy: PluginConflictStrategy;
+    name?: string;
+    editMode?: boolean;
+    prompt?: string;
+    messages?: ChatMessage[];
+  }
 ) {
-  let streamed = '';
-  let thinking = '';
   let builderRecord: StoredChatMessage | undefined;
   let builderRun: HTMLElement | undefined;
   // Bind this run to the chat it started in. If the user navigates to another
@@ -1608,21 +1822,23 @@ async function scaffoldAndRunPluginBuilder(
   setStopButtonVisible(true);
 
   try {
+    // Resolving to an existing plugin means the user wants to edit it — drop
+    // into an in-place coding session instead of the create/overwrite conflict
+    // flow. A new name falls through to a fresh scaffold below.
     if (options.conflictStrategy === 'error') {
       const status = await invoke<PluginScaffoldStatus>('get_plugin_scaffold_status', {
         name: options.name || request.name
       });
       if (status.exists) {
-        renderPluginConflictResolution(
-          body,
-          { ...request, name: status.normalizedName },
-          persistAssistantStatus,
-          status.nextAvailableName
-        );
-        return;
+        options = {
+          ...options,
+          conflictStrategy: 'edit',
+          editMode: true,
+          name: status.normalizedName
+        };
       }
     }
-    body.querySelector('.capability-confirmation p')?.replaceChildren('Creating plugin workspace...');
+    body.textContent = pluginWriteConfirmationCopy(request.name).progress;
     const plugin = await invoke<GeneratedPlugin>('scaffold_plugin_capability', {
       request: {
         name: options.name || request.name,
@@ -1646,81 +1862,26 @@ async function scaffoldAndRunPluginBuilder(
     renderBuilderRun(builderRun, builderRecord, true);
     await persistChatSnapshot(turnMeta, turnStored);
 
-    // Render while this run's chat is on screen and always follow the latest
-    // builder output to the bottom of the window.
-    const renderLive = () => {
-      if (!builderRun || !builderRecord || !turnIsActive()) return;
-      renderBuilderRun(builderRun, builderRecord, true);
-      scrollMessagesToBottom();
-    };
-
-    const applyToolEvent = (event: BuilderToolEvent) => {
-      if (!builderRecord) return;
-      builderRecord.builderActivities = applyBuilderToolEvent(
-        builderRecord.builderActivities || [],
-        event
-      );
-      snapshotPersister.schedule();
-      renderLive();
-    };
-
-    const reply = await runPluginBuilderStream(
+    await runPluginBuilderTurn(
       {
         pluginDir: plugin.directory,
         name: plugin.name,
         description: plugin.description,
         sourceUrls: request.sourceUrls,
-        prompt: request.description
+        prompt: options.prompt || request.description,
+        editMode: options.editMode ?? false,
+        messages: options.messages
       },
-      {
-        onStreamId: (streamId) => {
-          activeStreamId = streamId;
-        },
-        onDelta: (delta) => {
-          streamed += delta;
-          if (builderRecord) {
-            builderRecord.text = streamed;
-            snapshotPersister.schedule();
-            renderLive();
-          }
-        },
-        onThinkingDelta: (delta) => {
-          thinking += delta;
-          if (builderRecord) {
-            builderRecord.thinking = thinking;
-            snapshotPersister.schedule();
-            renderLive();
-          }
-        },
-        onToolExecutionStart: (event) => {
-          applyToolEvent({ type: 'start', ...event });
-          void logAgentTurnEvent('builder_tool_start', event);
-        },
-        onToolExecutionUpdate: (event) => {
-          applyToolEvent({ type: 'update', ...event });
-        },
-        onToolExecutionEnd: (event) => {
-          applyToolEvent({ type: 'end', ...event });
-          void logAgentTurnEvent('builder_tool_end', event);
-        }
-      }
+      { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister }
     );
-    const finalContent = reply.content || streamed || 'Plugin builder completed.';
-    builderRecord.text = finalContent;
-    builderRecord.thinking = thinking.trim() || undefined;
-    builderRecord.provider = reply.provider;
-    builderRecord.model = reply.model;
-    builderRecord.status = 'completed';
-    builderRecord.timestamp = Date.now();
-    if (builderRun && turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
-    if (turnIsActive()) chatMessages.push({ role: 'assistant', content: finalContent });
+    // Remember which plugin this chat is editing so later Build-mode messages
+    // continue the coding session on it without re-resolving.
+    turnMeta.activeBuildPlugin = { dir: plugin.directory, name: plugin.name };
     await persistChatSnapshot(turnMeta, turnStored);
-    await refreshChatHistory();
   } catch (error) {
-    const errorMessage = getErrorMessage(error, 'Could not create plugin workspace.');
+    const errorMessage = getErrorMessage(error, 'Could not write plugin.');
     if (builderRecord && builderRun) {
       builderRecord.text = errorMessage;
-      builderRecord.thinking = thinking.trim() || undefined;
       builderRecord.status = 'error';
       builderRecord.error = errorMessage;
       builderRecord.timestamp = Date.now();
@@ -1732,6 +1893,146 @@ async function scaffoldAndRunPluginBuilder(
       body.textContent = errorMessage;
       await persistAssistantStatus(errorMessage);
     }
+  } finally {
+    snapshotPersister.flush();
+    isRunning = false;
+    activeStreamId = '';
+    setStopButtonVisible(false);
+    chatInput?.focus();
+  }
+}
+
+type BuilderTurnContext = {
+  builderRecord: StoredChatMessage;
+  builderRun: HTMLElement;
+  turnMeta: ChatMeta;
+  turnStored: StoredChatMessage[];
+  turnIsActive: () => boolean;
+  snapshotPersister: ReturnType<typeof createTurnSnapshotPersister>;
+};
+
+// One streaming coding-agent pass rendered into an existing builder-run message.
+// Shared by the create/first-resolve flow (scaffoldAndRunPluginBuilder) and by
+// follow-up edit turns (runBuildTurn). Throws on failure for the caller to show.
+async function runPluginBuilderTurn(
+  builderRequest: PluginBuilderRequest,
+  ctx: BuilderTurnContext
+): Promise<void> {
+  const { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister } = ctx;
+  let streamed = '';
+  let thinking = '';
+  const renderLive = () => {
+    if (!turnIsActive()) return;
+    renderBuilderRun(builderRun, builderRecord, true);
+    scrollMessagesToBottom();
+  };
+  const applyToolEvent = (event: BuilderToolEvent) => {
+    builderRecord.builderActivities = applyBuilderToolEvent(
+      builderRecord.builderActivities || [],
+      event
+    );
+    snapshotPersister.schedule();
+    renderLive();
+  };
+  const reply = await runPluginBuilderStream(builderRequest, {
+    onStreamId: (streamId) => {
+      activeStreamId = streamId;
+    },
+    onDelta: (delta) => {
+      streamed += delta;
+      builderRecord.text = streamed;
+      snapshotPersister.schedule();
+      renderLive();
+    },
+    onThinkingDelta: (delta) => {
+      thinking += delta;
+      builderRecord.thinking = thinking;
+      snapshotPersister.schedule();
+      renderLive();
+    },
+    onToolExecutionStart: (event) => {
+      applyToolEvent({ type: 'start', ...event });
+      void logAgentTurnEvent('builder_tool_start', event);
+    },
+    onToolExecutionUpdate: (event) => {
+      applyToolEvent({ type: 'update', ...event });
+    },
+    onToolExecutionEnd: (event) => {
+      applyToolEvent({ type: 'end', ...event });
+      void logAgentTurnEvent('builder_tool_end', event);
+    }
+  });
+  const finalContent = reply.content || streamed || 'Done.';
+  builderRecord.text = finalContent;
+  builderRecord.thinking = thinking.trim() || undefined;
+  builderRecord.provider = reply.provider;
+  builderRecord.model = reply.model;
+  builderRecord.status = 'completed';
+  builderRecord.timestamp = Date.now();
+  if (turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
+  if (turnIsActive()) chatMessages.push({ role: 'assistant', content: finalContent });
+  await persistChatSnapshot(turnMeta, turnStored);
+  await refreshChatHistory();
+}
+
+// A follow-up Build-mode message on the chat's already-active plugin: route it
+// straight to the Pi coding agent editing that plugin — no re-resolution, no
+// confirmation. This is what makes Build mode feel like a live coding session.
+async function runBuildTurn(content: string) {
+  const active = activeChatMeta.activeBuildPlugin;
+  if (!active) return;
+
+  const article = addMessage('assistant', '', true);
+  const body = article.querySelector<HTMLElement>('.message-text');
+  const builderRecord: StoredChatMessage = {
+    role: 'assistant',
+    text: 'Editing plugin...',
+    timestamp: Date.now(),
+    status: 'running',
+    builderRun: true,
+    builderActivities: []
+  };
+  storedMessages.push(builderRecord);
+  const builderRun = document.createElement('div');
+  body?.appendChild(builderRun);
+  renderBuilderRun(builderRun, builderRecord, true);
+  article.classList.remove('pending');
+
+  const turnSessionId = activeSessionId;
+  const turnMeta = activeChatMeta;
+  const turnStored = storedMessages;
+  const turnIsActive = () => activeSessionId === turnSessionId;
+  const snapshotPersister = createTurnSnapshotPersister(() =>
+    persistChatSnapshotQuietly(turnMeta, turnStored)
+  );
+  isRunning = true;
+  setStopButtonVisible(true);
+  await persistChatSnapshot(turnMeta, turnStored);
+
+  try {
+    await runPluginBuilderTurn(
+      {
+        pluginDir: active.dir,
+        name: active.name,
+        description: '',
+        sourceUrls: [],
+        prompt: content,
+        editMode: true,
+        // Prior turns (excluding the message just pushed) for follow-up context.
+        messages: chatMessages.slice(0, -1).slice(-6)
+      },
+      { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister }
+    );
+  } catch (error) {
+    const errorMessage = getErrorMessage(error, 'Could not edit plugin.');
+    builderRecord.text = errorMessage;
+    builderRecord.status = 'error';
+    builderRecord.error = errorMessage;
+    builderRecord.timestamp = Date.now();
+    if (turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
+    if (turnIsActive()) chatMessages.push({ role: 'assistant', content: errorMessage });
+    await persistChatSnapshot(turnMeta, turnStored);
+    await refreshChatHistory();
   } finally {
     snapshotPersister.flush();
     isRunning = false;
@@ -2065,7 +2366,7 @@ function renderPluginScaffoldResult(container: HTMLElement, plugin: GeneratedPlu
   panel.className = 'capability-confirmation is-complete';
 
   const title = document.createElement('h3');
-  title.textContent = `Plugin workspace created`;
+  title.textContent = `Plugin ready: ${plugin.name}`;
   panel.appendChild(title);
 
   const list = document.createElement('dl');

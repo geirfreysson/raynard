@@ -78,16 +78,31 @@ export function toAgentMessages(messages, auth) {
     );
 }
 
-export function buildMainAgentSystemPrompt({ mode, toolNames }) {
+export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
   const names = Array.isArray(toolNames) && toolNames.length ? toolNames.join(', ') : '(none)';
+  const installedPlugins = Array.isArray(plugins) ? plugins.filter((plugin) => plugin && plugin.slug) : [];
+  const pluginList = installedPlugins.length
+    ? installedPlugins.map((plugin) => `${plugin.slug}${plugin.name && plugin.name !== plugin.slug ? ` ("${plugin.name}")` : ''}`).join(', ')
+    : '(none)';
   const modePolicy =
     mode === 'build'
-      ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability. For such requests, call request_plugin_build. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
+      ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For such requests, call request_plugin_build. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
       : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Call request_plugin_build so the interface can offer Build mode.`;
 
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
 ${modePolicy}
+
+Result cards (a built-in Raynard feature):
+- A result card is a fixed visual card the app renders beneath the answer for a tool's result. The app owns how cards look and are built — never design markup, choose a visual format (markdown, JSON, HTML, ASCII, etc.), or invent domain-specific "card" types. "Cards" is not a content type to design; it is this rendering feature.
+- A card is a declarative layout the plugin builder attaches to a FINAL-DATA tool (one that returns a single record, detail, or summary), not to list/search tools.
+- When the user asks to add cards, add rendering, or visualize a plugin's results: do NOT ask what the cards should look like or offer format choices. From the installed tool names, identify that plugin's candidate final-data tools and ask the user which of those tools should get a card (skip the question only if they already named the endpoints). Then call request_plugin_build for that plugin, describing that result cards should be added to the chosen tools. The separate coding agent implements the card layouts.
+
+Editing an existing plugin (critical):
+- Installed plugins: ${pluginList}.
+- When the user asks to change, extend, add tools to, or add cards to an EXISTING plugin, you MUST pass that plugin's EXACT name from the installed-plugins list as the request_plugin_build "name" (e.g. use "dnd-5e-api", not "dnd" or "Dnd 5e"). The name selects which plugin is edited.
+- Never invent, shorten, or prettify the name of an existing plugin. A name that does not exactly match an installed plugin creates a brand-new EMPTY plugin instead of editing the one the user meant.
+- Only use a new name when the user is genuinely asking to create a new plugin that does not exist yet.
 
 Core policy:
 - Inspect the available tools before deciding how to answer.
@@ -163,6 +178,11 @@ export function createGeneratedPluginTools({ Type, plugins, executePluginTool })
       const name = String(definition.name || '').trim();
       if (!name || seen.has(name)) continue;
       seen.add(name);
+      // Fixed card layout authored by the builder and carried through discovery.
+      // Merged into the tool result below so the frontend receives template +
+      // data in one event and needs no separate tool-catalog lookup.
+      const card =
+        definition.card && typeof definition.card === 'object' ? definition.card : null;
       tools.push({
         name,
         label: name,
@@ -181,9 +201,11 @@ export function createGeneratedPluginTools({ Type, plugins, executePluginTool })
             },
             signal
           );
+          const details =
+            card && result && typeof result === 'object' ? { ...result, card } : result;
           return {
             content: [{ type: 'text', text: formatToolResult(result) }],
-            details: result
+            details
           };
         }
       });
@@ -220,10 +242,11 @@ export function createBuildRequestTool(Type, onBuildRequest) {
     name: 'request_plugin_build',
     label: 'Request Plugin Build',
     description:
-      'Request user confirmation to create or extend an API-backed Raynard plugin when installed tools cannot provide the required capability. Use this for semantic requests to build, add, connect, integrate, or extend API access. This tool never writes code itself.',
+      'Request user confirmation to create or extend an API-backed Raynard plugin, or to change how an existing plugin presents its results — for example, adding result cards to specific tools. Use this for semantic requests to build, add, connect, integrate, or extend API access, and for requests to add cards / rendering / visualization to a plugin. This tool never writes code itself.',
     parameters: Type.Object({
       name: Type.String({
-        description: 'Short descriptive plugin name, such as hacker-news or sec-filings.'
+        description:
+          'Plugin to build or edit. To EDIT an existing plugin, pass its exact installed name/slug (e.g. "dnd-5e-api") so it is edited in place; a non-matching name creates a new empty plugin. Use a fresh short slug (e.g. hacker-news, sec-filings) only when creating a genuinely new plugin.'
       }),
       description: Type.String({
         description:

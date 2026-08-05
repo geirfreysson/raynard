@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* shadcn design tokens + the small slice of preflight that shadcn relies on,
+   scoped to .rc-scope so nothing leaks into the rest of the app. Global
+   preflight is disabled in tailwind.config.js. */
+.rc-scope {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 240 5.9% 10%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --accent: 240 4.8% 95.9%;
+  --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --success: 142 71% 35%;
+  --border: 240 5.9% 90%;
+  --input: 240 5.9% 90%;
+  --ring: 240 5.9% 10%;
+  --radius: 0.65rem;
+
+  box-sizing: border-box;
+  color: hsl(var(--card-foreground));
+  font-family: var(--font-family-sans, Inter, system-ui, sans-serif);
+  text-align: left;
+}
+
+/* Without global preflight, `border` utilities set width but not style/color —
+   restore the solid default (scoped) so shadcn borders render. */
+.rc-scope *,
+.rc-scope *::before,
+.rc-scope *::after {
+  box-sizing: border-box;
+  border-width: 0;
+  border-style: solid;
+  border-color: hsl(var(--border));
+}
+
+/* Reset the browser default margins/spacing shadcn assumes are gone. */
+.rc-scope :where(h1, h2, h3, h4, h5, p, dl, dd, figure, pre, table) {
+  margin: 0;
+}
+.rc-scope table {
+  border-collapse: collapse;
+}
+.rc-scope img {
+  display: block;
+  max-width: 100%;
+}

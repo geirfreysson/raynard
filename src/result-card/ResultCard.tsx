@@ -1,0 +1,184 @@
+import type { CardBlock, CardTemplate } from './types';
+import { formatValue, getPath, interpolate, resolveRows } from './resolve';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar';
+import { Badge } from '../components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
+
+type ImageBlock = Extract<CardBlock, { component: 'Image' }>;
+
+function deltaTone(value: string): 'up' | 'down' | 'flat' {
+  const t = value.trim();
+  if (/^-/.test(t)) return 'down';
+  if (/^\+/.test(t)) return 'up';
+  return 'flat';
+}
+
+function initialsFrom(text: string): string {
+  const words = String(text || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return '—';
+  return words.slice(0, 2).map((w) => (w[0] ?? '').toUpperCase()).join('') || '—';
+}
+
+const badgeVariant: Record<string, 'success' | 'warn' | 'secondary'> = {
+  success: 'success',
+  warn: 'warn',
+  muted: 'secondary'
+};
+
+function Block({ block, data }: { block: CardBlock; data: unknown }) {
+  switch (block.component) {
+    case 'MetricRow':
+      return (
+        <div className="flex flex-wrap gap-x-6 gap-y-3">
+          {block.items.map((item, i) => {
+            const value = formatValue(getPath(data, item.field)) || '—';
+            const tone = item.tone === 'delta' ? deltaTone(value) : undefined;
+            const valueClass =
+              tone === 'up'
+                ? 'text-[hsl(var(--success))]'
+                : tone === 'down'
+                  ? 'text-destructive'
+                  : item.tone === 'muted'
+                    ? 'text-muted-foreground'
+                    : '';
+            return (
+              <div key={i} className="flex flex-col gap-0.5">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{item.label}</span>
+                <span className={`text-lg font-semibold tabular-nums ${valueClass}`}>{value}</span>
+              </div>
+            );
+          })}
+        </div>
+      );
+
+    case 'Table': {
+      const rows = resolveRows(data, block.rows);
+      return (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {block.columns.map((col, i) => (
+                <TableHead key={i}>{col.header}</TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={block.columns.length} className="italic text-muted-foreground">
+                  No rows
+                </TableCell>
+              </TableRow>
+            ) : (
+              rows.map((row, r) => (
+                <TableRow key={r}>
+                  {block.columns.map((col, c) => (
+                    <TableCell key={c}>{formatValue(getPath(row, col.field))}</TableCell>
+                  ))}
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      );
+    }
+
+    case 'KeyValue':
+      return (
+        <dl className="grid gap-2">
+          {block.pairs.map((pair, i) => (
+            <div key={i} className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted-foreground">{pair.label}</dt>
+              <dd className="text-right text-sm font-medium">{formatValue(getPath(data, pair.field)) || '—'}</dd>
+            </div>
+          ))}
+        </dl>
+      );
+
+    case 'Text':
+      return <p className="text-sm leading-relaxed">{interpolate(block.text, data)}</p>;
+
+    case 'Section':
+      return (
+        <section className="flex flex-col gap-3">
+          {block.title ? (
+            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{block.title}</h4>
+          ) : null}
+          {(block.layout || []).map((child, i) => (
+            <Block key={i} block={child} data={data} />
+          ))}
+        </section>
+      );
+
+    case 'Badge': {
+      const variant = badgeVariant[block.tone ?? 'muted'] ?? 'secondary';
+      return <Badge variant={variant}>{formatValue(getPath(data, block.field))}</Badge>;
+    }
+
+    case 'Image': {
+      const alt = block.alt ? interpolate(block.alt, data) : 'image';
+      return (
+        <Avatar className="h-16 w-16">
+          <AvatarImage src={formatValue(getPath(data, block.field))} alt={alt} />
+          <AvatarFallback>{initialsFrom(alt)}</AvatarFallback>
+        </Avatar>
+      );
+    }
+
+    case 'Json': {
+      const value = block.field ? getPath(data, block.field) : data;
+      let text: string;
+      try {
+        text = JSON.stringify(value, null, 2);
+      } catch {
+        text = String(value);
+      }
+      return <pre className="overflow-x-auto rounded-md border bg-muted/50 p-3 text-xs leading-relaxed">{text}</pre>;
+    }
+
+    default:
+      return (
+        <pre className="overflow-x-auto rounded-md border bg-muted/50 p-3 text-xs">{JSON.stringify(block, null, 2)}</pre>
+      );
+  }
+}
+
+export function ResultCard({ template, data }: { template: CardTemplate; data: unknown }) {
+  const layout = Array.isArray(template?.layout) ? template.layout : [];
+  // Hoist the first top-level Image block into the header as an avatar.
+  const headerImageIndex = layout.findIndex((block) => block.component === 'Image');
+  const headerImage = headerImageIndex >= 0 ? (layout[headerImageIndex] as ImageBlock) : null;
+  const bodyBlocks = layout.filter((_, i) => i !== headerImageIndex);
+  const title = template?.title ? interpolate(template.title, data) : '';
+  const avatarAlt = headerImage?.alt ? interpolate(headerImage.alt, data) : title;
+  const hasHeader = Boolean(headerImage || title);
+
+  return (
+    <div className="rc-scope">
+      <Card>
+        {hasHeader && (
+          <CardHeader>
+            {headerImage && (
+              <Avatar>
+                <AvatarImage src={formatValue(getPath(data, headerImage.field))} alt={avatarAlt || 'image'} />
+                <AvatarFallback>{initialsFrom(avatarAlt || title)}</AvatarFallback>
+              </Avatar>
+            )}
+            {title && <CardTitle>{title}</CardTitle>}
+          </CardHeader>
+        )}
+        {bodyBlocks.length > 0 && (
+          <CardContent>
+            {bodyBlocks.map((block, i) => (
+              <Block key={i} block={block} data={data} />
+            ))}
+          </CardContent>
+        )}
+      </Card>
+    </div>
+  );
+}

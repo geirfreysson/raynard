@@ -1,4 +1,27 @@
+// Shared across the fresh-build and interactive-edit prompts so the card
+// contract can never drift between them.
+const CARD_RULES = `Result-card rules (which tool results become a visible card):
+- A FINAL-DATA tool (a single record, a detail view, a computed summary, a status snapshot) MUST declare a static "card" template on the tool AND return a matching "data" object from execute. The host renders the card beneath the assistant message.
+- A LIST/SEARCH tool (returns candidates, ids, or search hits the agent drills into) MUST NOT declare a card and MUST NOT return "data". These are intermediate steps, not final results.
+- The card layout is FIXED at build time and stored on the tool. It never varies per call; only the "data" it binds to changes. Do not build a different card shape per response.
+- The card is DECLARATIVE — objects only, no JSX, no functions, no host/React code. You are still forbidden from writing UI; you only describe layout and which data fields go where.
+- Card shape: { name: { singular: string, plural: string }, title?: string, layout: CardBlock[] }. "name" is REQUIRED and contains short lower-case count nouns shown by the host (e.g. { singular: 'monster', plural: 'monsters' } produces "1 monster" / "2 monsters"). Use an explicit plural so irregular nouns work. Strings in "title" and Text blocks support {{path}} interpolation from "data" (e.g. "{{symbol}} — {{name}}"). Block "field"/"rows" are dotted paths into "data" (e.g. "quote.price", "holdings").
+- Allowed CardBlock components (nothing else — unknown components fail validation):
+  - { component: 'MetricRow', items: [{ label, field, tone?: 'delta' | 'muted' }] }  // headline numbers; 'delta' colors +/- values
+  - { component: 'Table', columns: [{ header, field }], rows: '<path to array in data>' }
+  - { component: 'KeyValue', pairs: [{ label, field }] }
+  - { component: 'Text', text: '<string with {{path}} interpolation>' }
+  - { component: 'Section', title?, layout: CardBlock[] }  // groups nested blocks
+  - { component: 'Badge', field, tone?: 'success' | 'warn' | 'muted' }
+  - { component: 'Image', field, alt? }  // an image URL; rendered as a rounded avatar next to the card header. Use for a record's picture/icon/portrait when the API provides one. "field" is a path to an absolute image URL string in data.
+  - { component: 'Json', field? }  // raw fallback; whole data when field omitted
+- If the plugin's tool type does not allow "card"/"data" yet, widen it (add optional card?/data? to the tool interface). You may import the CardTemplate type from ./runtime.ts to type the card (optional).
+- Add a test asserting the final-data tool returns "data" whose fields the card binds to (e.g. data.price exists when a MetricRow binds field 'price').`;
+
 export function buildSystemPrompt(request) {
+  if (request && request.editMode) {
+    return buildEditSystemPrompt(request);
+  }
   const sourceUrls = Array.isArray(request.sourceUrls)
     ? request.sourceUrls.map((url) => String(url).trim()).filter(Boolean)
     : [];
@@ -51,6 +74,9 @@ import { fetchThing } from './client.ts';
 import { createApiReference } from './runtime.ts';
 
 export const tools = {
+  // A FINAL-DATA tool: fetches one record, so it declares a fixed card and
+  // returns a matching \`data\` object. The card layout is authored ONCE here and
+  // never varies per call — only \`data\` changes.
   example_get_thing: {
     description: 'What question this answers, what API data it fetches, limits, and follow-up tools.',
     parameters: {
@@ -58,10 +84,23 @@ export const tools = {
       required: ['id'],
       properties: { id: { type: 'integer', description: 'Numeric record id to fetch.' } }
     },
+    card: {
+      name: { singular: 'thing', plural: 'things' },
+      title: '{{name}} (#{{id}})',
+      layout: [
+        { component: 'MetricRow', items: [
+          { label: 'Price', field: 'price' },
+          { label: 'Change', field: 'change', tone: 'delta' }
+        ]},
+        { component: 'KeyValue', pairs: [{ label: 'Category', field: 'category' }] }
+      ]
+    },
     async execute(args: Record<string, unknown>): Promise<ToolResult> {
       const thing = await fetchThing(Number(args?.id));
       return {
         text: \`Thing \${thing.id}: \${thing.name}\`,
+        // \`data\` supplies the fields the card binds to (price, change, category…).
+        data: { id: thing.id, name: thing.name, price: thing.price, change: thing.change, category: thing.category },
         references: [createApiReference({
           id: String(thing.id),
           label: thing.name,
@@ -69,6 +108,18 @@ export const tools = {
           quote: thing.name,
           payload: thing
         })]
+      };
+    }
+  },
+  // A LIST/SEARCH tool: NOT a final result, so it has NO card and NO data.
+  example_search_things: {
+    description: 'Search things by keyword. Returns candidate ids for a follow-up detail call.',
+    parameters: { type: 'object', required: ['q'], properties: { q: { type: 'string', description: 'Search text.' } } },
+    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+      const hits = await searchThings(String(args?.q ?? ''));
+      return {
+        text: hits.map((h) => \`\${h.id}: \${h.name}\`).join('\\n'),
+        references: hits.map((h) => createApiReference({ id: String(h.id), label: h.name, sourceUrl: \`\${BASE}/things/\${h.id}\`, quote: h.name, payload: h }))
       };
     }
   }
@@ -98,11 +149,72 @@ Mandatory tool-interface rules (identical across all plugins):
 - Test with mockFetch from ./testing.ts and keep the provided contract.test.ts. Cover every fetch helper and every tool with mocked responses.
 - Only endpoints, parameters, response types, and rendering change between plugins.
 
+${CARD_RULES}
+
 Source documentation:
 ${sourceBlock}`;
 }
 
+// Interactive edit mode: Build mode is a live coding session on an EXISTING
+// plugin. The agent reads the real files and makes the smallest change, rather
+// than filling a fresh scaffold.
+function buildEditSystemPrompt(request) {
+  const pluginDir = String(request.pluginDir || '').trim();
+  const name = String(request.name || '').trim();
+  return `You are Pi, an interactive coding agent editing an existing Raynard plugin in Build mode.
+
+You are working inside one plugin workspace: ${name || '(the current plugin)'} at ${pluginDir || '(the plugin directory)'}.
+The user talks to you turn by turn to change this plugin's code — treat it like a normal coding session where the repo happens to be their plugin.
+
+How to work:
+- The plugin's current source (tools.ts, client.ts, index.ts, README.md, and a file listing) is embedded in the user message each turn — treat it as the authoritative current state and DO NOT re-read those files. Only use your file tools to read something not shown (e.g. a test file) or to make edits. Real tools already exist here; this is never a fresh scaffold.
+- Cards live on tools in tools.ts: a tool's \`card\` property is its result card, and the tool name tells you which card it is (e.g. the "monster card" is the \`card\` on the dnd_get_monster tool). To change a card, edit that tool's \`card\` template.
+- Make the SMALLEST change that satisfies the user's request. Preserve existing tool names, behavior, exports, and passing tests. Do not rewrite the plugin from scratch or delete working code.
+- Adapt to THIS plugin's conventions. Some plugins predate the shared runtime and use their own reference helper (e.g. references.ts) and a local tool interface instead of ./runtime.ts — keep using whatever the plugin already uses. Only import from ./runtime.ts if the plugin already does or if you clearly need a shared helper (apiGet, createApiReference) or the CardTemplate type.
+- Stay within the plugin. Do not modify the host app. Do not build React, pages, routes, CSS, or any UI — this is TypeScript API tooling only.
+- Keep secrets out of source.
+- Tests: use your bash tool to run \`node --test <files>\` when the user asks or after a substantive change, and fix failures. You are not forced to pass whole-plugin validation on every turn — respond to what the user asked.
+
+${CARD_RULES}
+
+When the user asks for "nice rendering" of a tool's results, that means: add a fixed result-card (and matching "data") to the relevant FINAL-DATA tool(s) per the rules above, widening the plugin's tool type to allow card?/data? if needed.`;
+}
+
+// A short recap of recent build-conversation turns, so a follow-up like "now
+// tweak that" has context without depending on the agent's internal message
+// format. The plugin files remain the source of truth.
+function buildConversationRecap(messages) {
+  const turns = Array.isArray(messages) ? messages.slice(-6) : [];
+  if (!turns.length) return '';
+  const lines = turns
+    .map((message) => {
+      const role = message && message.role === 'assistant' ? 'You' : 'User';
+      const content = String((message && message.content) || '').trim();
+      if (!content) return '';
+      return `${role}: ${content.slice(0, 600)}`;
+    })
+    .filter(Boolean);
+  return lines.length ? `Recent conversation so far:\n${lines.join('\n')}\n\n` : '';
+}
+
 export function buildUserPrompt(request) {
+  if (request && request.editMode) {
+    const instruction = String(request.prompt || request.description || '').trim();
+    const snapshot = String(request.pluginSnapshot || '').trim();
+    const snapshotBlock = snapshot
+      ? `The plugin's CURRENT source is below. This is the up-to-date state on disk — do NOT re-read these files, just edit them directly. Only read a file if it is not shown here or you need something beyond it.
+
+${snapshot}
+
+`
+      : '';
+    return `${buildConversationRecap(request.messages)}${snapshotBlock}The user's request for this turn:
+${instruction || '(no instruction provided)'}
+
+Make the smallest change that satisfies the request. Preserve existing tools and passing tests. Run node --test after a substantive change.
+
+Important: reading files is not the task — you MUST apply the change by editing the source files this turn. Do not end your turn after only inspecting the code; keep going until the edits are written to disk and (for code changes) the tests run. Finish with a one or two sentence summary of what you changed.`;
+  }
   return `Implement this Raynard Explore-mode API plugin.
 
 User request:
@@ -114,6 +226,7 @@ ${String(request.pluginDir || '').trim()}
 Expected output (the workspace is already scaffolded — reuse runtime.ts/testing.ts, do not edit them):
 - client.ts: one thin fetch helper per endpoint, built on apiGet from ./runtime.ts.
 - tools.ts: fill the exported tools registry with focused tools, each with a specific description and JSON parameter schema, returning { text, references } via createApiReference.
+- Result cards: give every FINAL-DATA tool (detail/record/summary/status) a fixed "card" template plus a matching "data" object; give LIST/SEARCH tools neither. Follow the Result-card rules in the system prompt.
 - Executable mocked-fetch tests in *.test.ts files using mockFetch from ./testing.ts; keep contract.test.ts.
 - README.md with an Endpoint Inventory covering implemented and future endpoints.
 - No UI code and no re-implemented plumbing.
@@ -126,6 +239,48 @@ export function findPluginTestFiles(files) {
     .filter((name) => /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(String(name)))
     .map(String)
     .sort();
+}
+
+// Components the host card renderer knows how to draw. A card that names an
+// unknown component still renders (raw-JSON fallback) but is rejected here so
+// the builder fixes typos before completion.
+const CARD_COMPONENTS = new Set(['MetricRow', 'Table', 'KeyValue', 'Text', 'Section', 'Badge', 'Image', 'Json']);
+
+function collectCardComponents(layout, found = []) {
+  if (!Array.isArray(layout)) return found;
+  for (const block of layout) {
+    if (!block || typeof block !== 'object') continue;
+    found.push(block.component);
+    if (block.component === 'Section') collectCardComponents(block.layout, found);
+  }
+  return found;
+}
+
+function validateToolCard(tool) {
+  const card = tool && tool.card;
+  if (card == null) return;
+  const name = String(tool.name || '(unnamed)');
+  if (typeof card !== 'object' || !Array.isArray(card.layout) || card.layout.length === 0) {
+    throw new Error(`Tool "${name}" has a card with no layout blocks. Give it a { name: { singular, plural }, title?, layout: [...] } or remove the card.`);
+  }
+  if (
+    !card.name ||
+    typeof card.name !== 'object' ||
+    typeof card.name.singular !== 'string' ||
+    !card.name.singular.trim() ||
+    typeof card.name.plural !== 'string' ||
+    !card.name.plural.trim()
+  ) {
+    throw new Error(
+      `Tool "${name}" card must define non-empty singular and plural display names, for example { name: { singular: 'monster', plural: 'monsters' }, layout: [...] }.`
+    );
+  }
+  const bad = collectCardComponents(card.layout).filter((component) => !CARD_COMPONENTS.has(component));
+  if (bad.length) {
+    throw new Error(
+      `Tool "${name}" card uses unknown component(s): ${bad.join(', ')}. Allowed: ${[...CARD_COMPONENTS].join(', ')}.`
+    );
+  }
 }
 
 export function validatePluginArtifacts({ files, readme, tools }) {
@@ -147,5 +302,7 @@ export function validatePluginArtifacts({ files, readme, tools }) {
       `Every tool must expose an async execute(args) method. Not callable: ${notCallable.join(', ')}. Rename the tool method to "execute" (never "handler", "run", or "call").`
     );
   }
-  return { testFiles, toolCount: tools.length };
+  for (const tool of tools) validateToolCard(tool);
+  const cardCount = tools.filter((tool) => tool && tool.card).length;
+  return { testFiles, toolCount: tools.length, cardCount };
 }

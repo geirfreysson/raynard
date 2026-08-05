@@ -1,0 +1,28 @@
+/* Layout helpers for where result cards sit in the app. The cards themselves are
+   styled with Tailwind + shadcn (see theme.css and src/components/ui). */
+
+.message-cards {
+  margin-top: 8px;
+}
+
+.rc-card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Card previews in the plugin detail view */
+.plugin-detail-hint {
+  color: var(--text-muted, #5e5e5e);
+  margin: 0 0 10px;
+}
+.plugin-card-preview {
+  margin-bottom: 16px;
+}
+.plugin-card-preview-tool {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-family: var(--font-family-mono, monospace);
+  font-size: 12px;
+  color: var(--text-muted, #5e5e5e);
+}

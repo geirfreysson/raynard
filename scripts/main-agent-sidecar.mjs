@@ -120,11 +120,25 @@ const buildRequestTool = createBuildRequestTool(Type, (nextRequest) => {
 });
 const tools = [...generatedTools, buildRequestTool];
 
+// Real identities of installed plugins so the agent edits an existing plugin by
+// its exact name instead of inventing a near-miss name that scaffolds a
+// duplicate empty plugin.
+const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
+  .map((plugin) => {
+    const dir = String(plugin.directory || '');
+    const slug =
+      dir.split('/').filter(Boolean).pop() ||
+      String(plugin.id || '').replace(/^raynard\.generated\./, '');
+    return { slug, name: String(plugin.name || slug) };
+  })
+  .filter((plugin) => plugin.slug);
+
 const agent = new Agent({
   initialState: {
     systemPrompt: buildMainAgentSystemPrompt({
       mode: request.mode === 'build' ? 'build' : 'explore',
-      toolNames: generatedTools.map((tool) => tool.name)
+      toolNames: generatedTools.map((tool) => tool.name),
+      plugins: installedPlugins
     }),
     model: createModel(request),
     thinkingLevel: 'off',

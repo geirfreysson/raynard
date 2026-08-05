@@ -44,6 +44,47 @@ export function createApiReference(input: ApiReference) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Result cards
+//
+// A card is a FIXED, declarative layout authored once at plugin-build time and
+// stored on a tool. Each tool call only feeds fresh `data` into it — the layout
+// never varies per call. The host app owns the actual rendering components; this
+// file only declares the shape the builder fills in. String fields support
+// `{{path}}` interpolation and `field`/`rows` are dotted paths into the tool's
+// returned `data` object (e.g. 'quote.price', 'holdings').
+// ---------------------------------------------------------------------------
+
+/** A single visual block in a card. `component` picks an app-owned renderer. */
+export type CardBlock =
+  | { component: 'MetricRow'; items: { label: string; field: string; tone?: 'delta' | 'muted' }[] }
+  | { component: 'Table'; columns: { header: string; field: string }[]; rows: string }
+  | { component: 'KeyValue'; pairs: { label: string; field: string }[] }
+  | { component: 'Text'; text: string }
+  | { component: 'Section'; title?: string; layout: CardBlock[] }
+  | { component: 'Badge'; field: string; tone?: 'success' | 'warn' | 'muted' }
+  /** An image URL rendered as a rounded avatar next to the card header. */
+  | { component: 'Image'; field: string; alt?: string }
+  | { component: 'Json'; field?: string };
+
+/** A fixed card layout stored on a storable (final-data) tool. */
+export type CardTemplate = {
+  /** Lower-case count labels used by the host, e.g. "1 monster", "2 monsters". */
+  name: {
+    singular: string;
+    plural: string;
+  };
+  /** Heading text; supports {{path}} interpolation from the call's data. */
+  title?: string;
+  /** Ordered blocks rendered top-to-bottom. */
+  layout: CardBlock[];
+};
+
+/** Identity helper that type-checks a card template at authoring time. */
+export function defineCard(template: CardTemplate): CardTemplate {
+  return template;
+}
+
 export type QueryValue = string | number | boolean | undefined | null;
 
 /** Serialize a query object, skipping undefined/null/empty. Returns '' or '?a=1&b=2'. */

@@ -36,20 +36,31 @@ active chat path.
 5. If capability is missing, the main agent calls the native
    `request_plugin_build` tool. It returns a structured request containing the
    plugin name, broad capability description, documentation URLs, and reason.
-6. Explore mode can only offer a switch to Build. Switching carries the same
-   request forward automatically. Build mode shows an explicit write-code
-   confirmation.
-7. Only after confirmation does Rust scaffold or replace the plugin workspace
-   and start `scripts/plugin-builder-sidecar.mjs`.
+6. Explore mode presents the plugin-writing confirmation while remaining in
+   Explore. Only the confirmation button switches the app into Build.
+7. The resolved plugin name decides the confirmed flow. A brand-new plugin is
+   scaffolded before the coding pass. An existing plugin is opened for in-place
+   editing: Rust refreshes only the vendored plumbing (`runtime.ts`/`testing.ts`)
+   and preserves the author's files. The chat records an `activeBuildPlugin`,
+   but every later ordinary message returns to Explore; another coding pass must
+   be requested semantically and confirmed again.
 8. The builder is a separate Pi coding agent with filesystem coding tools
-   scoped to that plugin directory. It uses the selected coding model.
-9. Builder completion is gated on executable mocked tests, `node --test`,
-   runtime tool discovery, at least one exported tool, and a README Endpoint
-   Inventory. Validation failure gives the coding agent one repair pass.
+   (read/edit/write/grep/ls/bash) scoped to that plugin directory. It uses the
+   selected coding model. Each Build-mode message is one editing pass;
+   `run_plugin_builder_stream` forwards `editMode` and the recent conversation so
+   follow-ups have context.
+9. A fresh build is gated on executable mocked tests, `node --test`, runtime tool
+   discovery, at least one exported tool, and a README Endpoint Inventory
+   (validation failure gives one repair pass). An interactive edit turn is not
+   forced through that gate — the agent makes the smallest change and runs
+   `node --test` via bash when appropriate.
+10. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
+    by the host as a React/shadcn card; list/search tools do not. The builder
+    only authors the declarative template — never React.
 
-The main Pi agent always uses the selected Chat/Explore model, including the
-semantic decision made while the UI is in Build mode. The Pi coding agent uses
-the separately selected Coding/Build model only after confirmation. `/models`
+Every ordinary user message switches to Explore and uses the selected
+Chat/Explore model. The Pi coding agent uses the separately selected
+Coding/Build model only after the plugin-writing confirmation. `/models`
 configures these roles independently.
 
 The Stop button calls `cancel_model_chat_stream`. Rust records cancellation and

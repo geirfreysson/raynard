@@ -16,6 +16,8 @@ describe('plugin builder core', () => {
     expect(prompt).toContain('Endpoint Inventory');
     expect(prompt).toContain('createApiReference');
     expect(prompt).toContain('Do not build React components');
+    expect(prompt).toContain("name: { singular: 'thing', plural: 'things' }");
+    expect(prompt).toMatch(/name.*REQUIRED.*lower-case count nouns/i);
   });
 
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {
@@ -47,6 +49,38 @@ describe('plugin builder core', () => {
 
     expect(prompt).toContain('node --test');
     expect(prompt).toContain('Do not report completion until');
+  });
+
+  it('switches to an interactive edit prompt when editMode is set', () => {
+    const sys = buildSystemPrompt({ editMode: true, name: 'hacker-news', pluginDir: '/plugins/hacker-news' });
+    // Edit mode: smallest change, adapt to existing conventions, no fresh stub,
+    // and the current source is embedded so it should not re-read files.
+    expect(sys).toContain('interactive coding agent editing an existing');
+    expect(sys).toContain('DO NOT re-read');
+    expect(sys).toContain('SMALLEST change');
+    expect(sys).toMatch(/monster card.*dnd_get_monster/);
+    expect(sys).not.toContain('empty registry');
+    // The shared card contract still applies.
+    expect(sys).toContain('Result-card rules');
+    expect(sys).toContain('CardBlock');
+
+    const user = buildUserPrompt({
+      editMode: true,
+      prompt: 'add a delta metric to the score',
+      messages: [
+        { role: 'user', content: 'add nice rendering to hn_get_item' },
+        { role: 'assistant', content: 'added a card' }
+      ]
+    });
+    expect(user).toContain('Recent conversation so far');
+    expect(user).toContain('add a delta metric to the score');
+    expect(user).toContain('smallest change');
+  });
+
+  it('keeps the create prompt as the default when editMode is falsy', () => {
+    const sys = buildSystemPrompt({ sourceUrls: [] });
+    expect(sys).toContain('empty registry');
+    expect(sys).not.toContain('interactive coding agent editing an existing');
   });
 
   it('finds supported test files and rejects structure-only output', () => {
@@ -99,6 +133,74 @@ describe('plugin builder core', () => {
         ...base,
         tools: [{ name: 'hn_list_stories', callable: true }]
       })
-    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1 });
+    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 0 });
+  });
+
+  it('accepts a valid result card and counts it', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    const card = {
+      name: { singular: 'thing', plural: 'things' },
+      title: '{{name}}',
+      layout: [
+        { component: 'Image', field: 'image', alt: '{{name}}' },
+        { component: 'MetricRow', items: [{ label: 'Price', field: 'price', tone: 'delta' }] },
+        { component: 'Section', title: 'More', layout: [{ component: 'Text', text: '{{note}}' }] }
+      ]
+    };
+    expect(
+      validatePluginArtifacts({
+        ...base,
+        tools: [{ name: 'get_thing', callable: true, card }]
+      })
+    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 1 });
+  });
+
+  it('rejects a result card without singular and plural display names', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    expect(() =>
+      validatePluginArtifacts({
+        ...base,
+        tools: [{ name: 'get_thing', callable: true, card: { layout: [{ component: 'Text', text: 'Thing' }] } }]
+      })
+    ).toThrow(/singular.*plural/i);
+  });
+
+  it('rejects a card with an unknown component', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    expect(() =>
+      validatePluginArtifacts({
+        ...base,
+        tools: [{
+          name: 'get_thing',
+          callable: true,
+          card: {
+            name: { singular: 'thing', plural: 'things' },
+            layout: [{ component: 'Chart' }]
+          }
+        }]
+      })
+    ).toThrow(/unknown component/i);
+  });
+
+  it('rejects a card with no layout blocks', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    expect(() =>
+      validatePluginArtifacts({
+        ...base,
+        tools: [{ name: 'get_thing', callable: true, card: { layout: [] } }]
+      })
+    ).toThrow(/layout/i);
   });
 });

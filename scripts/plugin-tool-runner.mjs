@@ -95,6 +95,10 @@ try {
             definition && definition.parameters && typeof definition.parameters === 'object'
               ? definition.parameters
               : { type: 'object', properties: {} },
+          card:
+            definition && definition.card && typeof definition.card === 'object'
+              ? definition.card
+              : null,
           callable: Boolean(definition && typeof definition.execute === 'function')
         }))
       }

@@ -90,6 +90,10 @@ export type PluginBuilderRequest = {
   description: string;
   sourceUrls: string[];
   prompt: string;
+  /** True for an interactive edit of an existing plugin (vs. a fresh build). */
+  editMode?: boolean;
+  /** Prior build-conversation turns replayed for follow-up continuity. */
+  messages?: ChatMessage[];
 };
 
 export async function runMainAgentStream(

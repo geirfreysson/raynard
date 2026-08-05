@@ -151,6 +151,37 @@ if (!apiKey) {
   process.exit(1);
 }
 
+// Prime an edit turn with the plugin's CURRENT source so the model understands
+// the layout up front and does not have to re-read the same files every turn.
+// Because we always embed the current files, this doubles as cross-turn memory:
+// the state the model sees is authoritative, not something it must reconstruct.
+async function readPluginSnapshot(dir) {
+  const wanted = ['tools.ts', 'client.ts', 'index.ts', 'README.md'];
+  const parts = [];
+  try {
+    const entries = await readdir(dir);
+    const listing = entries.filter((name) => !name.startsWith('.')).sort().join(', ');
+    if (listing) parts.push(`Files in this plugin: ${listing}`);
+  } catch {
+    // A missing dir is handled elsewhere; just skip the listing.
+  }
+  for (const name of wanted) {
+    try {
+      let text = await readFile(`${dir}/${name}`, 'utf8');
+      const CAP = 16000;
+      if (text.length > CAP) text = `${text.slice(0, CAP)}\n… (${name} truncated; read the file for the rest)`;
+      parts.push(`===== ${name} =====\n${text}`);
+    } catch {
+      // Optional file (e.g. no client.ts / README yet) — skip it.
+    }
+  }
+  return parts.join('\n\n');
+}
+
+if (request.editMode) {
+  request.pluginSnapshot = await readPluginSnapshot(pluginDir);
+}
+
 const agent = new Agent({
   initialState: {
     systemPrompt: buildSystemPrompt(request),
@@ -168,6 +199,11 @@ process.on('SIGTERM', () => {
 });
 
 let finalText = '';
+// Track whether the agent actually modified a file this run. A weak/chatty
+// coding model can read everything and then end its turn without editing; in
+// edit mode we detect that and nudge it once to apply the change.
+const FILE_MUTATING_TOOLS = new Set(['edit', 'write', 'copy', 'multiedit', 'create', 'apply_patch']);
+let madeFileEdits = false;
 const unsubscribe = agent.subscribe((event) => {
   if (event.type === 'message_update') {
     const assistantEvent = event.assistantMessageEvent;
@@ -184,6 +220,9 @@ const unsubscribe = agent.subscribe((event) => {
   }
 
   if (event.type === 'tool_execution_start') {
+    if (FILE_MUTATING_TOOLS.has(String(event.toolName || '').toLowerCase())) {
+      madeFileEdits = true;
+    }
     emit({
       type: 'tool_execution_start',
       toolCallId: event.toolCallId || '',
@@ -223,17 +262,31 @@ const unsubscribe = agent.subscribe((event) => {
 try {
   emit({ type: 'status', status: 'builder_started' });
   await agent.prompt(buildUserPrompt(request));
-  try {
-    await validatePluginWorkspace();
-  } catch (validationError) {
-    emit({ type: 'status', status: 'validation_failed_retrying' });
-    await agent.prompt(
-      `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
-    );
-    await validatePluginWorkspace();
+  if (request.editMode) {
+    // An interactive edit turn is one conversational step and is NOT forced
+    // through whole-plugin validation. But if the model only inspected files and
+    // ended its turn without editing anything (common with weaker coding
+    // models), nudge it once to actually apply the change.
+    if (!madeFileEdits) {
+      emit({ type: 'status', status: 'edit_no_changes_retrying' });
+      await agent.prompt(
+        'You inspected the files but have not written any edits yet. Now actually implement the change the user asked for: edit the plugin source (e.g. tools.ts) to add the card templates and matching data, then run the relevant `node --test` files and briefly report what you changed. Do not end your turn until the edits are written to disk.'
+      );
+    }
+  } else {
+    // Fresh builds are gated by a full validate-or-retry pass.
+    try {
+      await validatePluginWorkspace();
+    } catch (validationError) {
+      emit({ type: 'status', status: 'validation_failed_retrying' });
+      await agent.prompt(
+        `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
+      );
+      await validatePluginWorkspace();
+    }
   }
   unsubscribe();
-  emit({ type: 'done', text: finalText || 'Plugin builder completed.' });
+  emit({ type: 'done', text: finalText || (request.editMode ? 'Done.' : 'Plugin builder completed.') });
 } catch (error) {
   unsubscribe();
   const message = error && error.message ? error.message : String(error);

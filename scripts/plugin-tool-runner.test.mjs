@@ -31,17 +31,23 @@ describe('plugin tool runner integration', () => {
       expect.objectContaining({
         name: 'lookupExample',
         description: expect.stringContaining('example API'),
-        callable: true
+        callable: true,
+        card: expect.objectContaining({
+          name: { singular: 'example', plural: 'examples' },
+          title: '{{name}} (#{{id}})',
+          layout: [{ component: 'KeyValue', pairs: [{ label: 'Name', field: 'name' }] }]
+        })
       })
     ]);
   });
 
-  it('returns non-empty text and source references from a generated tool', () => {
+  it('returns non-empty text, references, and card data from a generated tool', () => {
     const result = runTool({ toolName: 'lookupExample', args: { id: 42 } });
 
     expect(result.status).toBe(0);
     expect(result.payload.result.text).toContain('Example 42');
     expect(result.payload.result.references[0].url).toBe('https://api.example.com/items/42');
+    expect(result.payload.result.data).toEqual({ id: 42, name: 'Example 42' });
   });
 
   it('marks a tool without an execute method as not callable and refuses to run it', () => {

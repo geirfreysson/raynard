@@ -53,6 +53,43 @@ describe('main agent core', () => {
     expect(build).toContain('Only the separate Pi coding agent may write plugin files');
   });
 
+  it('teaches the agent that result cards are a built-in feature, not content to design', () => {
+    const build = buildMainAgentSystemPrompt({ mode: 'build', toolNames: ['dnd_get_spell'] });
+
+    // Cards are recognized as a rendering feature the app owns.
+    expect(build).toContain('Result cards');
+    expect(build).toContain('final-data tool');
+    // It must not interrogate the user about visual format / card types.
+    expect(build).toMatch(/do NOT ask what the cards should look like/i);
+    expect(build).toContain('which of those tools should get a card');
+    // Adding cards is itself a valid reason to call request_plugin_build.
+    expect(build).toContain('adding result cards to specific tools');
+  });
+
+  it('lists installed plugins and forbids inventing names for existing ones', () => {
+    const build = buildMainAgentSystemPrompt({
+      mode: 'build',
+      toolNames: ['dnd_get_monster'],
+      plugins: [
+        { slug: 'dnd-5e-api', name: 'Dnd 5e Api' },
+        { slug: 'hacker-news', name: 'hacker-news' }
+      ]
+    });
+
+    // The real plugin identities are surfaced so the agent edits the right one.
+    expect(build).toContain('Installed plugins:');
+    expect(build).toContain('dnd-5e-api');
+    // Editing must reuse the exact name; a mismatch creates a duplicate.
+    expect(build).toMatch(/EXACT name/);
+    expect(build).toMatch(/creates a brand-new EMPTY plugin/i);
+  });
+
+  it('advertises result-card requests in the build tool description', () => {
+    const tool = createBuildRequestTool(Type, () => {});
+    expect(tool.description).toMatch(/result cards/i);
+    expect(tool.description).toMatch(/rendering|presents its results|visualization/i);
+  });
+
   it('converts JSON schema required fields and enums to Pi parameter schemas', () => {
     const schema = buildPiTypeFromSchema(Type, {
       type: 'object',

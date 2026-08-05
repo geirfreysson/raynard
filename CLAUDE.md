@@ -8,10 +8,12 @@ Raynard is a Tauri v2 app with two separate Pi agents:
 
 - The main Pi agent handles every chat turn using the selected Chat/Explore
   model. Generated API plugins are registered as native Pi tools.
-- The Pi coding agent starts only after a native `request_plugin_build` call,
-  the Build-mode transition, and explicit user confirmation. It uses the
-  separately selected Coding/Build model and may write only inside one
-  generated-plugin workspace.
+- The Pi coding agent runs only after a native `request_plugin_build` call and
+  explicit plugin-writing confirmation. The confirmed pass is scoped to one
+  generated-plugin workspace. A new plugin is scaffolded; an existing plugin is
+  edited in place. Every later ordinary message returns to Explore, so another
+  coding pass requires another semantic build request and confirmation. The
+  builder uses the separately selected Coding/Build model.
 
 Do not reintroduce regex intent routing or fenced Markdown `tool_call` parsing.
 Semantic Explore/Build decisions belong to the main Pi agent and its native
@@ -26,14 +28,19 @@ src/main.ts
   -> scripts/main-agent-sidecar.mjs
      -> native generated-plugin tool -> scripts/plugin-tool-runner.mjs
      -> request_plugin_build -> UI confirmation
-        -> Rust run_plugin_builder_stream
-        -> scripts/plugin-builder-sidecar.mjs
+        -> resolve plugin (existing = edit, new = scaffold)
+        -> Rust run_plugin_builder_stream (editMode + prior messages)
+        -> scripts/plugin-builder-sidecar.mjs  (one editing pass per turn)
 ```
 
-The builder must produce TypeScript API tools, executable mocked tests,
-reference-bearing results, and README endpoint documentation. It must not
-produce React UI. Completion is validated with `node --test` and runtime tool
-discovery.
+A fresh build must produce TypeScript API tools, executable mocked tests,
+reference-bearing results, and README endpoint documentation, and is validated
+with `node --test` and runtime tool discovery. An interactive **edit** turn is
+not forced through that whole-plugin validation — the coding agent reads the
+existing files, makes the smallest change the user asked for, and runs
+`node --test` via its bash tool when appropriate. Neither mode may produce React
+UI. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
+by the host; the builder never writes React.
 
 ## Debugging the Latest Chat
 
@@ -75,7 +82,8 @@ More detailed commands and diagnosis cases are in `AGENTS.md`.
 
 ## Working Rules
 
-- Preserve the Explore/Build confirmation boundary.
+- Preserve the Explore/Build boundary. Every ordinary message runs in Explore;
+  only explicit confirmation of a plugin-writing request enters Build.
 - Keep chat and coding model selection separate.
 - Write deterministic tests before changing agent routing, schemas, plugin
   execution, or builder validation.

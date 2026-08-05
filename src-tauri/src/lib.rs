@@ -78,6 +78,10 @@ struct StoredChatMessage {
     builder_run: Option<bool>,
     #[serde(rename = "builderActivities", default)]
     builder_activities: Option<Value>,
+    /// Result cards captured from storable tool calls during this turn.
+    /// Each entry is { toolName, template, data }; rendered beneath the message.
+    #[serde(default)]
+    cards: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -91,6 +95,10 @@ struct ChatHistoryPayload {
     #[serde(alias = "updated_at")]
     updated_at: String,
     messages: Vec<StoredChatMessage>,
+    /// The plugin this Build-mode chat is actively editing ({ dir, name }), so
+    /// reopening the chat resumes the coding session. Opaque passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_build_plugin: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +151,14 @@ struct PluginBuilderRequest {
     description: String,
     source_urls: Option<Vec<String>>,
     prompt: String,
+    /// True when editing an existing plugin as an interactive coding session
+    /// (read + edit real files) rather than filling a fresh scaffold.
+    #[serde(default)]
+    edit_mode: bool,
+    /// Prior build-conversation turns, replayed so the coding agent has context
+    /// for follow-ups like "now tweak that". Each item is { role, content }.
+    #[serde(default)]
+    messages: Option<Vec<ChatMessage>>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +191,10 @@ struct GeneratedPluginTool {
     name: String,
     description: String,
     parameters: Value,
+    /// Fixed result-card layout authored by the builder. Present only on
+    /// final-data tools; drives the card rendered beneath the agent message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    card: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -343,6 +363,7 @@ fn save_chat_history(
         created_at,
         updated_at,
         messages,
+        active_build_plugin: payload.active_build_plugin,
     };
     let raw = serde_json::to_string_pretty(&normalized)
         .map_err(|error| format!("Could not serialize chat: {error}"))?;
@@ -516,6 +537,18 @@ fn get_plugin_scaffold_status(
     })
 }
 
+// Overwrite only the vendored plumbing (runtime.ts / testing.ts) in an existing
+// plugin, leaving the author's own files (tools.ts, client.ts, …) untouched.
+// Used when entering an interactive edit session so the current shared helpers
+// and card types are present without re-scaffolding.
+fn refresh_plugin_vendored_runtime(plugin_dir: &Path) -> Result<(), String> {
+    fs::write(plugin_dir.join("runtime.ts"), PLUGIN_RUNTIME_TS)
+        .map_err(|error| format!("Could not refresh plugin runtime: {error}"))?;
+    fs::write(plugin_dir.join("testing.ts"), PLUGIN_TESTING_TS)
+        .map_err(|error| format!("Could not refresh plugin test helpers: {error}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn scaffold_plugin_capability(
     app: tauri::AppHandle,
@@ -523,9 +556,6 @@ fn scaffold_plugin_capability(
 ) -> Result<GeneratedPlugin, String> {
     let slug = normalize_plugin_slug(&request.name);
     let description = normalize_plugin_description(&request.description);
-    if description.is_empty() {
-        return Err("Plugin description is required.".to_string());
-    }
 
     let root = generated_plugins_dir(&app)?;
     ensure_dir(&root)?;
@@ -535,12 +565,28 @@ fn scaffold_plugin_capability(
         .unwrap_or("error")
         .trim()
         .to_lowercase();
+    // A fresh scaffold needs a description; editing an existing plugin does not.
+    if description.is_empty() && conflict_strategy != "edit" {
+        return Err("Plugin description is required.".to_string());
+    }
     let slug = if conflict_strategy == "rename" {
         next_available_plugin_slug(&root, &slug)
     } else {
         slug
     };
     let target_dir = root.join(&slug);
+
+    // Edit mode: an interactive coding session edits the real files in place, so
+    // preserve everything and only refresh the vendored plumbing (runtime.ts /
+    // testing.ts) that the coding agent may import — this is backward-compatible
+    // since the card work only added exports. A brand-new name falls through to
+    // a normal fresh scaffold below.
+    if conflict_strategy == "edit" && target_dir.exists() {
+        refresh_plugin_vendored_runtime(&target_dir)?;
+        return read_generated_plugin_manifest(&target_dir, &target_dir.join("plugin.json"))
+            .ok_or_else(|| "Plugin exists but could not be read for editing.".to_string());
+    }
+
     if target_dir.exists() {
         if conflict_strategy == "replace" {
             fs::remove_dir_all(&target_dir)
@@ -669,12 +715,20 @@ async fn run_plugin_builder_stream(
     let plugin_dir = validate_generated_plugin_dir(&app, &request.plugin_dir)?;
     let sidecar_path = resolve_plugin_builder_sidecar_path()?;
     let plugin_runner_path = resolve_plugin_tool_runner_path()?;
+    let history: Vec<Value> = request
+        .messages
+        .unwrap_or_default()
+        .iter()
+        .map(|message| json!({ "role": message.role, "content": message.content }))
+        .collect();
     let sidecar_request = json!({
         "pluginDir": plugin_dir.to_string_lossy().to_string(),
         "name": request.name,
         "description": request.description,
         "sourceUrls": normalize_source_urls(request.source_urls.unwrap_or_default()),
         "prompt": request.prompt,
+        "editMode": request.edit_mode,
+        "messages": history,
         "provider": config.provider,
         "baseUrl": config.base_url,
         "model": config.model,
@@ -2254,6 +2308,7 @@ fn read_generated_plugin_manifest(
                                 "type": "object",
                                 "properties": {}
                             }),
+                            card: None,
                         });
                     }
                     let name = item.get("name").and_then(Value::as_str)?.trim().to_string();
@@ -2274,6 +2329,10 @@ fn read_generated_plugin_manifest(
                                 "properties": {}
                             })
                         }),
+                        card: item
+                            .get("card")
+                            .filter(|value| value.is_object())
+                            .cloned(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2334,7 +2393,29 @@ fn load_generated_plugin_runtime_tools_cached(plugin_dir: &Path) -> Option<Vec<G
 }
 
 fn generated_plugin_source_mtime_millis(plugin_dir: &Path) -> Option<u128> {
-    let modified = fs::metadata(plugin_dir.join("index.ts")).ok()?.modified().ok()?;
+    // Card templates live in tools.ts, not index.ts, so key the cache on the
+    // newest mtime across every TypeScript source in the plugin (tools.ts,
+    // client.ts, index.ts, …). A card edit then busts the cache like any other
+    // source change.
+    let mut latest: Option<std::time::SystemTime> = None;
+    if let Ok(entries) = fs::read_dir(plugin_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("ts") {
+                continue;
+            }
+            if let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) {
+                latest = match latest {
+                    Some(current) if current >= modified => Some(current),
+                    _ => Some(modified),
+                };
+            }
+        }
+    }
+    let modified = match latest {
+        Some(modified) => modified,
+        None => fs::metadata(plugin_dir.join("index.ts")).ok()?.modified().ok()?,
+    };
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis())
 }
 
@@ -2411,6 +2492,10 @@ fn read_generated_plugin_runtime_tools(
                                 "properties": {}
                             })
                         }),
+                        card: item
+                            .get("card")
+                            .filter(|value| value.is_object())
+                            .cloned(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2476,13 +2561,19 @@ fn build_plugin_tools_stub() -> String {
 //       }
 //     }
 //   };
-import type { ApiReference } from './runtime.ts';
+import type { ApiReference, CardTemplate } from './runtime.ts';
 
-export type ToolResult = { text: string; references: ApiReference[] };
+// `data` is the structured payload a fixed result card binds to. Set it only on
+// final-data tools (the ones that also declare a `card`); omit it for
+// list/search tools.
+export type ToolResult = { text: string; references: ApiReference[]; data?: Record<string, unknown> };
 
 export type ApiTool = {
   description: string;
   parameters: Record<string, unknown>;
+  // A fixed card layout for final-data tools. Presence marks the tool's result
+  // as storable + displayed. List/search tools MUST omit this.
+  card?: CardTemplate;
   execute: (args: Record<string, unknown>) => Promise<ToolResult>;
 };
 
@@ -2530,7 +2621,7 @@ fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) ->
             .collect::<String>()
     };
     format!(
-        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## API Surface Contract\n\nTreat the source API documentation as a whole API surface, not only the latest narrow user query. Build a practical suite of small, focused tools for important endpoints/resources such as list/search, detail-by-id, user/profile/account, metadata/status, and update/history endpoints when available. If only a subset is implemented, keep an `Endpoint Inventory` in this README that records each relevant endpoint path, purpose, required and optional parameters, response shape summary, pagination/rate-limit notes, status (`Implemented`, `Planned`, or `Not applicable`), and the future tool that should expose it.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n",
+        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## API Surface Contract\n\nTreat the source API documentation as a whole API surface, not only the latest narrow user query. Build a practical suite of small, focused tools for important endpoints/resources such as list/search, detail-by-id, user/profile/account, metadata/status, and update/history endpoints when available. If only a subset is implemented, keep an `Endpoint Inventory` in this README that records each relevant endpoint path, purpose, required and optional parameters, response shape summary, pagination/rate-limit notes, status (`Implemented`, `Planned`, or `Not applicable`), and the future tool that should expose it.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n\n## Result Card Contract\n\nFinal-data tools (a single record, a detail view, a computed summary, a status snapshot) declare a fixed `card` template on the tool and return a matching `data` object; the host renders the card beneath the assistant message. Every card declares short singular and plural count names, such as `monster` and `monsters`, for the gathered-card summary. List/search tools declare no card and return no data. The card layout is fixed at build time and never varies per call — only the `data` it binds to changes. Note in the Endpoint Inventory which tools are card-bearing.\n",
         plugin_display_name(slug),
         description,
         source_block
@@ -2589,6 +2680,7 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                     .filter(|value| !value.is_empty()),
                 builder_run: message.builder_run,
                 builder_activities: message.builder_activities,
+                cards: message.cards,
             })
         })
         .collect()
@@ -2985,7 +3077,8 @@ mod tests {
     use super::{
         generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
         next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        BuilderStreamEvent, GeneratedPluginTool, RuntimeToolsCache, StoredChatMessage, StreamEvent,
+        refresh_plugin_vendored_runtime, BuilderStreamEvent, GeneratedPluginTool, RuntimeToolsCache,
+        StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
@@ -3006,6 +3099,7 @@ mod tests {
                 name: "getThing".to_string(),
                 description: "Fetch a thing".to_string(),
                 parameters: json!({ "type": "object", "properties": {} }),
+                card: None,
             }],
         };
         fs::write(
@@ -3021,6 +3115,29 @@ mod tests {
             .expect("cached tools returned");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "getThing");
+
+        fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+    }
+
+    #[test]
+    fn edit_refresh_preserves_author_files_and_adds_runtime() {
+        let plugin_dir = std::env::temp_dir().join(format!("raynard-edit-refresh-{}", now_millis()));
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        // A pre-vendor plugin: custom tools, no runtime.ts.
+        let custom_tools = "export const tools = { hn_get_item: {} };\n";
+        fs::write(plugin_dir.join("tools.ts"), custom_tools).expect("write tools.ts");
+        assert!(!plugin_dir.join("runtime.ts").exists());
+
+        refresh_plugin_vendored_runtime(&plugin_dir).expect("refresh vendored runtime");
+
+        // Author's tools.ts is untouched; runtime.ts is now present with the card types.
+        assert_eq!(
+            fs::read_to_string(plugin_dir.join("tools.ts")).expect("read tools.ts"),
+            custom_tools
+        );
+        let runtime = fs::read_to_string(plugin_dir.join("runtime.ts")).expect("read runtime.ts");
+        assert!(runtime.contains("CardTemplate"));
+        assert!(plugin_dir.join("testing.ts").exists());
 
         fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
     }
@@ -3090,6 +3207,7 @@ mod tests {
             error: None,
             builder_run: Some(true),
             builder_activities: Some(activities.clone()),
+            cards: None,
         }]);
 
         assert_eq!(normalized[0].builder_run, Some(true));
