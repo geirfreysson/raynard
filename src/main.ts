@@ -1645,14 +1645,12 @@ async function scaffoldAndRunPluginBuilder(
     renderBuilderRun(builderRun, builderRecord, true);
     await persistChatSnapshot(turnMeta, turnStored);
 
-    // Render + follow-scroll only while this run's chat is on screen. Auto-scroll
-    // stays put unless the user is already near the bottom, so they can freely
-    // scroll up through the tool cards while the build streams.
+    // Render while this run's chat is on screen and always follow the latest
+    // builder output to the bottom of the window.
     const renderLive = () => {
       if (!builderRun || !builderRecord || !turnIsActive()) return;
-      const pinned = isNearBottom(messages);
       renderBuilderRun(builderRun, builderRecord, true);
-      if (pinned) scrollMessagesToBottom();
+      scrollMessagesToBottom();
     };
 
     const applyToolEvent = (event: BuilderToolEvent) => {
@@ -1767,13 +1765,17 @@ function renderBuilderRun(
       const content = document.createElement('div');
       content.className = 'builder-thinking-content';
       thinking.appendChild(content);
-      container.prepend(thinking);
+      container.appendChild(thinking); // final position is enforced by the reorder below
     }
     const summary = thinking.querySelector('summary');
     const label = message.status === 'running' ? 'Builder reasoning' : 'Reasoning';
     if (summary && summary.textContent !== label) summary.textContent = label;
-    const content = thinking.querySelector('.builder-thinking-content');
-    if (content && content.textContent !== message.thinking) content.textContent = message.thinking;
+    const content = thinking.querySelector<HTMLElement>('.builder-thinking-content');
+    if (content && content.textContent !== message.thinking) {
+      content.textContent = message.thinking;
+      // Follow the newest reasoning line inside its capped, scrollable box.
+      if (live && message.status === 'running') content.scrollTop = content.scrollHeight;
+    }
   } else if (thinking) {
     thinking.remove();
   }
@@ -1817,7 +1819,7 @@ function renderBuilderRun(
       heartbeat.appendChild(dot);
       heartbeat.appendChild(document.createElement('span'));
     }
-    container.appendChild(heartbeat); // keep it last
+    if (heartbeat.parentElement !== container) container.appendChild(heartbeat); // position set by reorder below
     const text = heartbeat.querySelector('span:last-child');
     const label = activities.length ? 'Working — waiting for the model…' : 'Working…';
     if (text && text.textContent !== label) text.textContent = label;
@@ -1840,6 +1842,17 @@ function renderBuilderRun(
   } else if (summary) {
     summary.remove();
   }
+
+  // Enforce top-level order: tool cards, then reasoning, then liveness, then the
+  // final summary. Only move children that are out of place to avoid reflow.
+  const ordered = [timeline, waiting, thinking, heartbeat, summary].filter(
+    (el): el is HTMLElement => Boolean(el && el.parentElement === container)
+  );
+  ordered.forEach((el, index) => {
+    if (container.children[index] !== el) {
+      container.insertBefore(el, container.children[index] ?? null);
+    }
+  });
 }
 
 // Reconcile timeline cards against activities. applyBuilderToolEvent keeps
