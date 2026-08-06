@@ -299,6 +299,35 @@ export function createBuildRequestTool(Type, onBuildRequest) {
   };
 }
 
+export function createExploreRouteTool(Type) {
+  return {
+    name: 'continue_explore',
+    label: 'Continue Exploring',
+    description:
+      'Choose this only when the user is asking for information or wants an installed API tool called. You MUST NOT choose this for requests to create or edit plugin code, add or change result cards, or modify a card layout, appearance, size, image position, or rendering; those require request_plugin_build.',
+    parameters: Type.Object({}),
+    executionMode: 'sequential',
+    execute: async () => ({
+      content: [
+        {
+          type: 'text',
+          text: 'Routing complete. Continue in Explore mode and answer with installed tools as needed.'
+        }
+      ],
+      details: { type: 'continue-explore' },
+      terminate: false
+    })
+  };
+}
+
+export function forcedToolChoiceForApi(api) {
+  return ['anthropic-messages', 'bedrock-converse-stream', 'google-generative-ai', 'google-vertex'].includes(
+    String(api || '')
+  )
+    ? 'any'
+    : 'required';
+}
+
 export function extractAssistantText(message) {
   if (!message || message.role !== 'assistant' || !Array.isArray(message.content)) return '';
   return message.content

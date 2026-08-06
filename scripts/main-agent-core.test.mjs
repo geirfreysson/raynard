@@ -3,8 +3,10 @@ import {
   buildPiTypeFromSchema,
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
+  createExploreRouteTool,
   createGeneratedPluginTools,
   createModel,
+  forcedToolChoiceForApi,
   isHostModeStatus,
   toAgentMessages
 } from './main-agent-core.mjs';
@@ -83,6 +85,25 @@ describe('main agent core', () => {
     expect(isHostModeStatus('Switched to Build mode')).toBe(true);
     expect(isHostModeStatus(' switched to explore mode. ')).toBe(true);
     expect(isHostModeStatus('I can help you update that card.')).toBe(false);
+  });
+
+  it('provides a constrained Explore routing tool that excludes plugin edits', async () => {
+    const tool = createExploreRouteTool(Type);
+
+    expect(tool.name).toBe('continue_explore');
+    expect(tool.description).toMatch(/must not.*edit|do not.*edit/i);
+    expect(tool.description).toMatch(/layout|appearance|reposition/i);
+    await expect(tool.execute('route-1', {})).resolves.toMatchObject({
+      details: { type: 'continue-explore' },
+      terminate: false
+    });
+  });
+
+  it('maps forced tool selection to each provider API vocabulary', () => {
+    expect(forcedToolChoiceForApi('openai-completions')).toBe('required');
+    expect(forcedToolChoiceForApi('mistral-conversations')).toBe('required');
+    expect(forcedToolChoiceForApi('anthropic-messages')).toBe('any');
+    expect(forcedToolChoiceForApi('google-generative-ai')).toBe('any');
   });
 
   it('lists installed plugins and forbids inventing names for existing ones', () => {
