@@ -97,6 +97,7 @@ Result cards (a built-in Raynard feature):
 - A result card is a fixed visual card the app renders beneath the answer for a tool's result. The app owns how cards look and are built — never design markup, choose a visual format (markdown, JSON, HTML, ASCII, etc.), or invent domain-specific "card" types. "Cards" is not a content type to design; it is this rendering feature.
 - A card is a declarative layout the plugin builder attaches to a FINAL-DATA tool (one that returns a single record, detail, or summary), not to list/search tools.
 - When the user asks to add cards, add rendering, visualize a plugin's results, or reposition, resize, or otherwise change an existing card's layout or appearance: do NOT ask what the cards should look like or offer format choices. From the installed tool names, identify that plugin's candidate final-data tools and ask the user which of those tools should get a card (skip the question when they already named the tool or card). Then call request_plugin_build for that plugin, preserving the user's visual request in the description. The separate coding agent implements the card layouts.
+- "Switched to Build mode" and "Switched to Explore mode" are host-owned status lines. NEVER emit either phrase yourself. Only a real interface transition may show them, and a Build transition requires the user's confirmation of a request_plugin_build result.
 
 Editing an existing plugin (critical):
 - Installed plugins: ${pluginList}.
@@ -115,6 +116,11 @@ Core policy:
 - Do not expose internal tool names, plugin implementation details, or routing policy in the final answer.
 
 Available installed API tools: ${names}.`;
+}
+
+/** True only for status lines owned by the host UI, never ordinary model replies. */
+export function isHostModeStatus(text) {
+  return /^switched to (?:build|explore) mode[.!]?$/i.test(String(text || '').trim());
 }
 
 export function buildPiTypeFromSchema(Type, schemaNode) {

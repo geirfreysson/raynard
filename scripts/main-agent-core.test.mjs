@@ -5,6 +5,7 @@ import {
   createBuildRequestTool,
   createGeneratedPluginTools,
   createModel,
+  isHostModeStatus,
   toAgentMessages
 } from './main-agent-core.mjs';
 import { Type } from '@mariozechner/pi-ai';
@@ -76,6 +77,12 @@ describe('main agent core', () => {
     expect(explore).toMatch(/reposition|resize|layout|appearance/i);
     expect(explore).toMatch(/MUST call request_plugin_build/i);
     expect(explore).toMatch(/must not claim|never claim/i);
+  });
+
+  it('recognizes host-owned mode statuses that must not be emitted as ordinary replies', () => {
+    expect(isHostModeStatus('Switched to Build mode')).toBe(true);
+    expect(isHostModeStatus(' switched to explore mode. ')).toBe(true);
+    expect(isHostModeStatus('I can help you update that card.')).toBe(false);
   });
 
   it('lists installed plugins and forbids inventing names for existing ones', () => {
