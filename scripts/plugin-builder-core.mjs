@@ -12,9 +12,14 @@ const CARD_RULES = `Result-card rules (which tool results become a visible card)
   - { component: 'KeyValue', pairs: [{ label, field }] }
   - { component: 'Text', text: '<string with {{path}} interpolation>' }
   - { component: 'Section', title?, layout: CardBlock[] }  // groups nested blocks
+  - { component: 'Stack', gap?: 'sm' | 'md' | 'lg', layout: CardBlock[] }  // vertical composition
+  - { component: 'Grid', columns?: 1 | 2 | 3 | 4, gap?: 'sm' | 'md' | 'lg', layout: CardBlock[] }  // equal-width cells
+  - { component: 'Columns', gap?: 'sm' | 'md' | 'lg', collapseBelow?: 'sm' | 'md' | 'never', columns: [{ width?: number, layout: CardBlock[] }] }  // weighted columns; widths are relative
   - { component: 'Badge', field, tone?: 'success' | 'warn' | 'muted' }
-  - { component: 'Image', field, alt? }  // an image URL; rendered as a rounded avatar next to the card header. Use for a record's picture/icon/portrait when the API provides one. "field" is a path to an absolute image URL string in data.
+  - { component: 'Image', field, alt?, variant?: 'avatar' | 'media', fit?: 'cover' | 'contain', aspectRatio?: '1/1' | '3/4' | '4/3' | '16/9' | 'auto' }  // defaults to a rounded header avatar; media renders inline at the container's full width
   - { component: 'Json', field? }  // raw fallback; whole data when field omitted
+- Translate the user's natural-language visual request into these composable primitives. For example, "large image on the right taking 25%" is Columns with widths 3 and 1, with { component: 'Image', variant: 'media', ... } in the right column. Nest Stack/Grid/Columns as needed.
+- Use only documented components and properties. Do not invent a component, CSS class, JSX, or unsupported property. If the requested visual cannot be expressed with this contract, do not claim it was implemented and do not edit runtime.ts. Respond with exactly "HOST_CAPABILITY_REQUIRED: <the missing reusable primitive or behavior>" so the host can be extended first.
 - If the plugin's tool type does not allow "card"/"data" yet, widen it (add optional card?/data? to the tool interface). You may import the CardTemplate type from ./runtime.ts to type the card (optional).
 - Add a test asserting the final-data tool returns "data" whose fields the card binds to (e.g. data.price exists when a MetricRow binds field 'price').`;
 
@@ -244,14 +249,30 @@ export function findPluginTestFiles(files) {
 // Components the host card renderer knows how to draw. A card that names an
 // unknown component still renders (raw-JSON fallback) but is rejected here so
 // the builder fixes typos before completion.
-const CARD_COMPONENTS = new Set(['MetricRow', 'Table', 'KeyValue', 'Text', 'Section', 'Badge', 'Image', 'Json']);
+const CARD_COMPONENTS = new Set([
+  'MetricRow',
+  'Table',
+  'KeyValue',
+  'Text',
+  'Section',
+  'Stack',
+  'Grid',
+  'Columns',
+  'Badge',
+  'Image',
+  'Json'
+]);
 
 function collectCardComponents(layout, found = []) {
   if (!Array.isArray(layout)) return found;
   for (const block of layout) {
     if (!block || typeof block !== 'object') continue;
     found.push(block.component);
-    if (block.component === 'Section') collectCardComponents(block.layout, found);
+    if (['Section', 'Stack', 'Grid'].includes(block.component)) {
+      collectCardComponents(block.layout, found);
+    } else if (block.component === 'Columns' && Array.isArray(block.columns)) {
+      for (const column of block.columns) collectCardComponents(column && column.layout, found);
+    }
   }
   return found;
 }

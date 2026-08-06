@@ -83,4 +83,78 @@ describe('ResultCard', () => {
     expect(html).toContain('Type');
     expect(html).toContain('Humanoid');
   });
+
+  it('renders a 3:1 Columns layout with a right-side media image', () => {
+    const html = render(
+      {
+        title: '{{name}}',
+        layout: [
+          {
+            component: 'Columns',
+            columns: [
+              {
+                width: 3,
+                layout: [{ component: 'Text', text: '{{description}}' }]
+              },
+              {
+                width: 1,
+                layout: [
+                  {
+                    component: 'Image',
+                    field: 'image',
+                    alt: '{{name}}',
+                    variant: 'media',
+                    aspectRatio: '3/4',
+                    fit: 'cover'
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        name: 'Owlbear',
+        description: 'A large and dangerous creature.',
+        image: 'https://example.com/owlbear.png'
+      }
+    );
+
+    expect(html).toContain('rc-columns');
+    expect(html).toContain('grid-template-columns:3fr 1fr');
+    expect(html).toContain('rc-media-image');
+    expect(html).toContain('aspect-ratio:3 / 4');
+    expect(html).toContain('object-fit:cover');
+    expect(html).toContain('src="https://example.com/owlbear.png"');
+  });
+
+  it('renders nested Grid and Stack layout primitives', () => {
+    const html = render(
+      {
+        layout: [
+          {
+            component: 'Grid',
+            columns: 2,
+            gap: 'lg',
+            layout: [
+              {
+                component: 'Stack',
+                gap: 'sm',
+                layout: [
+                  { component: 'Badge', field: 'type' },
+                  { component: 'Text', text: '{{description}}' }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      { type: 'Monstrosity', description: 'Feathered fury.' }
+    );
+
+    expect(html).toContain('rc-grid');
+    expect(html).toContain('grid-template-columns:repeat(2, minmax(0, 1fr))');
+    expect(html).toContain('rc-stack');
+    expect(html).toContain('Feathered fury.');
+  });
 });

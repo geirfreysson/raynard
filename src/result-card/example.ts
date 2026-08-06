@@ -89,7 +89,14 @@ function fillBlock(block: CardBlock, data: Record<string, unknown>): void {
       for (const path of interpolationPaths(block.text)) setPath(data, path, sampleValue(path));
       break;
     case 'Section':
+    case 'Stack':
+    case 'Grid':
       for (const child of block.layout || []) fillBlock(child, data);
+      break;
+    case 'Columns':
+      for (const column of block.columns || []) {
+        for (const child of column.layout || []) fillBlock(child, data);
+      }
       break;
     case 'Badge':
       setPath(data, block.field, sampleValue(block.field));

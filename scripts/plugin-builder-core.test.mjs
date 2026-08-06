@@ -41,6 +41,18 @@ describe('plugin builder core', () => {
     expect(prompt).toMatch(/MUST NOT edit or re-implement/);
   });
 
+  it('maps natural-language card requests to composable host primitives and reports capability gaps', () => {
+    const prompt = buildSystemPrompt({ editMode: true, name: 'dnd-5e-api' });
+
+    expect(prompt).toContain('Columns');
+    expect(prompt).toContain('Grid');
+    expect(prompt).toContain('Stack');
+    expect(prompt).toMatch(/right.*25%|3:1/i);
+    expect(prompt).toContain("variant: 'media'");
+    expect(prompt).toContain('HOST_CAPABILITY_REQUIRED:');
+    expect(prompt).toMatch(/do not invent/i);
+  });
+
   it('asks the coding agent to run executable Node tests before completion', () => {
     const prompt = buildUserPrompt({
       prompt: 'Build Hacker News API tools.',
@@ -158,6 +170,44 @@ describe('plugin builder core', () => {
     ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 1 });
   });
 
+  it('accepts nested Columns, Grid, and Stack card primitives', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    const card = {
+      name: { singular: 'monster', plural: 'monsters' },
+      title: '{{name}}',
+      layout: [{
+        component: 'Columns',
+        columns: [
+          {
+            width: 3,
+            layout: [{
+              component: 'Stack',
+              layout: [{ component: 'Text', text: '{{description}}' }]
+            }]
+          },
+          {
+            width: 1,
+            layout: [{
+              component: 'Grid',
+              columns: 1,
+              layout: [{ component: 'Image', field: 'image', variant: 'media' }]
+            }]
+          }
+        ]
+      }]
+    };
+
+    expect(
+      validatePluginArtifacts({
+        ...base,
+        tools: [{ name: 'dnd_get_monster', callable: true, card }]
+      })
+    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 1 });
+  });
+
   it('rejects a result card without singular and plural display names', () => {
     const base = {
       files: ['index.ts', 'index.test.ts'],
@@ -189,6 +239,32 @@ describe('plugin builder core', () => {
         }]
       })
     ).toThrow(/unknown component/i);
+  });
+
+  it('rejects unknown components nested inside layout containers', () => {
+    const base = {
+      files: ['index.ts', 'index.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
+    };
+    expect(() =>
+      validatePluginArtifacts({
+        ...base,
+        tools: [{
+          name: 'get_thing',
+          callable: true,
+          card: {
+            name: { singular: 'thing', plural: 'things' },
+            layout: [{
+              component: 'Columns',
+              columns: [
+                { width: 3, layout: [{ component: 'Text', text: 'Thing' }] },
+                { width: 1, layout: [{ component: 'Chart' }] }
+              ]
+            }]
+          }
+        }]
+      })
+    ).toThrow(/unknown component.*Chart/i);
   });
 
   it('rejects a card with no layout blocks', () => {

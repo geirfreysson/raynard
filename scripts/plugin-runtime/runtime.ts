@@ -55,6 +55,8 @@ export function createApiReference(input: ApiReference) {
 // returned `data` object (e.g. 'quote.price', 'holdings').
 // ---------------------------------------------------------------------------
 
+export type CardGap = 'sm' | 'md' | 'lg';
+
 /** A single visual block in a card. `component` picks an app-owned renderer. */
 export type CardBlock =
   | { component: 'MetricRow'; items: { label: string; field: string; tone?: 'delta' | 'muted' }[] }
@@ -62,9 +64,27 @@ export type CardBlock =
   | { component: 'KeyValue'; pairs: { label: string; field: string }[] }
   | { component: 'Text'; text: string }
   | { component: 'Section'; title?: string; layout: CardBlock[] }
+  /** Vertical composition with controlled spacing. */
+  | { component: 'Stack'; gap?: CardGap; layout: CardBlock[] }
+  /** Equal-width responsive cells. */
+  | { component: 'Grid'; columns?: 1 | 2 | 3 | 4; gap?: CardGap; layout: CardBlock[] }
+  /** Weighted responsive columns; widths are relative, so 3 + 1 means 75% + 25%. */
+  | {
+      component: 'Columns';
+      gap?: CardGap;
+      collapseBelow?: 'sm' | 'md' | 'never';
+      columns: { width?: number; layout: CardBlock[] }[];
+    }
   | { component: 'Badge'; field: string; tone?: 'success' | 'warn' | 'muted' }
-  /** An image URL rendered as a rounded avatar next to the card header. */
-  | { component: 'Image'; field: string; alt?: string }
+  /** An image URL. Defaults to a header avatar; media renders inline at container width. */
+  | {
+      component: 'Image';
+      field: string;
+      alt?: string;
+      variant?: 'avatar' | 'media';
+      fit?: 'cover' | 'contain';
+      aspectRatio?: '1/1' | '3/4' | '4/3' | '16/9' | 'auto';
+    }
   | { component: 'Json'; field?: string };
 
 /** A fixed card layout stored on a storable (final-data) tool. */

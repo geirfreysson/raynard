@@ -66,6 +66,18 @@ describe('main agent core', () => {
     expect(build).toContain('adding result cards to specific tools');
   });
 
+  it('routes visual changes to existing cards through the plugin builder', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['dnd_get_monster'],
+      plugins: [{ slug: 'dnd-5e-api', name: 'Dnd 5e Api' }]
+    });
+
+    expect(explore).toMatch(/reposition|resize|layout|appearance/i);
+    expect(explore).toMatch(/MUST call request_plugin_build/i);
+    expect(explore).toMatch(/must not claim|never claim/i);
+  });
+
   it('lists installed plugins and forbids inventing names for existing ones', () => {
     const build = buildMainAgentSystemPrompt({
       mode: 'build',

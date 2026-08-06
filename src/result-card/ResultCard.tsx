@@ -1,4 +1,4 @@
-import type { CardBlock, CardTemplate } from './types';
+import type { CardBlock, CardGap, CardTemplate } from './types';
 import { formatValue, getPath, interpolate, resolveRows } from './resolve';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar';
@@ -28,6 +28,24 @@ const badgeVariant: Record<string, 'success' | 'warn' | 'secondary'> = {
   warn: 'warn',
   muted: 'secondary'
 };
+
+const gapSize: Record<CardGap, string> = {
+  sm: '0.5rem',
+  md: '1rem',
+  lg: '1.5rem'
+};
+
+const imageAspectRatio: Record<NonNullable<ImageBlock['aspectRatio']>, string> = {
+  '1/1': '1 / 1',
+  '3/4': '3 / 4',
+  '4/3': '4 / 3',
+  '16/9': '16 / 9',
+  auto: 'auto'
+};
+
+function renderLayout(layout: CardBlock[] | undefined, data: unknown) {
+  return (layout || []).map((child, i) => <Block key={i} block={child} data={data} />);
+}
 
 function Block({ block, data }: { block: CardBlock; data: unknown }) {
   switch (block.component) {
@@ -108,10 +126,50 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
           {block.title ? (
             <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{block.title}</h4>
           ) : null}
-          {(block.layout || []).map((child, i) => (
-            <Block key={i} block={child} data={data} />
-          ))}
+          {renderLayout(block.layout, data)}
         </section>
+      );
+
+    case 'Stack':
+      return (
+        <div className="rc-stack" style={{ gap: gapSize[block.gap ?? 'md'] }}>
+          {renderLayout(block.layout, data)}
+        </div>
+      );
+
+    case 'Grid': {
+      const columns = Math.min(4, Math.max(1, block.columns ?? 2));
+      return (
+        <div
+          className="rc-grid"
+          style={{
+            gap: gapSize[block.gap ?? 'md'],
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`
+          }}
+        >
+          {renderLayout(block.layout, data)}
+        </div>
+      );
+    }
+
+    case 'Columns':
+      return (
+        <div
+          className="rc-columns"
+          data-collapse-below={block.collapseBelow ?? 'sm'}
+          style={{
+            gap: gapSize[block.gap ?? 'md'],
+            gridTemplateColumns: (block.columns || [])
+              .map((column) => `${Math.max(0.1, Number(column.width) || 1)}fr`)
+              .join(' ')
+          }}
+        >
+          {(block.columns || []).map((column, i) => (
+            <div className="rc-column" key={i}>
+              {renderLayout(column.layout, data)}
+            </div>
+          ))}
+        </div>
       );
 
     case 'Badge': {
@@ -121,6 +179,19 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
 
     case 'Image': {
       const alt = block.alt ? interpolate(block.alt, data) : 'image';
+      if (block.variant === 'media') {
+        return (
+          <img
+            className="rc-media-image"
+            src={formatValue(getPath(data, block.field))}
+            alt={alt}
+            style={{
+              aspectRatio: imageAspectRatio[block.aspectRatio ?? 'auto'],
+              objectFit: block.fit ?? 'cover'
+            }}
+          />
+        );
+      }
       return (
         <Avatar className="h-16 w-16">
           <AvatarImage src={formatValue(getPath(data, block.field))} alt={alt} />
@@ -150,7 +221,9 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
 export function ResultCard({ template, data }: { template: CardTemplate; data: unknown }) {
   const layout = Array.isArray(template?.layout) ? template.layout : [];
   // Hoist the first top-level Image block into the header as an avatar.
-  const headerImageIndex = layout.findIndex((block) => block.component === 'Image');
+  const headerImageIndex = layout.findIndex(
+    (block) => block.component === 'Image' && block.variant !== 'media'
+  );
   const headerImage = headerImageIndex >= 0 ? (layout[headerImageIndex] as ImageBlock) : null;
   const bodyBlocks = layout.filter((_, i) => i !== headerImageIndex);
   const title = template?.title ? interpolate(template.title, data) : '';
