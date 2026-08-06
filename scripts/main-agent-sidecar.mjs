@@ -6,11 +6,9 @@ import { streamSimple, Type } from '@mariozechner/pi-ai';
 import {
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
-  createExploreRouteTool,
   createGeneratedPluginTools,
   createModel,
   extractAssistantText,
-  forcedToolChoiceForApi,
   toAgentMessages
 } from './main-agent-core.mjs';
 
@@ -120,10 +118,7 @@ const buildRequestTool = createBuildRequestTool(Type, (nextRequest) => {
   buildRequest = nextRequest;
   emit({ type: 'build_request', buildRequest: nextRequest });
 });
-const exploreRouteTool = createExploreRouteTool(Type);
-const routeTools = [buildRequestTool, exploreRouteTool];
-const mainTools = [...generatedTools, buildRequestTool];
-const tools = [...mainTools, exploreRouteTool];
+const tools = [...generatedTools, buildRequestTool];
 
 // Real identities of installed plugins so the agent edits an existing plugin by
 // its exact name instead of inventing a near-miss name that scaffolds a
@@ -151,25 +146,7 @@ const agent = new Agent({
     messages: toAgentMessages(messages, request)
   },
   getApiKey: async () => apiKey,
-  streamFn: (() => {
-    let routePending = request.mode !== 'build';
-    return (model, context, options) => {
-      if (routePending) {
-        routePending = false;
-        return streamSimple(
-          model,
-          { ...context, tools: routeTools },
-          {
-            ...options,
-            apiKey,
-            toolChoice: forcedToolChoiceForApi(model.api),
-            maxTokens: Math.min(Number(options?.maxTokens) || 512, 512)
-          }
-        );
-      }
-      return streamSimple(model, { ...context, tools: mainTools }, { ...options, apiKey });
-    };
-  })(),
+  streamFn: (model, context, options) => streamSimple(model, context, { ...options, apiKey }),
   toolExecution: 'sequential'
 });
 

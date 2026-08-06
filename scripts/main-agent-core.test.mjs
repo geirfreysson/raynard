@@ -3,10 +3,8 @@ import {
   buildPiTypeFromSchema,
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
-  createExploreRouteTool,
   createGeneratedPluginTools,
   createModel,
-  forcedToolChoiceForApi,
   toAgentMessages
 } from './main-agent-core.mjs';
 import { Type } from '@mariozechner/pi-ai';
@@ -80,23 +78,19 @@ describe('main agent core', () => {
     expect(explore).toMatch(/must not claim|never claim/i);
   });
 
-  it('provides a constrained Explore routing tool that excludes plugin edits', async () => {
-    const tool = createExploreRouteTool(Type);
-
-    expect(tool.name).toBe('continue_explore');
-    expect(tool.description).toMatch(/must not.*edit|do not.*edit/i);
-    expect(tool.description).toMatch(/layout|appearance|reposition/i);
-    await expect(tool.execute('route-1', {})).resolves.toMatchObject({
-      details: { type: 'continue-explore' },
-      terminate: false
+  it('puts the AI routing decision before all answer policy', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['dnd_get_monster'],
+      plugins: [{ slug: 'dnd-5e-api', name: 'Dnd 5e Api' }]
     });
-  });
 
-  it('maps forced tool selection to each provider API vocabulary', () => {
-    expect(forcedToolChoiceForApi('openai-completions')).toBe('required');
-    expect(forcedToolChoiceForApi('mistral-conversations')).toBe('required');
-    expect(forcedToolChoiceForApi('anthropic-messages')).toBe('any');
-    expect(forcedToolChoiceForApi('google-generative-ai')).toBe('any');
+    expect(explore.indexOf('FIRST-ACTION ROUTING')).toBeLessThan(explore.indexOf('Result cards'));
+    expect(explore).toMatch(/create, edit, fix, or otherwise change.*plugin/i);
+    expect(explore).toMatch(/card layout.*image placement.*size/i);
+    expect(explore).toMatch(/questions about data.*installed API tools/i);
+    expect(explore).toMatch(/call request_plugin_build immediately/i);
+    expect(explore).toMatch(/Do not inspect files.*narrate edits.*run tests/i);
   });
 
   it('lists installed plugins and forbids inventing names for existing ones', () => {

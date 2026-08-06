@@ -91,6 +91,11 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
 
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
+FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
+1. BUILD REQUEST: If the user wants to create, edit, fix, or otherwise change a plugin, API capability, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. This includes follow-ups that refer to an existing plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
+2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
+3. MISSING CAPABILITY: If a data question cannot be answered with installed tools because API access is missing, call request_plugin_build. Never treat a request to change a plugin/card as a data query merely because an installed tool can return its current output.
+
 ${modePolicy}
 
 Result cards (a built-in Raynard feature):
@@ -292,35 +297,6 @@ export function createBuildRequestTool(Type, onBuildRequest) {
       };
     }
   };
-}
-
-export function createExploreRouteTool(Type) {
-  return {
-    name: 'continue_explore',
-    label: 'Continue Exploring',
-    description:
-      'Choose this only when the user is asking for information or wants an installed API tool called. You MUST NOT choose this for requests to create or edit plugin code, add or change result cards, or modify a card layout, appearance, size, image position, or rendering; those require request_plugin_build.',
-    parameters: Type.Object({}),
-    executionMode: 'sequential',
-    execute: async () => ({
-      content: [
-        {
-          type: 'text',
-          text: 'Routing complete. Continue in Explore mode and answer with installed tools as needed.'
-        }
-      ],
-      details: { type: 'continue-explore' },
-      terminate: false
-    })
-  };
-}
-
-export function forcedToolChoiceForApi(api) {
-  return ['anthropic-messages', 'bedrock-converse-stream', 'google-generative-ai', 'google-vertex'].includes(
-    String(api || '')
-  )
-    ? 'any'
-    : 'required';
 }
 
 export function extractAssistantText(message) {
