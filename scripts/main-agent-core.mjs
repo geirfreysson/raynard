@@ -118,11 +118,6 @@ Core policy:
 Available installed API tools: ${names}.`;
 }
 
-/** True only for status lines owned by the host UI, never ordinary model replies. */
-export function isHostModeStatus(text) {
-  return /^switched to (?:build|explore) mode[.!]?$/i.test(String(text || '').trim());
-}
-
 export function buildPiTypeFromSchema(Type, schemaNode) {
   if (!schemaNode || typeof schemaNode !== 'object') {
     return Type.String();

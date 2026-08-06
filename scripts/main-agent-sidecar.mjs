@@ -11,7 +11,6 @@ import {
   createModel,
   extractAssistantText,
   forcedToolChoiceForApi,
-  isHostModeStatus,
   toAgentMessages
 } from './main-agent-core.mjs';
 
@@ -215,20 +214,6 @@ const unsubscribe = agent.subscribe((event) => {
 
 try {
   await agent.prompt(String(currentMessage.content).trim());
-  if (!buildRequest && isHostModeStatus(finalText)) {
-    // A mode label is not a valid assistant answer. Give the model one
-    // protocol-repair turn so an explicit plugin edit still becomes the native
-    // confirmation request the renderer needs.
-    finalText = '';
-    await agent.prompt(
-      'Protocol correction: your previous reply was a host-owned status line, but no mode transition occurred. The original user requested a plugin/card modification. Call request_plugin_build now for that original request, using the exact installed plugin name. Do not emit a mode-status sentence and do not claim files were changed.'
-    );
-    if (!buildRequest) {
-      throw new Error(
-        'The model claimed a mode transition without creating the required plugin build request.'
-      );
-    }
-  }
   unsubscribe();
   emit({ type: 'done', text: finalText, buildRequest });
 } catch (error) {
