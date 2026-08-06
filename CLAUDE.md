@@ -42,6 +42,10 @@ existing files, makes the smallest change the user asked for, and runs
 UI. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
 by the host; the builder never writes React.
 
+Agent and builder runs are tracked per chat. Multiple chats may run
+concurrently; navigation reattaches to the selected chat's live message state,
+and Stop cancels only that chat's stream.
+
 ## Debugging the Latest Chat
 
 On macOS:

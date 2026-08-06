@@ -21,6 +21,7 @@ import {
   type BuilderToolEvent
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
+import { ChatRunRegistry, type ChatRun } from './chat-run-registry';
 import { renderResultCards } from './result-card/mount';
 import { buildExampleData } from './result-card/example';
 import type { CardTemplate, StoredResultCard } from './result-card/types';
@@ -336,8 +337,8 @@ let chatHistoryRows: ChatHistoryRow[] = [];
 let generatedPlugins: GeneratedPlugin[] = [];
 let selectedPluginId = '';
 let sidebarView: SidebarView = 'chats';
-let isRunning = false;
-let activeStreamId = '';
+const chatRuns = new ChatRunRegistry<ChatMeta, StoredChatMessage>();
+const renderedMessageArticles = new WeakMap<StoredChatMessage, HTMLElement>();
 let appMode: AppMode = loadAppMode();
 let modelProviders: ModelProvider[] = [];
 let llmEnvStatus: LlmEnvStatus | null = null;
@@ -475,7 +476,7 @@ for (const button of modeButtons) {
   button.title = 'Mode switches automatically';
 }
 stopStreamButton?.addEventListener('click', () => {
-  const streamId = activeStreamId;
+  const streamId = chatRuns.get(activeSessionId)?.streamId;
   if (!streamId) return;
   stopStreamButton.disabled = true;
   stopStreamButton.textContent = 'Stopping';
@@ -1258,9 +1259,10 @@ function renderChatHistory() {
     const openButton = document.createElement('button');
     openButton.type = 'button';
     openButton.className = 'chat-history-open';
+    const running = chatRuns.get(chat.chatId);
     openButton.innerHTML = `
       <span class="chat-history-title">${escapeHtml(chat.name)}</span>
-      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages</span>
+      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : 'Thinking'}` : ''}</span>
     `;
     openButton.addEventListener('click', () => void openSavedChat(chat.chatId));
     row.appendChild(openButton);
@@ -1269,6 +1271,8 @@ function renderChatHistory() {
     deleteButton.type = 'button';
     deleteButton.className = 'chat-history-delete';
     deleteButton.setAttribute('aria-label', `Delete ${chat.name}`);
+    deleteButton.disabled = Boolean(running);
+    if (running) deleteButton.title = 'Stop this chat before deleting it';
     deleteButton.innerHTML = iconSvg('trash-2');
     deleteButton.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1316,7 +1320,7 @@ async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredCha
 
 function persistChatSnapshotQuietly(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
   void persistChatSnapshot(meta, stored).catch((error) => {
-    void logAgentTurnEvent('persist_error', { message: getErrorMessage(error) });
+    void logAgentTurnEvent('persist_error', { message: getErrorMessage(error) }, meta?.chatId);
   });
 }
 
@@ -1363,8 +1367,11 @@ function createTurnSnapshotPersister(persist: () => void, intervalMs = 450) {
   };
 }
 
-function logAgentTurnEvent(eventType: string, payload: Record<string, unknown>) {
-  const chatId = activeSessionId;
+function logAgentTurnEvent(
+  eventType: string,
+  payload: Record<string, unknown>,
+  chatId = activeSessionId
+) {
   if (!chatId) return Promise.resolve();
   return invoke('append_agent_turn_log', {
     event: {
@@ -1381,7 +1388,7 @@ async function openSavedChat(chatId: string) {
   const decision = decideChatNavigation({
     targetChatId: chatId,
     activeChatId: activeSessionId,
-    isRunning
+    isRunning: chatRuns.has(activeSessionId)
   });
   if (decision === 'show-active') {
     showConversation();
@@ -1393,36 +1400,61 @@ async function openSavedChat(chatId: string) {
 
   const viewRevision = ++mainViewRevision;
   await persistActiveChatHistory();
+  if (viewRevision !== mainViewRevision) return;
+
+  const liveRun = chatRuns.get(chatId);
+  if (liveRun) {
+    bindChatState(liveRun.meta, liveRun.messages);
+    renderStoredTranscript();
+    showConversation();
+    renderChatHistory();
+    syncRunControls();
+    chatInput?.focus();
+    return;
+  }
 
   const chat = await invoke<ChatHistoryPayload>('read_chat_history', { chatId });
   if (viewRevision !== mainViewRevision) return;
-  activeSessionId = chat.chatId;
-  activeChatMeta = {
+  bindChatState({
     chatId: chat.chatId,
     name: chat.name,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
     activeBuildPlugin: chat.activeBuildPlugin
-  };
-  storedMessages = chat.messages;
+  }, chat.messages);
+  renderStoredTranscript();
+
+  showConversation();
+  renderChatHistory();
+  syncRunControls();
+  chatInput?.focus();
+}
+
+function bindChatState(meta: ChatMeta, nextStoredMessages: StoredChatMessage[]) {
+  activeSessionId = meta.chatId;
+  activeChatMeta = meta;
+  storedMessages = nextStoredMessages;
   chatMessages = storedMessages
     .filter((message) => !message.modeStatus)
     .map((message) => ({
       role: message.role,
       content: message.text
     }));
+}
 
+function renderStoredTranscript() {
+  if (!messages) return;
+  chatMessages = storedMessages
+    .filter((message) => !message.modeStatus)
+    .map((message) => ({ role: message.role, content: message.text }));
   messages.innerHTML = '';
   for (const message of storedMessages) {
     renderStoredMessage(message);
   }
-
-  showConversation();
-  renderChatHistory();
-  chatInput?.focus();
 }
 
 async function deleteSavedChat(chatId: string) {
+  if (chatRuns.has(chatId)) return;
   await invoke('delete_chat_history', { chatId });
   if (chatId === activeSessionId) {
     resetConversationState();
@@ -1437,7 +1469,6 @@ async function deleteSavedChat(chatId: string) {
 }
 
 async function startNewConversation(options: { showPreChat: boolean }) {
-  if (isRunning) return;
   mainViewRevision += 1;
   await persistActiveChatHistory();
   resetConversationState();
@@ -1456,6 +1487,7 @@ async function startNewConversation(options: { showPreChat: boolean }) {
     showConversation();
     chatInput?.focus();
   }
+  syncRunControls();
   await refreshChatHistory();
 }
 
@@ -1468,10 +1500,14 @@ function resetConversationState() {
 
 function renderStoredMessage(message: StoredChatMessage) {
   const article = addMessage(message.role, message.builderRun ? '' : message.text, false, message.role === 'assistant');
+  renderedMessageArticles.set(message, article);
   if (message.modeStatus) article.classList.add('mode-status-message');
   if (message.role === 'assistant' && message.builderRun) {
     const body = article.querySelector<HTMLElement>('.message-text');
-    if (body) renderBuilderRun(body, message, false);
+    if (body) {
+      const live = message.status === 'running' && chatRuns.has(activeSessionId);
+      renderBuilderRun(body, message, live);
+    }
   }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
@@ -1511,7 +1547,7 @@ function extractResultCard(event: { toolName: string; result: unknown }): Stored
 }
 
 async function submitMessage(input: HTMLTextAreaElement | null) {
-  if (!input || !messages || isRunning) return;
+  if (!input || !messages || chatRuns.has(activeSessionId)) return;
 
   const content = input.value.trim();
   if (!content) return;
@@ -1530,12 +1566,12 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     text: content,
     timestamp: Date.now()
   });
-  await persistActiveChatHistory();
-  await refreshChatHistory();
+  void persistActiveChatHistory();
+  void refreshChatHistory();
 
   // Every ordinary user turn starts in Explore. Build is entered only from the
   // explicit plugin-writing confirmation below.
-  await switchAppModeWithStatus(automaticModeForUserTurn());
+  void switchAppModeWithStatus(automaticModeForUserTurn());
 
   const pending = addMessage('assistant', '', true);
   const pendingBody = pending.querySelector<HTMLElement>('.message-text');
@@ -1557,24 +1593,37 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   const turnSessionId = activeSessionId;
   const turnMeta = activeChatMeta;
   const turnStored = storedMessages;
-  const turnIsActive = () => activeSessionId === turnSessionId;
+  const turnChatMessages = chatMessages;
+  const turnMode = appMode;
+  const run = chatRuns.begin(
+    turnSessionId,
+    'agent',
+    turnMeta,
+    turnStored,
+    mainViewRevision
+  );
+  if (!run) return;
+  const turnIsActive = () =>
+    activeSessionId === turnSessionId && mainViewRevision === run.viewRevision;
+  const syncRemountedTurn = () => syncRemountedRun(run, assistantRecord);
   const snapshotPersister = createTurnSnapshotPersister(() =>
     persistChatSnapshotQuietly(turnMeta, turnStored)
   );
-  isRunning = true;
-  setStopButtonVisible(true);
+  syncRunControls();
+  renderChatHistory();
   await persistChatSnapshot(turnMeta, turnStored);
   void logAgentTurnEvent('turn_start', {
-    mode: appMode,
+    mode: turnMode,
     userMessage: content
-  });
+  }, turnSessionId);
 
   try {
     let requestedBuild: AgentBuildRequest | undefined;
-    const reply = await runMainAgentStream(chatMessages, appMode, {
+    const reply = await runMainAgentStream(turnChatMessages, turnMode, {
       onStreamId: (streamId) => {
-        activeStreamId = streamId;
-        void logAgentTurnEvent('stream_id', { streamId });
+        chatRuns.setStreamId(turnSessionId, run.id, streamId);
+        syncRunControls();
+        void logAgentTurnEvent('stream_id', { streamId }, turnSessionId);
       },
       onDelta: (delta) => {
         streamed += delta;
@@ -1588,6 +1637,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
           if (thinkingPreview.parentElement) thinkingPreview.remove();
           if (pinned) scrollMessagesToBottom();
         }
+        syncRemountedTurn();
       },
       onThinkingDelta: (delta) => {
         thinking += delta;
@@ -1598,22 +1648,24 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         void logAgentTurnEvent('thinking_delta', {
           delta,
           thinkingTail: thinking.slice(-4000)
-        });
+        }, turnSessionId);
         if (turnIsActive()) {
           const pinned = isNearBottom(messages);
           thinkingPreview.textContent = formatThinkingPreview(thinking);
           if (pinned) scrollMessagesToBottom();
         }
+        syncRemountedTurn();
       },
       onToolCall: (toolCall) => {
         assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
         snapshotPersister.schedule(true);
+        syncRemountedTurn();
         void logAgentTurnEvent('tool_call', {
           toolName: toolCall.toolName,
           args: toolCall.args
-        });
+        }, turnSessionId);
       },
       onToolResult: (toolCall) => {
         assistantRecord.text = streamed || `Ran ${toolCall.toolName}.`;
@@ -1625,11 +1677,12 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
           if (turnIsActive()) renderMessageCards(pending, assistantRecord.cards);
         }
         snapshotPersister.schedule(true);
+        syncRemountedTurn();
         void logAgentTurnEvent('tool_result', {
           toolName: toolCall.toolName,
           args: toolCall.args,
           result: toolCall.result
-        });
+        }, turnSessionId);
       },
       onToolError: (toolCall) => {
         assistantRecord.text = toolCall.error || `Tool failed: ${toolCall.toolName}`;
@@ -1637,15 +1690,16 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         assistantRecord.status = 'error';
         assistantRecord.error = assistantRecord.text;
         snapshotPersister.schedule(true);
+        syncRemountedTurn();
         void logAgentTurnEvent('tool_error', {
           toolName: toolCall.toolName,
           args: toolCall.args,
           error: toolCall.error
-        });
+        }, turnSessionId);
       },
       onBuildRequest: (request) => {
         requestedBuild = request;
-        void logAgentTurnEvent('build_request', { request, mode: appMode });
+        void logAgentTurnEvent('build_request', { request, mode: turnMode }, turnSessionId);
       }
     });
     if (thinkingPreview.parentElement) {
@@ -1659,6 +1713,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         pending.remove();
         renderCapabilityConfirmation(requestedBuild);
       }
+      syncRemountedTurn();
       return;
     }
 
@@ -1666,7 +1721,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     if (turnIsActive()) {
       if (pendingBody) renderMessageText(pendingBody, finalContent, true);
       pending.classList.remove('pending');
-      chatMessages.push({ role: 'assistant', content: finalContent });
+      turnChatMessages.push({ role: 'assistant', content: finalContent });
     }
     assistantRecord.text = finalContent;
     assistantRecord.timestamp = Date.now();
@@ -1681,11 +1736,12 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
       model: reply.model,
       text: finalContent,
       thinking
-    });
+    }, turnSessionId);
     await refreshChatHistory();
     if (reply.provider && reply.model) {
       setEnvLabel(`${reply.provider}/${reply.model}`);
     }
+    syncRemountedTurn();
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     if (turnIsActive()) {
@@ -1702,22 +1758,49 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
       error: errorMessage,
       streamed,
       thinking
-    });
+    }, turnSessionId);
     await refreshChatHistory();
+    syncRemountedTurn();
   } finally {
     snapshotPersister.flush();
-    isRunning = false;
-    activeStreamId = '';
-    setStopButtonVisible(false);
-    chatInput?.focus();
+    syncRemountedTurn();
+    chatRuns.finish(turnSessionId, run.id);
+    syncRunControls();
+    renderChatHistory();
+    if (activeSessionId === turnSessionId) chatInput?.focus();
   }
 }
 
-function setStopButtonVisible(visible: boolean) {
+function syncRunControls() {
+  const run = chatRuns.get(activeSessionId);
+  const visible = Boolean(run);
+  if (chatInput) chatInput.disabled = visible;
   if (!stopStreamButton) return;
   stopStreamButton.classList.toggle('is-hidden', !visible);
-  stopStreamButton.disabled = !visible;
-  stopStreamButton.textContent = 'Stop';
+  stopStreamButton.disabled = !run?.streamId;
+  stopStreamButton.textContent = run?.streamId ? 'Stop' : 'Starting';
+}
+
+function syncRemountedRun(
+  run: ChatRun<ChatMeta, StoredChatMessage>,
+  record?: StoredChatMessage
+) {
+  if (activeSessionId !== run.chatId || mainViewRevision === run.viewRevision) return;
+  if (chatRuns.get(run.chatId)?.id !== run.id || storedMessages !== run.messages) return;
+  const pinned = isNearBottom(messages);
+  const article = record ? renderedMessageArticles.get(record) : undefined;
+  if (article?.isConnected && record) {
+    const body = article.querySelector<HTMLElement>('.message-text, .builder-run');
+    if (body && record.builderRun) {
+      renderBuilderRun(body, record, record.status === 'running');
+    } else if (body) {
+      renderMessageText(body, record.text, record.role === 'assistant');
+      if (record.cards?.length) renderMessageCards(article, record.cards);
+    }
+  } else {
+    renderStoredTranscript();
+  }
+  if (pinned) scrollMessagesToBottom();
 }
 
 function renderCapabilityConfirmation(request: CapabilityRequest) {
@@ -1761,14 +1844,17 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   panel.appendChild(actions);
   body.appendChild(panel);
 
+  const statusMeta = activeChatMeta;
+  const statusStored = storedMessages;
+  const statusChatMessages = chatMessages;
   const persistAssistantStatus = async (text: string) => {
-    chatMessages.push({ role: 'assistant', content: text });
-    storedMessages.push({
+    statusChatMessages.push({ role: 'assistant', content: text });
+    statusStored.push({
       role: 'assistant',
       text,
       timestamp: Date.now()
     });
-    await persistActiveChatHistory();
+    await persistChatSnapshot(statusMeta, statusStored);
     await refreshChatHistory();
   };
 
@@ -1780,11 +1866,13 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
     void persistAssistantStatus(text);
   });
 
-  confirm.addEventListener('click', async () => {
+  confirm.addEventListener('click', () => {
     confirm.disabled = true;
     cancel.disabled = true;
     article.remove();
-    await switchAppModeWithStatus(confirmedPluginWriteMode());
+    // Start the chat-owned run synchronously before navigation can occur. The
+    // status snapshot may persist in the background.
+    void switchAppModeWithStatus(confirmedPluginWriteMode());
     const output = addMessage('assistant', '');
     const outputBody = output.querySelector<HTMLElement>('.message-text');
     if (!outputBody) return;
@@ -1814,12 +1902,25 @@ async function scaffoldAndRunPluginBuilder(
   const turnSessionId = activeSessionId;
   const turnMeta = activeChatMeta;
   const turnStored = storedMessages;
-  const turnIsActive = () => activeSessionId === turnSessionId;
+  const run = chatRuns.begin(
+    turnSessionId,
+    'builder',
+    turnMeta,
+    turnStored,
+    mainViewRevision
+  );
+  if (!run) {
+    body.textContent = 'This chat already has an active run.';
+    return;
+  }
+  const turnIsActive = () =>
+    activeSessionId === turnSessionId && mainViewRevision === run.viewRevision;
+  const syncRemountedTurn = () => syncRemountedRun(run, builderRecord);
   const snapshotPersister = createTurnSnapshotPersister(() =>
     persistChatSnapshotQuietly(turnMeta, turnStored)
   );
-  isRunning = true;
-  setStopButtonVisible(true);
+  syncRunControls();
+  renderChatHistory();
 
   try {
     // Resolving to an existing plugin means the user wants to edit it — drop
@@ -1847,6 +1948,21 @@ async function scaffoldAndRunPluginBuilder(
         conflictStrategy: options.conflictStrategy
       }
     });
+    const conflictingRun = chatRuns.values().find(
+      (candidate) =>
+        candidate.id !== run.id &&
+        candidate.kind === 'builder' &&
+        candidate.pluginDir === plugin.directory
+    );
+    if (conflictingRun) {
+      throw new Error(
+        `Another chat is already building "${plugin.name}". Wait for that run to finish before editing the same plugin.`
+      );
+    }
+    // Claim this plugin for the duration of the run. Different plugins can
+    // build concurrently; the same workspace cannot be edited safely twice.
+    chatRuns.setPluginDir(turnSessionId, run.id, plugin.directory);
+    turnMeta.activeBuildPlugin = { dir: plugin.directory, name: plugin.name };
     renderPluginScaffoldResult(body, plugin);
     builderRecord = {
       role: 'assistant',
@@ -1872,12 +1988,19 @@ async function scaffoldAndRunPluginBuilder(
         editMode: options.editMode ?? false,
         messages: options.messages
       },
-      { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister }
+      {
+        builderRecord,
+        builderRun,
+        turnMeta,
+        turnStored,
+        turnIsActive,
+        snapshotPersister,
+        run,
+        syncRemountedTurn
+      }
     );
-    // Remember which plugin this chat is editing so later Build-mode messages
-    // continue the coding session on it without re-resolving.
-    turnMeta.activeBuildPlugin = { dir: plugin.directory, name: plugin.name };
     await persistChatSnapshot(turnMeta, turnStored);
+    syncRemountedTurn();
   } catch (error) {
     const errorMessage = getErrorMessage(error, 'Could not write plugin.');
     if (builderRecord && builderRun) {
@@ -1889,16 +2012,18 @@ async function scaffoldAndRunPluginBuilder(
       if (turnIsActive()) chatMessages.push({ role: 'assistant', content: errorMessage });
       await persistChatSnapshot(turnMeta, turnStored);
       await refreshChatHistory();
+      syncRemountedTurn();
     } else {
       body.textContent = errorMessage;
       await persistAssistantStatus(errorMessage);
     }
   } finally {
     snapshotPersister.flush();
-    isRunning = false;
-    activeStreamId = '';
-    setStopButtonVisible(false);
-    chatInput?.focus();
+    syncRemountedTurn();
+    chatRuns.finish(turnSessionId, run.id);
+    syncRunControls();
+    renderChatHistory();
+    if (activeSessionId === turnSessionId) chatInput?.focus();
   }
 }
 
@@ -1909,22 +2034,34 @@ type BuilderTurnContext = {
   turnStored: StoredChatMessage[];
   turnIsActive: () => boolean;
   snapshotPersister: ReturnType<typeof createTurnSnapshotPersister>;
+  run: ChatRun<ChatMeta, StoredChatMessage>;
+  syncRemountedTurn: () => void;
 };
 
 // One streaming coding-agent pass rendered into an existing builder-run message.
-// Shared by the create/first-resolve flow (scaffoldAndRunPluginBuilder) and by
-// follow-up edit turns (runBuildTurn). Throws on failure for the caller to show.
 async function runPluginBuilderTurn(
   builderRequest: PluginBuilderRequest,
   ctx: BuilderTurnContext
 ): Promise<void> {
-  const { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister } = ctx;
+  const {
+    builderRecord,
+    builderRun,
+    turnMeta,
+    turnStored,
+    turnIsActive,
+    snapshotPersister,
+    run,
+    syncRemountedTurn
+  } = ctx;
   let streamed = '';
   let thinking = '';
   const renderLive = () => {
-    if (!turnIsActive()) return;
-    renderBuilderRun(builderRun, builderRecord, true);
-    scrollMessagesToBottom();
+    if (turnIsActive()) {
+      renderBuilderRun(builderRun, builderRecord, true);
+      scrollMessagesToBottom();
+    } else {
+      syncRemountedTurn();
+    }
   };
   const applyToolEvent = (event: BuilderToolEvent) => {
     builderRecord.builderActivities = applyBuilderToolEvent(
@@ -1936,7 +2073,8 @@ async function runPluginBuilderTurn(
   };
   const reply = await runPluginBuilderStream(builderRequest, {
     onStreamId: (streamId) => {
-      activeStreamId = streamId;
+      chatRuns.setStreamId(run.chatId, run.id, streamId);
+      syncRunControls();
     },
     onDelta: (delta) => {
       streamed += delta;
@@ -1952,14 +2090,14 @@ async function runPluginBuilderTurn(
     },
     onToolExecutionStart: (event) => {
       applyToolEvent({ type: 'start', ...event });
-      void logAgentTurnEvent('builder_tool_start', event);
+      void logAgentTurnEvent('builder_tool_start', event, run.chatId);
     },
     onToolExecutionUpdate: (event) => {
       applyToolEvent({ type: 'update', ...event });
     },
     onToolExecutionEnd: (event) => {
       applyToolEvent({ type: 'end', ...event });
-      void logAgentTurnEvent('builder_tool_end', event);
+      void logAgentTurnEvent('builder_tool_end', event, run.chatId);
     }
   });
   const finalContent = reply.content || streamed || 'Done.';
@@ -1971,75 +2109,9 @@ async function runPluginBuilderTurn(
   builderRecord.timestamp = Date.now();
   if (turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
   if (turnIsActive()) chatMessages.push({ role: 'assistant', content: finalContent });
+  syncRemountedTurn();
   await persistChatSnapshot(turnMeta, turnStored);
   await refreshChatHistory();
-}
-
-// A follow-up Build-mode message on the chat's already-active plugin: route it
-// straight to the Pi coding agent editing that plugin — no re-resolution, no
-// confirmation. This is what makes Build mode feel like a live coding session.
-async function runBuildTurn(content: string) {
-  const active = activeChatMeta.activeBuildPlugin;
-  if (!active) return;
-
-  const article = addMessage('assistant', '', true);
-  const body = article.querySelector<HTMLElement>('.message-text');
-  const builderRecord: StoredChatMessage = {
-    role: 'assistant',
-    text: 'Editing plugin...',
-    timestamp: Date.now(),
-    status: 'running',
-    builderRun: true,
-    builderActivities: []
-  };
-  storedMessages.push(builderRecord);
-  const builderRun = document.createElement('div');
-  body?.appendChild(builderRun);
-  renderBuilderRun(builderRun, builderRecord, true);
-  article.classList.remove('pending');
-
-  const turnSessionId = activeSessionId;
-  const turnMeta = activeChatMeta;
-  const turnStored = storedMessages;
-  const turnIsActive = () => activeSessionId === turnSessionId;
-  const snapshotPersister = createTurnSnapshotPersister(() =>
-    persistChatSnapshotQuietly(turnMeta, turnStored)
-  );
-  isRunning = true;
-  setStopButtonVisible(true);
-  await persistChatSnapshot(turnMeta, turnStored);
-
-  try {
-    await runPluginBuilderTurn(
-      {
-        pluginDir: active.dir,
-        name: active.name,
-        description: '',
-        sourceUrls: [],
-        prompt: content,
-        editMode: true,
-        // Prior turns (excluding the message just pushed) for follow-up context.
-        messages: chatMessages.slice(0, -1).slice(-6)
-      },
-      { builderRecord, builderRun, turnMeta, turnStored, turnIsActive, snapshotPersister }
-    );
-  } catch (error) {
-    const errorMessage = getErrorMessage(error, 'Could not edit plugin.');
-    builderRecord.text = errorMessage;
-    builderRecord.status = 'error';
-    builderRecord.error = errorMessage;
-    builderRecord.timestamp = Date.now();
-    if (turnIsActive()) renderBuilderRun(builderRun, builderRecord, false);
-    if (turnIsActive()) chatMessages.push({ role: 'assistant', content: errorMessage });
-    await persistChatSnapshot(turnMeta, turnStored);
-    await refreshChatHistory();
-  } finally {
-    snapshotPersister.flush();
-    isRunning = false;
-    activeStreamId = '';
-    setStopButtonVisible(false);
-    chatInput?.focus();
-  }
 }
 
 function renderBuilderRun(

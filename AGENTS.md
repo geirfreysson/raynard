@@ -64,8 +64,10 @@ Coding/Build model only after the plugin-writing confirmation. `/models`
 configures these roles independently.
 
 The Stop button calls `cancel_model_chat_stream`. Rust records cancellation and
-terminates the active main-agent or builder sidecar process; Pi also receives
-`SIGTERM` and aborts its active run.
+terminates the selected chat's main-agent or builder sidecar process; Pi also
+receives `SIGTERM` and aborts that run. Runs are owned per chat, so other chats
+can continue concurrently. Navigating back to a busy chat reconnects the
+renderer to its in-memory messages and stream controls.
 
 ## Generated Plugin Contract
 
