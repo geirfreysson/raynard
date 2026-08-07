@@ -723,6 +723,7 @@ textarea:focus {
 }
 
 .message {
+  width: 100%;
   max-width: min(780px, 100%);
   padding: 12px 14px;
   border-left: 4px solid transparent;
