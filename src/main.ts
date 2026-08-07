@@ -167,7 +167,7 @@ if (!app) {
 }
 
 app.innerHTML = `
-  <main class="app-shell pre-chat is-booting sidebar-open" aria-label="Raynard">
+  <main class="app-shell pre-chat is-booting" aria-label="Raynard">
     <section class="boot-overlay" role="status" aria-live="polite" aria-label="Starting Raynard">
       <div class="boot-overlay-inner">
         <div class="brand-mark" aria-hidden="true">${foxLogoMarkup}</div>
@@ -177,7 +177,7 @@ app.innerHTML = `
     </section>
 
     <aside id="sidebarRail" class="sidebar-rail" aria-label="Sidebar">
-      <button id="chatsToggle" class="sidebar-rail-btn is-active" type="button" aria-label="Toggle chats sidebar" aria-pressed="true">
+      <button id="chatsToggle" class="sidebar-rail-btn is-active" type="button" aria-label="Toggle chats sidebar" aria-pressed="false">
         ${iconSvg('message-square')}
       </button>
       <button id="pluginsToggle" class="sidebar-rail-btn" type="button" aria-label="Generated plugins" aria-pressed="false">
@@ -188,7 +188,7 @@ app.innerHTML = `
       </button>
     </aside>
 
-    <aside id="chatSidebar" class="chat-sidebar is-open" aria-label="Chats">
+    <aside id="chatSidebar" class="chat-sidebar" aria-label="Chats">
       <header class="chat-sidebar-header">
         <h2>Chats</h2>
         <button id="sidebarClose" type="button" aria-label="Collapse chats sidebar">${iconSvg('panel-left-close')}</button>
