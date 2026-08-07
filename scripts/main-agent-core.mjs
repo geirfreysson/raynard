@@ -102,6 +102,7 @@ Result cards (a built-in Raynard feature):
 - A result card is a fixed visual card the app renders beneath the answer for a tool's result. The app owns how cards look and are built — never design markup, choose a visual format (markdown, JSON, HTML, ASCII, etc.), or invent domain-specific "card" types. "Cards" is not a content type to design; it is this rendering feature.
 - A card is a declarative layout the plugin builder attaches to a FINAL-DATA tool (one that returns a single record, detail, or summary), not to list/search tools.
 - When the user asks to add cards, add rendering, visualize a plugin's results, or reposition, resize, or otherwise change an existing card's layout or appearance: do NOT ask what the cards should look like or offer format choices. From the installed tool names, identify that plugin's candidate final-data tools and ask the user which of those tools should get a card (skip the question when they already named the tool or card). Then call request_plugin_build for that plugin, preserving the user's visual request in the description. The separate coding agent implements the card layouts.
+- Populate taskKind and targetTools on every request_plugin_build call. Use taskKind "card-edit" for result-card/layout/rendering changes, "plugin-edit" for other changes to an installed plugin, and "plugin-create" for a new plugin. For a targeted edit, targetTools contains the exact installed tool names affected (for example ["dnd_get_monster"]).
 - "Switched to Build mode" and "Switched to Explore mode" are host-owned status lines. NEVER emit either phrase yourself. Only a real interface transition may show them, and a Build transition requires the user's confirmation of a request_plugin_build result.
 
 Editing an existing plugin (critical):
@@ -270,7 +271,26 @@ export function createBuildRequestTool(Type, onBuildRequest) {
       ),
       reason: Type.String({
         description: 'Why installed tools are insufficient and code needs to be written.'
-      })
+      }),
+      taskKind: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal('card-edit'),
+            Type.Literal('plugin-edit'),
+            Type.Literal('plugin-create')
+          ],
+          {
+            description:
+              'Structured AI routing metadata: card-edit for result-card changes, plugin-edit for other installed-plugin changes, or plugin-create for a new plugin.'
+          }
+        )
+      ),
+      targetTools: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Exact installed tool names affected by a targeted edit, such as ["dnd_get_monster"]. Empty for broad or new-plugin work.'
+        })
+      )
     }),
     executionMode: 'sequential',
     execute: async (_toolCallId, args) => {
@@ -278,7 +298,15 @@ export function createBuildRequestTool(Type, onBuildRequest) {
         name: normalizePluginName(args?.name),
         description: String(args?.description || '').trim(),
         sourceUrls: normalizeSourceUrls(args?.sourceUrls),
-        reason: String(args?.reason || '').trim()
+        reason: String(args?.reason || '').trim(),
+        taskKind: ['card-edit', 'plugin-edit', 'plugin-create'].includes(args?.taskKind)
+          ? args.taskKind
+          : undefined,
+        targetTools: [...new Set(
+          (Array.isArray(args?.targetTools) ? args.targetTools : [])
+            .map((value) => String(value).trim())
+            .filter(Boolean)
+        )].slice(0, 20)
       };
       onBuildRequest(buildRequest);
       return {

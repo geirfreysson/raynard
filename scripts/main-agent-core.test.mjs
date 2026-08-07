@@ -115,6 +115,12 @@ describe('main agent core', () => {
     const tool = createBuildRequestTool(Type, () => {});
     expect(tool.description).toMatch(/result cards/i);
     expect(tool.description).toMatch(/rendering|presents its results|visualization/i);
+    expect(tool.parameters.properties.taskKind.anyOf.map((entry) => entry.const)).toEqual([
+      'card-edit',
+      'plugin-edit',
+      'plugin-create'
+    ]);
+    expect(tool.parameters.properties.targetTools.items.type).toBe('string');
   });
 
   it('converts JSON schema required fields and enums to Pi parameter schemas', () => {
@@ -192,7 +198,9 @@ describe('main agent core', () => {
       name: 'Hacker News',
       description: 'Build a complete Hacker News API integration for research.',
       sourceUrls: ['https://github.com/HackerNews/API', 'not-a-url'],
-      reason: 'No installed tool can access Hacker News.'
+      reason: 'No installed tool can access Hacker News.',
+      taskKind: 'card-edit',
+      targetTools: [' dnd_get_monster ', 'dnd_get_monster', 'dnd_get_spell']
     });
 
     expect(tool.name).toBe('request_plugin_build');
@@ -201,7 +209,9 @@ describe('main agent core', () => {
         name: 'hacker-news',
         description: 'Build a complete Hacker News API integration for research.',
         sourceUrls: ['https://github.com/HackerNews/API'],
-        reason: 'No installed tool can access Hacker News.'
+        reason: 'No installed tool can access Hacker News.',
+        taskKind: 'card-edit',
+        targetTools: ['dnd_get_monster', 'dnd_get_spell']
       }
     ]);
     expect(result.terminate).toBe(true);

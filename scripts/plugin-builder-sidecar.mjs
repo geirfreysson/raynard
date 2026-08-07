@@ -7,6 +7,7 @@ import { streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
 import {
   buildSystemPrompt,
+  buildTargetedPluginSnapshot,
   buildUserPrompt,
   validatePluginArtifacts
 } from './plugin-builder-core.mjs';
@@ -179,7 +180,37 @@ async function readPluginSnapshot(dir) {
 }
 
 if (request.editMode) {
-  request.pluginSnapshot = await readPluginSnapshot(pluginDir);
+  let targetedSnapshot = null;
+  if (request.taskKind === 'card-edit' && Array.isArray(request.targetTools) && request.targetTools.length) {
+    const files = {};
+    try {
+      const entries = await readdir(pluginDir);
+      const wanted = entries.filter(
+        (name) =>
+          name === 'tools.ts' ||
+          name === 'runtime.ts' ||
+          /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(name)
+      );
+      await Promise.all(
+        wanted.map(async (name) => {
+          try {
+            files[name] = await readFile(`${pluginDir}/${name}`, 'utf8');
+          } catch {
+            // A disappearing optional test file should trigger the general
+            // snapshot fallback, not fail the build turn.
+          }
+        })
+      );
+      targetedSnapshot = buildTargetedPluginSnapshot({
+        files,
+        taskKind: request.taskKind,
+        targetTools: request.targetTools
+      });
+    } catch {
+      targetedSnapshot = null;
+    }
+  }
+  request.pluginSnapshot = targetedSnapshot || await readPluginSnapshot(pluginDir);
 }
 
 const agent = new Agent({

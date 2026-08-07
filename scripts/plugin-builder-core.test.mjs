@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildTargetedPluginSnapshot,
   buildSystemPrompt,
   buildUserPrompt,
   findPluginTestFiles,
@@ -51,6 +52,92 @@ describe('plugin builder core', () => {
     expect(prompt).toContain("variant: 'media'");
     expect(prompt).toContain('HOST_CAPABILITY_REQUIRED:');
     expect(prompt).toMatch(/do not invent/i);
+  });
+
+  it('gives card edits a direct recipe and focused workflow', () => {
+    const prompt = buildSystemPrompt({
+      editMode: true,
+      taskKind: 'card-edit',
+      targetTools: ['dnd_get_monster']
+    });
+
+    expect(prompt).toMatch(/CARD-EDIT FAST PATH/);
+    expect(prompt).toContain('dnd_get_monster');
+    expect(prompt).toMatch(/3.*1.*75%.*25%/);
+    expect(prompt).toContain("variant: 'media'");
+    expect(prompt).toContain("fit: 'contain'");
+    expect(prompt).toMatch(/long.*Section.*full.width/i);
+    expect(prompt).toMatch(/do not reread unrelated files/i);
+    expect(prompt).toContain('HOST_RUNTIME_OUTDATED:');
+  });
+
+  it('builds a targeted card snapshot beyond the general source cap', () => {
+    const filler = `const filler = '${'x'.repeat(17000)}';\n`;
+    const toolsSource = `${filler}
+export const tools = {
+  unrelated_tool: {
+    description: 'Unrelated',
+    card: { layout: [{ component: 'Text', text: 'Nope' }] }
+  },
+  dnd_get_monster: {
+    description: 'Monster detail',
+    card: {
+      title: '{{name}}',
+      layout: [{ component: 'Image', field: 'image_url' }]
+    },
+    async execute() { return { text: 'monster', references: [], data: { image_url: 'x' } }; }
+  }
+};`;
+    const testSource = `
+test('unrelated tool works', () => tools.unrelated_tool.execute({}));
+test('dnd_get_monster card layout', () => {
+  assert.equal(tools.dnd_get_monster.card.layout[0].component, 'Image');
+});`;
+    const runtimeSource = `
+export type CardBlock =
+  | { component: 'Columns'; columns: { width?: number; layout: CardBlock[] }[] }
+  | { component: 'Image'; field: string; variant?: 'avatar' | 'media' };
+export type CardTemplate = { title?: string; layout: CardBlock[] };
+export type UnrelatedRuntimeType = { ignored: true };`;
+
+    const snapshot = buildTargetedPluginSnapshot({
+      files: {
+        'tools.ts': toolsSource,
+        'tools.test.ts': testSource,
+        'runtime.ts': runtimeSource,
+        'README.md': 'Unrelated documentation'
+      },
+      taskKind: 'card-edit',
+      targetTools: ['dnd_get_monster']
+    });
+
+    expect(snapshot).toContain('TARGETED CARD-EDIT SNAPSHOT');
+    expect(snapshot).toContain('dnd_get_monster');
+    expect(snapshot).toContain("title: '{{name}}'");
+    expect(snapshot).toContain("test('dnd_get_monster card layout'");
+    expect(snapshot).toContain('export type CardBlock');
+    expect(snapshot).toContain('export type CardTemplate');
+    expect(snapshot).not.toContain('const filler');
+    expect(snapshot).not.toContain("test('unrelated tool works'");
+    expect(snapshot).not.toContain('UnrelatedRuntimeType');
+    expect(snapshot).not.toContain('Unrelated documentation');
+  });
+
+  it('falls back when a targeted tool cannot be resolved', () => {
+    expect(
+      buildTargetedPluginSnapshot({
+        files: { 'tools.ts': 'export const tools = { known: {} };' },
+        taskKind: 'card-edit',
+        targetTools: ['missing_tool']
+      })
+    ).toBeNull();
+    expect(
+      buildTargetedPluginSnapshot({
+        files: { 'tools.ts': 'export const tools = { known: {} };' },
+        taskKind: 'plugin-edit',
+        targetTools: ['known']
+      })
+    ).toBeNull();
   });
 
   it('asks the coding agent to run executable Node tests before completion', () => {

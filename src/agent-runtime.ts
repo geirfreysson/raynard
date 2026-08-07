@@ -45,6 +45,8 @@ export type AgentBuildRequest = {
   description: string;
   sourceUrls: string[];
   reason: string;
+  taskKind?: 'card-edit' | 'plugin-edit' | 'plugin-create';
+  targetTools?: string[];
 };
 
 export type AgentToolEvent = {
@@ -90,6 +92,8 @@ export type PluginBuilderRequest = {
   description: string;
   sourceUrls: string[];
   prompt: string;
+  taskKind?: 'card-edit' | 'plugin-edit' | 'plugin-create';
+  targetTools?: string[];
   /** True for an interactive edit of an existing plugin (vs. a fresh build). */
   editMode?: boolean;
   /** Prior build-conversation turns replayed for follow-up continuity. */

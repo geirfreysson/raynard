@@ -1985,6 +1985,8 @@ async function scaffoldAndRunPluginBuilder(
         description: plugin.description,
         sourceUrls: request.sourceUrls,
         prompt: options.prompt || request.description,
+        taskKind: request.taskKind,
+        targetTools: request.targetTools,
         editMode: options.editMode ?? false,
         messages: options.messages
       },

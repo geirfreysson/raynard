@@ -1,3 +1,5 @@
+import ts from 'typescript';
+
 // Shared across the fresh-build and interactive-edit prompts so the card
 // contract can never drift between them.
 const CARD_RULES = `Result-card rules (which tool results become a visible card):
@@ -22,6 +24,119 @@ const CARD_RULES = `Result-card rules (which tool results become a visible card)
 - Use only documented components and properties. Do not invent a component, CSS class, JSX, or unsupported property. If the requested visual cannot be expressed with this contract, do not claim it was implemented and do not edit runtime.ts. Respond with exactly "HOST_CAPABILITY_REQUIRED: <the missing reusable primitive or behavior>" so the host can be extended first.
 - If the plugin's tool type does not allow "card"/"data" yet, widen it (add optional card?/data? to the tool interface). You may import the CardTemplate type from ./runtime.ts to type the card (optional).
 - Add a test asserting the final-data tool returns "data" whose fields the card binds to (e.g. data.price exists when a MetricRow binds field 'price').`;
+
+function propertyName(node) {
+  const name = node && node.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return '';
+}
+
+function containsTargetNode(node, targets) {
+  if (
+    (ts.isIdentifier(node) || ts.isStringLiteral(node)) &&
+    targets.has(node.text)
+  ) {
+    return true;
+  }
+  let found = false;
+  ts.forEachChild(node, (child) => {
+    if (!found && containsTargetNode(child, targets)) found = true;
+  });
+  return found;
+}
+
+function sourceSlice(source, node) {
+  return source.slice(node.getStart(), node.getEnd());
+}
+
+export function buildTargetedPluginSnapshot({ files, taskKind, targetTools }) {
+  const targets = [...new Set(
+    (Array.isArray(targetTools) ? targetTools : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+  )];
+  if (taskKind !== 'card-edit' || !targets.length) return null;
+
+  const toolsSource = String(files?.['tools.ts'] || '');
+  if (!toolsSource) return null;
+  const toolsFile = ts.createSourceFile('tools.ts', toolsSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let toolsObject;
+  for (const statement of toolsFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === 'tools' &&
+        declaration.initializer &&
+        ts.isObjectLiteralExpression(declaration.initializer)
+      ) {
+        toolsObject = declaration.initializer;
+      }
+    }
+  }
+  if (!toolsObject) return null;
+
+  const byName = new Map(
+    toolsObject.properties.map((property) => [propertyName(property), property])
+  );
+  if (targets.some((target) => !byName.has(target))) return null;
+
+  const supportingParts = [];
+
+  const targetSet = new Set(targets);
+  for (const [name, sourceValue] of Object.entries(files || {})) {
+    if (!/\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(name)) continue;
+    const source = String(sourceValue || '');
+    const sourceFile = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const matching = sourceFile.statements.filter((statement) =>
+      containsTargetNode(statement, targetSet)
+    );
+    if (matching.length) {
+      supportingParts.push(
+        `===== ${name} :: matching tests =====\n${matching
+          .map((statement) => sourceSlice(source, statement))
+          .join('\n\n')}`
+      );
+    }
+  }
+
+  const runtimeSource = String(files?.['runtime.ts'] || '');
+  if (!runtimeSource) return null;
+  const runtimeFile = ts.createSourceFile(
+    'runtime.ts',
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const aliases = runtimeFile.statements.filter(
+    (statement) =>
+      ts.isTypeAliasDeclaration(statement) &&
+      ['CardBlock', 'CardTemplate', 'CardGap'].includes(statement.name.text)
+  );
+  if (
+    !aliases.some((statement) => statement.name.text === 'CardBlock') ||
+    !aliases.some((statement) => statement.name.text === 'CardTemplate')
+  ) {
+    return null;
+  }
+
+  return [
+    'TARGETED CARD-EDIT SNAPSHOT',
+    `Target tools: ${targets.join(', ')}`,
+    `Files in this plugin: ${Object.keys(files || {}).sort().join(', ')}`,
+    ...targets.map(
+      (target) =>
+        `===== tools.ts :: ${target} =====\n${sourceSlice(toolsSource, byName.get(target))}`
+    ),
+    ...supportingParts,
+    `===== runtime.ts :: canonical card types =====\n${aliases
+      .map((statement) => sourceSlice(runtimeSource, statement))
+      .join('\n\n')}`
+  ].join('\n\n');
+}
 
 export function buildSystemPrompt(request) {
   if (request && request.editMode) {
@@ -166,13 +281,27 @@ ${sourceBlock}`;
 function buildEditSystemPrompt(request) {
   const pluginDir = String(request.pluginDir || '').trim();
   const name = String(request.name || '').trim();
+  const targetTools = (Array.isArray(request.targetTools) ? request.targetTools : [])
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  const cardFastPath =
+    request.taskKind === 'card-edit' && targetTools.length
+      ? `
+CARD-EDIT FAST PATH — targets: ${targetTools.join(', ')}
+- The user has requested a focused card-only edit. The targeted tool definitions, matching tests, and canonical card types are supplied in the snapshot. Do not reread unrelated files.
+- Apply the explicit visual request directly. A right-side image at 25% width is one Columns block with widths 3 and 1 (75% / 25%): existing compact details on the left, and { component: 'Image', variant: 'media', fit: 'contain', ... } on the right.
+- Keep long tables or verbose Section content full-width below the Columns block so narrow columns remain readable.
+- Preserve execute(), API behavior, references, and the existing data shape unless a genuinely new card binding is required. Update the nearest existing structural card test first, make the card change, then run the plugin's Node tests.
+- The canonical card types in the snapshot are authoritative and runtime.ts is vendored. Never edit runtime.ts or cast around missing documented primitives. If those supplied types do not contain a documented primitive required by the request, stop with exactly "HOST_RUNTIME_OUTDATED: <missing primitive>".
+`
+      : '';
   return `You are Pi, an interactive coding agent editing an existing Raynard plugin in Build mode.
 
 You are working inside one plugin workspace: ${name || '(the current plugin)'} at ${pluginDir || '(the plugin directory)'}.
 The user talks to you turn by turn to change this plugin's code — treat it like a normal coding session where the repo happens to be their plugin.
 
 How to work:
-- The plugin's current source (tools.ts, client.ts, index.ts, README.md, and a file listing) is embedded in the user message each turn — treat it as the authoritative current state and DO NOT re-read those files. Only use your file tools to read something not shown (e.g. a test file) or to make edits. Real tools already exist here; this is never a fresh scaffold.
+- The user message embeds an authoritative current-source snapshot. A targeted card edit contains the exact tool, matching tests, and canonical card types; a general edit contains the broader plugin files. DO NOT re-read source already shown. Only read something absent from the snapshot or use file tools to make edits. Real tools already exist here; this is never a fresh scaffold.
 - Cards live on tools in tools.ts: a tool's \`card\` property is its result card, and the tool name tells you which card it is (e.g. the "monster card" is the \`card\` on the dnd_get_monster tool). To change a card, edit that tool's \`card\` template.
 - Make the SMALLEST change that satisfies the user's request. Preserve existing tool names, behavior, exports, and passing tests. Do not rewrite the plugin from scratch or delete working code.
 - Adapt to THIS plugin's conventions. Some plugins predate the shared runtime and use their own reference helper (e.g. references.ts) and a local tool interface instead of ./runtime.ts — keep using whatever the plugin already uses. Only import from ./runtime.ts if the plugin already does or if you clearly need a shared helper (apiGet, createApiReference) or the CardTemplate type.
@@ -180,6 +309,7 @@ How to work:
 - Keep secrets out of source.
 - Tests: use your bash tool to run \`node --test <files>\` when the user asks or after a substantive change, and fix failures. You are not forced to pass whole-plugin validation on every turn — respond to what the user asked.
 
+${cardFastPath}
 ${CARD_RULES}
 
 When the user asks for "nice rendering" of a tool's results, that means: add a fixed result-card (and matching "data") to the relevant FINAL-DATA tool(s) per the rules above, widening the plugin's tool type to allow card?/data? if needed.`;

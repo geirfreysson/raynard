@@ -151,6 +151,13 @@ struct PluginBuilderRequest {
     description: String,
     source_urls: Option<Vec<String>>,
     prompt: String,
+    /// AI-authored structured task classification used to select a focused
+    /// coding-agent context without parsing the user's prose.
+    #[serde(default)]
+    task_kind: Option<String>,
+    /// Exact installed tool names affected by a targeted edit.
+    #[serde(default)]
+    target_tools: Option<Vec<String>>,
     /// True when editing an existing plugin as an interactive coding session
     /// (read + edit real files) rather than filling a fresh scaffold.
     #[serde(default)]
@@ -727,6 +734,8 @@ async fn run_plugin_builder_stream(
         "description": request.description,
         "sourceUrls": normalize_source_urls(request.source_urls.unwrap_or_default()),
         "prompt": request.prompt,
+        "taskKind": request.task_kind,
+        "targetTools": request.target_tools.unwrap_or_default(),
         "editMode": request.edit_mode,
         "messages": history,
         "provider": config.provider,
@@ -2329,10 +2338,7 @@ fn read_generated_plugin_manifest(
                                 "properties": {}
                             })
                         }),
-                        card: item
-                            .get("card")
-                            .filter(|value| value.is_object())
-                            .cloned(),
+                        card: item.get("card").filter(|value| value.is_object()).cloned(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2367,7 +2373,9 @@ fn enrich_generated_plugin_tools_from_runtime(plugin: &mut GeneratedPlugin, plug
 /// (~0.3s each), so we cache the result next to the plugin and only re-run it
 /// when `index.ts` changes. This keeps the plugins sidebar instant after the
 /// first load instead of re-spawning Node for every plugin on every open.
-fn load_generated_plugin_runtime_tools_cached(plugin_dir: &Path) -> Option<Vec<GeneratedPluginTool>> {
+fn load_generated_plugin_runtime_tools_cached(
+    plugin_dir: &Path,
+) -> Option<Vec<GeneratedPluginTool>> {
     let source_mtime = generated_plugin_source_mtime_millis(plugin_dir);
     let cache_path = plugin_dir.join(".runtime-tools.json");
 
@@ -2414,7 +2422,10 @@ fn generated_plugin_source_mtime_millis(plugin_dir: &Path) -> Option<u128> {
     }
     let modified = match latest {
         Some(modified) => modified,
-        None => fs::metadata(plugin_dir.join("index.ts")).ok()?.modified().ok()?,
+        None => fs::metadata(plugin_dir.join("index.ts"))
+            .ok()?
+            .modified()
+            .ok()?,
     };
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis())
 }
@@ -2492,10 +2503,7 @@ fn read_generated_plugin_runtime_tools(
                                 "properties": {}
                             })
                         }),
-                        card: item
-                            .get("card")
-                            .filter(|value| value.is_object())
-                            .cloned(),
+                        card: item.get("card").filter(|value| value.is_object()).cloned(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -3077,11 +3085,33 @@ mod tests {
     use super::{
         generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
         next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        refresh_plugin_vendored_runtime, BuilderStreamEvent, GeneratedPluginTool, RuntimeToolsCache,
-        StoredChatMessage, StreamEvent,
+        refresh_plugin_vendored_runtime, BuilderStreamEvent, GeneratedPluginTool,
+        PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn plugin_builder_request_accepts_structured_card_edit_metadata() {
+        let request: PluginBuilderRequest = serde_json::from_value(json!({
+            "pluginDir": "/plugins/dnd-5e-api",
+            "name": "dnd-5e-api",
+            "description": "Move the monster image to the right.",
+            "sourceUrls": [],
+            "prompt": "Put the image on the right at 25% width.",
+            "taskKind": "card-edit",
+            "targetTools": ["dnd_get_monster"],
+            "editMode": true,
+            "messages": []
+        }))
+        .expect("deserialize builder request");
+
+        assert_eq!(request.task_kind.as_deref(), Some("card-edit"));
+        assert_eq!(
+            request.target_tools,
+            Some(vec!["dnd_get_monster".to_string()])
+        );
+    }
 
     #[test]
     fn runtime_tools_cache_is_used_when_source_is_unchanged() {
@@ -3091,8 +3121,8 @@ mod tests {
         fs::write(plugin_dir.join("index.ts"), "export const noop = true;\n")
             .expect("write index.ts");
 
-        let source_mtime = generated_plugin_source_mtime_millis(&plugin_dir)
-            .expect("read index.ts mtime");
+        let source_mtime =
+            generated_plugin_source_mtime_millis(&plugin_dir).expect("read index.ts mtime");
         let cache = RuntimeToolsCache {
             source_mtime,
             tools: vec![GeneratedPluginTool {
@@ -3111,8 +3141,8 @@ mod tests {
         // A fresh cache short-circuits before any Node spawn; there is no
         // index.ts a runner could load, so a non-empty result proves the cache
         // was used.
-        let tools = load_generated_plugin_runtime_tools_cached(&plugin_dir)
-            .expect("cached tools returned");
+        let tools =
+            load_generated_plugin_runtime_tools_cached(&plugin_dir).expect("cached tools returned");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "getThing");
 
@@ -3121,7 +3151,8 @@ mod tests {
 
     #[test]
     fn edit_refresh_preserves_author_files_and_adds_runtime() {
-        let plugin_dir = std::env::temp_dir().join(format!("raynard-edit-refresh-{}", now_millis()));
+        let plugin_dir =
+            std::env::temp_dir().join(format!("raynard-edit-refresh-{}", now_millis()));
         fs::create_dir_all(&plugin_dir).expect("create plugin dir");
         // A pre-vendor plugin: custom tools, no runtime.ts.
         let custom_tools = "export const tools = { hn_get_item: {} };\n";
