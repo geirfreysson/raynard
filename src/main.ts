@@ -169,6 +169,20 @@ const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
 const MAX_MARKDOWN_TABLE_COLUMNS = 8;
+const appIcons: Record<string, IconNode> = {
+  'message-square': MessageSquare,
+  plus: Plus,
+  'panel-left-close': PanelLeftClose,
+  plug: Plug,
+  'trash-2': Trash2
+};
+
+function iconSvg(name: string) {
+  return createLucideElement(appIcons[name] ?? MessageSquare, {
+    'aria-hidden': 'true'
+  }).outerHTML;
+}
+
 const app = document.querySelector<HTMLDivElement>('#app');
 
 if (!app) {
@@ -496,20 +510,6 @@ async function loadEnvStatus() {
   const status = await invoke<LlmEnvStatus>('load_llm_env_status');
   llmEnvStatus = status;
   renderComposerModelLabel();
-}
-
-const appIcons: Record<string, IconNode> = {
-  'message-square': MessageSquare,
-  plus: Plus,
-  'panel-left-close': PanelLeftClose,
-  plug: Plug,
-  'trash-2': Trash2
-};
-
-function iconSvg(name: string) {
-  return createLucideElement(appIcons[name] ?? MessageSquare, {
-    'aria-hidden': 'true'
-  }).outerHTML;
 }
 
 function setEnvLabel(label: string) {
