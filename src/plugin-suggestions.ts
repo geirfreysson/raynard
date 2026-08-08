@@ -11,9 +11,18 @@ export function selectSplashPrompts(
   plugins: PluginPromptSource[],
   fallback: readonly string[]
 ) {
-  for (const plugin of plugins) {
-    const prompts = normalizePrompts(plugin.samplePrompts);
-    if (prompts.length === 3) return prompts;
+  const pluginPrompts = plugins
+    .map((plugin) => normalizePrompts(plugin.samplePrompts))
+    .filter((prompts) => prompts.length === 3);
+  const selected: string[] = [];
+
+  for (let promptIndex = 0; promptIndex < 3; promptIndex += 1) {
+    for (const prompts of pluginPrompts) {
+      const prompt = prompts[promptIndex];
+      if (!selected.includes(prompt)) selected.push(prompt);
+      if (selected.length === 3) return selected;
+    }
   }
+
   return [...fallback];
 }
