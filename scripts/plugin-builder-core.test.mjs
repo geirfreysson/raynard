@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertBuilderTurnCompleted,
   buildTargetedPluginSnapshot,
   buildSystemPrompt,
   buildUserPrompt,
@@ -7,7 +8,27 @@ import {
   validatePluginArtifacts
 } from './plugin-builder-core.mjs';
 
+const requiredCard = {
+  name: { singular: 'result', plural: 'results' },
+  layout: [{ component: 'Json' }]
+};
+
 describe('plugin builder core', () => {
+  it('rejects truncated and no-change builder turns', () => {
+    expect(() =>
+      assertBuilderTurnCompleted({ editMode: true, madeFileEdits: false, stopReason: 'stop' })
+    ).toThrow(/without writing any changes/i);
+    expect(() =>
+      assertBuilderTurnCompleted({ editMode: true, madeFileEdits: true, stopReason: 'length' })
+    ).toThrow(/output limit/i);
+    expect(() =>
+      assertBuilderTurnCompleted({ editMode: false, madeFileEdits: true, stopReason: 'aborted' })
+    ).toThrow(/interrupted/i);
+    expect(() =>
+      assertBuilderTurnCompleted({ editMode: true, madeFileEdits: true, stopReason: 'stop' })
+    ).not.toThrow();
+  });
+
   it('requires test-first API tools, broad endpoint coverage, and references', () => {
     const prompt = buildSystemPrompt({
       sourceUrls: ['https://github.com/HackerNews/API']
@@ -19,15 +40,15 @@ describe('plugin builder core', () => {
     expect(prompt).toContain('Do not build React components');
     expect(prompt).toContain("name: { singular: 'thing', plural: 'things' }");
     expect(prompt).toMatch(/name.*REQUIRED.*lower-case count nouns/i);
-    expect(prompt).toContain('sample-prompts.json');
+    expect(prompt).toContain('samplePrompts');
     expect(prompt).toMatch(/exactly three/i);
   });
 
   it('requires three usable splash prompts for fresh plugin builds', () => {
     const valid = {
-      files: ['index.ts', 'index.test.ts', 'sample-prompts.json'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- stories',
-      tools: [{ name: 'hn_list_stories', callable: true }],
+      tools: [{ name: 'hn_list_stories', callable: true, card: requiredCard }],
       requireSamplePrompts: true
     };
 
@@ -43,7 +64,7 @@ describe('plugin builder core', () => {
           'What is the newest story on Hacker News?'
         ]
       })
-    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 0 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
   });
 
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {
@@ -51,20 +72,21 @@ describe('plugin builder core', () => {
 
     expect(prompt).toContain('Canonical shape');
     expect(prompt).toContain('async execute(args');
-    expect(prompt).toContain('export const tools = {');
+    expect(prompt).toContain('export const tools = defineTools({');
     expect(prompt).toContain('tools[name].execute(args)');
     expect(prompt).toContain('MUST be named exactly "execute"');
     expect(prompt).toContain('Never use "handler"');
   });
 
-  it('directs the builder to reuse the vendored runtime instead of re-implementing plumbing', () => {
+  it('directs the builder to reuse the shared SDK instead of vendored plumbing', () => {
     const prompt = buildSystemPrompt({ sourceUrls: [] });
 
-    expect(prompt).toContain('./runtime.ts');
+    expect(prompt).toContain('@raynard/plugin-sdk');
     expect(prompt).toContain('apiGet');
     expect(prompt).toContain('mockFetch');
-    expect(prompt).toContain('./testing.ts');
-    expect(prompt).toMatch(/MUST NOT edit or re-implement/);
+    expect(prompt).toContain('@raynard/plugin-sdk/testing');
+    expect(prompt).toMatch(/do not create.*runtime\.ts/i);
+    expect(prompt).toMatch(/MUST reuse.*MUST NOT re-implement/);
   });
 
   it('maps natural-language card requests to composable host primitives and reports capability gaps', () => {
@@ -93,13 +115,13 @@ describe('plugin builder core', () => {
     expect(prompt).toContain("fit: 'contain'");
     expect(prompt).toMatch(/long.*Section.*full.width/i);
     expect(prompt).toMatch(/do not reread unrelated files/i);
-    expect(prompt).toContain('HOST_RUNTIME_OUTDATED:');
+    expect(prompt).toContain('HOST_SDK_OUTDATED:');
   });
 
   it('builds a targeted card snapshot beyond the general source cap', () => {
     const filler = `const filler = '${'x'.repeat(17000)}';\n`;
     const toolsSource = `${filler}
-export const tools = {
+export const tools = defineTools({
   unrelated_tool: {
     description: 'Unrelated',
     card: { layout: [{ component: 'Text', text: 'Nope' }] }
@@ -112,13 +134,13 @@ export const tools = {
     },
     async execute() { return { text: 'monster', references: [], data: { image_url: 'x' } }; }
   }
-};`;
+});`;
     const testSource = `
 test('unrelated tool works', () => tools.unrelated_tool.execute({}));
 test('dnd_get_monster card layout', () => {
   assert.equal(tools.dnd_get_monster.card.layout[0].component, 'Image');
 });`;
-    const runtimeSource = `
+    const sdkSource = `
 export type CardBlock =
   | { component: 'Columns'; columns: { width?: number; layout: CardBlock[] }[] }
   | { component: 'Image'; field: string; variant?: 'avatar' | 'media' };
@@ -129,7 +151,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
       files: {
         'tools.ts': toolsSource,
         'tools.test.ts': testSource,
-        'runtime.ts': runtimeSource,
+        'sdk.d.ts': sdkSource,
         'README.md': 'Unrelated documentation'
       },
       taskKind: 'card-edit',
@@ -140,6 +162,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
     expect(snapshot).toContain('dnd_get_monster');
     expect(snapshot).toContain("title: '{{name}}'");
     expect(snapshot).toContain("test('dnd_get_monster card layout'");
+    expect(snapshot).toContain('===== sdk.d.ts :: canonical card types =====');
     expect(snapshot).toContain('export type CardBlock');
     expect(snapshot).toContain('export type CardTemplate');
     expect(snapshot).not.toContain('const filler');
@@ -173,6 +196,8 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
     expect(prompt).toContain('node --test');
     expect(prompt).toContain('Do not report completion until');
+    expect(prompt).toMatch(/brief plan/i);
+    expect(prompt).toMatch(/first failing test/i);
   });
 
   it('switches to an interactive edit prompt when editMode is set', () => {
@@ -203,18 +228,19 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
   it('keeps the create prompt as the default when editMode is falsy', () => {
     const sys = buildSystemPrompt({ sourceUrls: [] });
-    expect(sys).toContain('empty registry');
+    expect(sys).toContain('author-owned workspace is intentionally small');
+    expect(sys).toContain('defineTools');
     expect(sys).not.toContain('interactive coding agent editing an existing');
   });
 
   it('finds supported test files and rejects structure-only output', () => {
     expect(
-      findPluginTestFiles(['index.ts', 'index.test.ts', 'fixtures.json', 'client.test.mjs'])
-    ).toEqual(['client.test.mjs', 'index.test.ts']);
+      findPluginTestFiles(['tools.ts', 'tools.test.ts', 'fixtures.json', 'client.test.mjs'])
+    ).toEqual(['client.test.mjs', 'tools.test.ts']);
 
     expect(() =>
       validatePluginArtifacts({
-        files: ['index.ts', 'README.md'],
+        files: ['tools.ts', 'README.md'],
         readme: '# Plugin',
         tools: []
       })
@@ -224,7 +250,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
   it('requires runtime tools and an endpoint inventory', () => {
     expect(() =>
       validatePluginArtifacts({
-        files: ['index.ts', 'index.test.ts', 'README.md'],
+        files: ['tools.ts', 'tools.test.ts', 'README.md'],
         readme: '# Plugin',
         tools: [{ name: 'getStoryList' }]
       })
@@ -232,7 +258,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
     expect(() =>
       validatePluginArtifacts({
-        files: ['index.ts', 'index.test.ts', 'README.md'],
+        files: ['tools.ts', 'tools.test.ts', 'README.md'],
         readme: '# Plugin\n\n## Endpoint Inventory\n\n- stories',
         tools: []
       })
@@ -241,7 +267,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
   it('rejects tools that are not callable and accepts callable ones', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts', 'README.md'],
+      files: ['tools.ts', 'tools.test.ts', 'README.md'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- stories'
     };
 
@@ -255,14 +281,24 @@ export type UnrelatedRuntimeType = { ignored: true };`;
     expect(
       validatePluginArtifacts({
         ...base,
+        tools: [{ name: 'hn_list_stories', callable: true, card: requiredCard }]
+      })
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
+  });
+
+  it('requires every runtime tool, including list and search tools, to declare a card', () => {
+    expect(() =>
+      validatePluginArtifacts({
+        files: ['tools.ts', 'tools.test.ts'],
+        readme: '# Plugin\n\n## Endpoint Inventory\n\n- /stories Implemented',
         tools: [{ name: 'hn_list_stories', callable: true }]
       })
-    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 0 });
+    ).toThrow(/every tool.*card/i);
   });
 
   it('accepts a valid result card and counts it', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     const card = {
@@ -279,12 +315,12 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         ...base,
         tools: [{ name: 'get_thing', callable: true, card }]
       })
-    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
   });
 
   it('accepts nested Columns, Grid, and Stack card primitives', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     const card = {
@@ -317,12 +353,12 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         ...base,
         tools: [{ name: 'dnd_get_monster', callable: true, card }]
       })
-    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
   });
 
   it('rejects a result card without singular and plural display names', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     expect(() =>
@@ -335,7 +371,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
   it('rejects a card with an unknown component', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     expect(() =>
@@ -355,7 +391,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
   it('rejects unknown components nested inside layout containers', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     expect(() =>
@@ -381,7 +417,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
 
   it('rejects a card with no layout blocks', () => {
     const base = {
-      files: ['index.ts', 'index.test.ts'],
+      files: ['tools.ts', 'tools.test.ts'],
       readme: '# Plugin\n\n## Endpoint Inventory\n\n- /things Implemented'
     };
     expect(() =>

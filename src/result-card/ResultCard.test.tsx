@@ -12,6 +12,7 @@ describe('ResultCard', () => {
   it('interpolates the title and binds MetricRow / KeyValue fields', () => {
     const html = render(
       {
+        name: { singular: 'result', plural: 'results' },
         title: '{{name}} (#{{id}})',
         layout: [
           { component: 'MetricRow', items: [{ label: 'Price', field: 'price', tone: 'delta' }] },
@@ -28,7 +29,10 @@ describe('ResultCard', () => {
 
   it('renders a Table from a rows path', () => {
     const html = render(
-      { layout: [{ component: 'Table', columns: [{ header: 'Sym', field: 'symbol' }], rows: 'holdings' }] },
+      {
+        name: { singular: 'result', plural: 'results' },
+        layout: [{ component: 'Table', columns: [{ header: 'Sym', field: 'symbol' }], rows: 'holdings' }]
+      },
       { holdings: [{ symbol: 'AAPL' }, { symbol: 'MSFT' }] }
     );
     expect(html).toContain('AAPL');
@@ -37,7 +41,10 @@ describe('ResultCard', () => {
 
   it('shows an empty-state row for a missing table array', () => {
     const html = render(
-      { layout: [{ component: 'Table', columns: [{ header: 'Sym', field: 'symbol' }], rows: 'missing' }] },
+      {
+        name: { singular: 'result', plural: 'results' },
+        layout: [{ component: 'Table', columns: [{ header: 'Sym', field: 'symbol' }], rows: 'missing' }]
+      },
       {}
     );
     expect(html).toContain('No rows');
@@ -46,6 +53,7 @@ describe('ResultCard', () => {
   it('renders nested Section blocks', () => {
     const html = render(
       {
+        name: { singular: 'result', plural: 'results' },
         layout: [
           { component: 'Section', title: 'Details', layout: [{ component: 'Text', text: 'Hello {{who}}' }] }
         ]
@@ -56,19 +64,10 @@ describe('ResultCard', () => {
     expect(html).toContain('Hello World');
   });
 
-  it('falls back to raw JSON for an unknown component', () => {
-    const html = render(
-      // Intentionally invalid component to exercise the default branch.
-      { layout: [{ component: 'Mystery' } as never] },
-      { a: 1 }
-    );
-    expect(html).toContain('Mystery');
-    expect(html).toContain('<pre');
-  });
-
   it('renders an Image block as a header avatar and keeps the body', () => {
     const html = render(
       {
+        name: { singular: 'result', plural: 'results' },
         title: '{{name}}',
         layout: [
           { component: 'Image', field: 'img', alt: '{{name}} portrait' },
@@ -87,6 +86,7 @@ describe('ResultCard', () => {
   it('renders a 3:1 Columns layout with a right-side media image', () => {
     const html = render(
       {
+        name: { singular: 'result', plural: 'results' },
         title: '{{name}}',
         layout: [
           {
@@ -131,6 +131,7 @@ describe('ResultCard', () => {
   it('renders nested Grid and Stack layout primitives', () => {
     const html = render(
       {
+        name: { singular: 'result', plural: 'results' },
         layout: [
           {
             component: 'Grid',

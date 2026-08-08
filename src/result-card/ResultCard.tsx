@@ -212,9 +212,7 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
     }
 
     default:
-      return (
-        <pre className="overflow-x-auto rounded-md border bg-muted/50 p-3 text-xs">{JSON.stringify(block, null, 2)}</pre>
-      );
+      return null;
   }
 }
 

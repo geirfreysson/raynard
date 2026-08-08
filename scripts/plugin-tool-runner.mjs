@@ -1,7 +1,8 @@
-import { copyFile, mkdir, mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, extname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
 function readStdin() {
@@ -26,6 +27,7 @@ const pluginDir = String(request.pluginDir || '').trim();
 const toolName = String(request.toolName || '').trim();
 const args = request.args && typeof request.args === 'object' && !Array.isArray(request.args) ? request.args : {};
 const listTools = request.listTools === true;
+const runnerDir = dirname(fileURLToPath(import.meta.url));
 
 if (!pluginDir) {
   emit({ ok: false, error: 'pluginDir is required.' });
@@ -37,7 +39,8 @@ if (!toolName && !listTools) {
 }
 
 const tempDir = await mkdtemp(join(tmpdir(), 'raynard-plugin-tool-'));
-const modulePath = join(tempDir, 'index.js');
+const sourceEntry = 'tools.ts';
+const modulePath = join(tempDir, 'tools.js');
 
 async function preparePluginModuleDirectory(sourceDir, targetDir) {
   const entries = await readdir(sourceDir, { withFileTypes: true });
@@ -77,13 +80,30 @@ async function preparePluginModuleDirectory(sourceDir, targetDir) {
   }
 }
 
+async function installSharedSdk(targetDir) {
+  const candidates = [
+    join(dirname(pluginDir), 'node_modules', '@raynard', 'plugin-sdk'),
+    join(runnerDir, 'plugin-sdk')
+  ];
+  const source = candidates.find((candidate) => existsSync(join(candidate, 'package.json')));
+  if (!source) return;
+  const target = join(targetDir, 'node_modules', '@raynard', 'plugin-sdk');
+  await mkdir(dirname(target), { recursive: true });
+  await cp(source, target, { recursive: true });
+}
+
 try {
   await writeFile(join(tempDir, 'package.json'), '{"type":"module"}\n', 'utf8');
   await preparePluginModuleDirectory(pluginDir, tempDir);
+  await installSharedSdk(tempDir);
+  if (!existsSync(join(pluginDir, sourceEntry))) {
+    throw new Error('Plugin must export its registry from tools.ts.');
+  }
   const loaded = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
-  const plugin = loaded.default || loaded;
+  const sdk = await import(pathToFileURL(join(tempDir, 'node_modules', '@raynard', 'plugin-sdk', 'index.js')).href);
+  const plugin = loaded;
+  const tools = sdk.assertToolRegistry(plugin.tools);
   if (listTools) {
-    const tools = plugin?.tools && typeof plugin.tools === 'object' ? plugin.tools : {};
     emit({
       ok: true,
       result: {
@@ -104,13 +124,13 @@ try {
       }
     });
   } else {
-    const tool = plugin?.tools?.[toolName];
+    const tool = tools[toolName];
     if (!tool || typeof tool.execute !== 'function') {
       emit({ ok: false, error: `Tool not found: ${toolName}` });
       process.exit(1);
     }
 
-    const result = await tool.execute(args);
+    const result = sdk.assertToolResult(await tool.execute(args));
     emit({ ok: true, result });
   }
 } catch (error) {

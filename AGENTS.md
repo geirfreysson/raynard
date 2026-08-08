@@ -33,7 +33,7 @@ generated API plugins.
 - Utility icons come from Lucide. The Northfox fox is a local brand SVG, not a
   Lucide icon.
 - An empty conversation shows the Northfox wordmark, three suggestion cards,
-  and the composer. When generated plugins provide `sample-prompts.json`, the
+  and the composer. When generated plugins provide manifest `samplePrompts`, the
   suggestions are drawn round-robin across plugins before any plugin repeats.
   If fewer than three usable plugin prompts exist, the three built-in prompts
   are shown. Clicking a suggestion fills the composer without submitting it.
@@ -76,8 +76,8 @@ active chat path.
    Explore. Only the confirmation button switches the app into Build.
 7. The resolved plugin name decides the confirmed flow. A brand-new plugin is
    scaffolded before the coding pass. An existing plugin is opened for in-place
-   editing: Rust refreshes only the vendored plumbing (`runtime.ts`/`testing.ts`)
-   and preserves the author's files. The chat records an `activeBuildPlugin`,
+   editing: Rust preserves the author's files. Plugins reuse the host-installed
+   `@raynard/plugin-sdk`. The chat records an `activeBuildPlugin`,
    but every later ordinary message returns to Explore; another coding pass must
    be requested semantically and confirmed again.
 8. The builder is a separate Pi coding agent with filesystem coding tools
@@ -87,13 +87,13 @@ active chat path.
    follow-ups have context.
 9. A fresh build is gated on executable mocked tests, `node --test`, runtime tool
    discovery, at least one exported tool, a README Endpoint Inventory, and
-   exactly three valid splash prompts in `sample-prompts.json` (validation
+   exactly three valid splash prompts in `plugin.json.samplePrompts` (validation
    failure gives one repair pass). An interactive edit turn is not forced
    through that gate — the agent makes the smallest change and runs the
    relevant tests via `node --test` when appropriate.
-10. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
-    by the host as a React/shadcn card; list/search tools do not. The builder
-    only authors the declarative template — never React.
+10. Every generated API tool carries a fixed declarative result-`card` (+
+    `data`) rendered by the host as a React/shadcn card, including list/search
+    tools. The builder only authors the declarative template — never React.
 
 Every ordinary user message switches to Explore and uses the selected
 Chat/Explore model. The Pi coding agent uses the separately selected
@@ -109,21 +109,25 @@ renderer to its in-memory messages and stream controls.
 ## Generated Plugin Contract
 
 Generated plugins live in the Tauri app-local-data `generated-plugins`
-directory, not in this repository. A completed plugin normally contains:
+directory, not in this repository. A completed current plugin normally contains:
 
-- `plugin.json`: plugin metadata.
-- `index.ts`: exported plugin object and tool definitions.
+- `plugin.json`: plugin metadata, SDK version, sources, and three sample prompts.
+- `tools.ts`: runtime entry and exported `defineTools({...})` registry.
+- Optional `client.ts` and other API-specific supporting modules.
 - `README.md`: tools, source documentation, and Endpoint Inventory.
-- `sample-prompts.json`: exactly three distinct questions for the empty-chat
-  splash. This file is consumed by the host but hidden from plugin detail UI.
 - `*.test.ts`, `*.test.js`, or `*.test.mjs`: executable mocked API tests.
-- Optional supporting `.ts` modules imported with explicit `.ts` ESM paths.
+
+The host installs one shared, versioned `@raynard/plugin-sdk` under the
+generated-plugin root. It owns runtime helpers, tool/card/reference types, and
+mocked-test helpers. Plugins do not copy `index.ts`, `runtime.ts`, `testing.ts`,
+or `contract.test.ts`. Local supporting modules use explicit `.ts` ESM paths.
 
 Each tool needs a specific routing description, an object JSON parameter
-schema, and an async `execute(args)` implementation. API-derived results must
-return useful text and source references. References should retain the source
-URL and enough structured/raw API payload for the main agent to support and
-cite its claims.
+schema, an async `execute(args)` implementation, a fixed declarative result
+card, and matching structured `data` on every successful result path.
+API-derived results must also return useful text and source references.
+References should retain the source URL and enough structured/raw API payload
+for the main agent to support and cite its claims.
 
 ## Build, Test, and Development Commands
 

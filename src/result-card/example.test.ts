@@ -6,6 +6,7 @@ import type { CardTemplate } from './types';
 describe('buildExampleData', () => {
   it('fills every path a template binds to so the card renders non-empty', () => {
     const template: CardTemplate = {
+      name: { singular: 'example', plural: 'examples' },
       title: '{{name}} (#{{id}})',
       layout: [
         { component: 'MetricRow', items: [
@@ -39,6 +40,7 @@ describe('buildExampleData', () => {
 
   it('recurses into Section blocks', () => {
     const template: CardTemplate = {
+      name: { singular: 'example', plural: 'examples' },
       layout: [{ component: 'Section', title: 'More', layout: [{ component: 'KeyValue', pairs: [{ label: 'CR', field: 'meta.cr' }] }] }]
     };
     const data = buildExampleData(template);
@@ -46,6 +48,11 @@ describe('buildExampleData', () => {
   });
 
   it('handles an empty template without throwing', () => {
-    expect(buildExampleData({ layout: [] })).toEqual({});
+    expect(
+      buildExampleData({
+        name: { singular: 'example', plural: 'examples' },
+        layout: []
+      })
+    ).toEqual({});
   });
 });

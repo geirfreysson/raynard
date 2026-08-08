@@ -1,0 +1,11 @@
+{
+  "id": "raynard.generated.compact-plugin",
+  "name": "Compact Plugin",
+  "version": "0.1.0",
+  "sdkVersion": 1,
+  "samplePrompts": [
+    "Look up record 1.",
+    "Look up record 2.",
+    "Look up record 3."
+  ]
+}

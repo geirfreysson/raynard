@@ -34,7 +34,7 @@ const plugins = [
     directory: '/x/generated-plugins/dnd-5e-api',
     tools: [
       { name: 'dnd_get_monster', description: 'one monster', card: { name: { singular: 'monster', plural: 'monsters' } } },
-      { name: 'dnd_list_monsters', description: 'list', card: null }
+      { name: 'dnd_list_monsters', description: 'list', card: { name: { singular: 'monster list', plural: 'monster lists' } } }
     ]
   }
 ];
@@ -50,8 +50,7 @@ describe('buildMentionItems', () => {
     expect(tool?.insertText).toBe('dnd_get_monster');
     expect(card?.label).toBe('monster card');
     expect(card?.insertText).toBe('monster card');
-    // A list tool (no card) yields a tool item but no card item.
-    expect(items.filter((i) => i.kind === 'card')).toHaveLength(1);
+    expect(items.filter((i) => i.kind === 'card')).toHaveLength(2);
   });
 });
 

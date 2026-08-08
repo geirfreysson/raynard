@@ -141,6 +141,8 @@ struct PluginScaffoldStatus {
     normalized_name: String,
     exists: bool,
     next_available_name: String,
+    has_runtime_tools: bool,
+    status: String,
 }
 
 #[derive(Deserialize)]
@@ -189,8 +191,7 @@ struct GeneratedPlugin {
     manifest_path: String,
     created_at: String,
     status: String,
-    /// Builder-authored prompts for the empty-chat splash. Stored separately
-    /// from plugin.json so they are not shown in the plugin detail screen.
+    /// Builder-authored prompts for the empty-chat splash, read from the manifest.
     sample_prompts: Vec<String>,
     tools: Vec<GeneratedPluginTool>,
 }
@@ -201,10 +202,8 @@ struct GeneratedPluginTool {
     name: String,
     description: String,
     parameters: Value,
-    /// Fixed result-card layout authored by the builder. Present only on
-    /// final-data tools; drives the card rendered beneath the agent message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    card: Option<Value>,
+    /// Fixed result-card layout authored by the builder for every API tool.
+    card: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -457,6 +456,7 @@ fn cancel_model_chat_stream(
 fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, String> {
     let dir = generated_plugins_dir(&app)?;
     ensure_dir(&dir)?;
+    ensure_shared_plugin_sdk(&dir)?;
     let entries =
         fs::read_dir(&dir).map_err(|error| format!("Could not read generated plugins: {error}"))?;
     let mut plugin_dirs = Vec::new();
@@ -507,14 +507,19 @@ fn read_generated_plugin(
 ) -> Result<GeneratedPluginDetail, String> {
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
     let manifest_path = plugin_dir.join("plugin.json");
-    let manifest_text = fs::read_to_string(&manifest_path)
+    let raw_manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
-    let manifest_json: Value = serde_json::from_str(&manifest_text)
+    let mut manifest_json: Value = serde_json::from_str(&raw_manifest_text)
         .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
+    if let Some(manifest) = manifest_json.as_object_mut() {
+        manifest.remove("samplePrompts");
+    }
+    let manifest_text =
+        serde_json::to_string_pretty(&manifest_json).unwrap_or_else(|_| raw_manifest_text.clone());
     let mut plugin = read_generated_plugin_manifest(&plugin_dir, &manifest_path)
         .ok_or_else(|| "Could not read generated plugin metadata.".to_string())?;
     enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
-    let code = fs::read_to_string(plugin_dir.join("index.ts")).unwrap_or_default();
+    let code = fs::read_to_string(plugin_dir.join("tools.ts")).unwrap_or_default();
     let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap_or_default();
 
     Ok(GeneratedPluginDetail {
@@ -539,24 +544,26 @@ fn get_plugin_scaffold_status(
 ) -> Result<PluginScaffoldStatus, String> {
     let root = generated_plugins_dir(&app)?;
     ensure_dir(&root)?;
+    ensure_shared_plugin_sdk(&root)?;
     let normalized_name = normalize_plugin_slug(&name);
+    let plugin_dir = root.join(&normalized_name);
+    let manifest_path = plugin_dir.join("plugin.json");
+    let plugin = read_generated_plugin_manifest(&plugin_dir, &manifest_path);
+    let status = plugin
+        .as_ref()
+        .map(|plugin| plugin.status.clone())
+        .unwrap_or_default();
+    let has_runtime_tools = plugin_dir.is_dir()
+        && read_generated_plugin_runtime_tools(&plugin_dir)
+            .map(|tools| !tools.is_empty())
+            .unwrap_or(false);
     Ok(PluginScaffoldStatus {
-        exists: root.join(&normalized_name).exists(),
+        exists: plugin_dir.exists(),
         next_available_name: next_available_plugin_slug(&root, &normalized_name),
         normalized_name,
+        has_runtime_tools,
+        status,
     })
-}
-
-// Overwrite only the vendored plumbing (runtime.ts / testing.ts) in an existing
-// plugin, leaving the author's own files (tools.ts, client.ts, …) untouched.
-// Used when entering an interactive edit session so the current shared helpers
-// and card types are present without re-scaffolding.
-fn refresh_plugin_vendored_runtime(plugin_dir: &Path) -> Result<(), String> {
-    fs::write(plugin_dir.join("runtime.ts"), PLUGIN_RUNTIME_TS)
-        .map_err(|error| format!("Could not refresh plugin runtime: {error}"))?;
-    fs::write(plugin_dir.join("testing.ts"), PLUGIN_TESTING_TS)
-        .map_err(|error| format!("Could not refresh plugin test helpers: {error}"))?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -569,6 +576,7 @@ fn scaffold_plugin_capability(
 
     let root = generated_plugins_dir(&app)?;
     ensure_dir(&root)?;
+    ensure_shared_plugin_sdk(&root)?;
     let conflict_strategy = request
         .conflict_strategy
         .as_deref()
@@ -586,13 +594,9 @@ fn scaffold_plugin_capability(
     };
     let target_dir = root.join(&slug);
 
-    // Edit mode: an interactive coding session edits the real files in place, so
-    // preserve everything and only refresh the vendored plumbing (runtime.ts /
-    // testing.ts) that the coding agent may import — this is backward-compatible
-    // since the card work only added exports. A brand-new name falls through to
-    // a normal fresh scaffold below.
+    // Edit mode preserves all author files; reusable plumbing resolves through
+    // the shared SDK installed above.
     if conflict_strategy == "edit" && target_dir.exists() {
-        refresh_plugin_vendored_runtime(&target_dir)?;
         return read_generated_plugin_manifest(&target_dir, &target_dir.join("plugin.json"))
             .ok_or_else(|| "Plugin exists but could not be read for editing.".to_string());
     }
@@ -614,22 +618,13 @@ fn scaffold_plugin_capability(
     let created_at = now_iso();
     let source_urls = normalize_source_urls(request.source_urls.unwrap_or_default());
     let manifest = build_plugin_manifest(&slug, &description, &created_at, &source_urls);
-    let entrypoint = build_plugin_entrypoint(&slug);
     let readme = build_plugin_readme(&slug, &description, &source_urls);
 
     let write_result = (|| -> Result<(), String> {
         fs::write(temp_dir.join("plugin.json"), format!("{manifest}\n"))
             .map_err(|error| format!("Could not write plugin manifest: {error}"))?;
-        fs::write(temp_dir.join("index.ts"), entrypoint)
-            .map_err(|error| format!("Could not write plugin entrypoint: {error}"))?;
-        fs::write(temp_dir.join("runtime.ts"), PLUGIN_RUNTIME_TS)
-            .map_err(|error| format!("Could not write plugin runtime: {error}"))?;
-        fs::write(temp_dir.join("testing.ts"), PLUGIN_TESTING_TS)
-            .map_err(|error| format!("Could not write plugin test helpers: {error}"))?;
         fs::write(temp_dir.join("tools.ts"), build_plugin_tools_stub())
             .map_err(|error| format!("Could not write plugin tools stub: {error}"))?;
-        fs::write(temp_dir.join("contract.test.ts"), PLUGIN_CONTRACT_TEST_TS)
-            .map_err(|error| format!("Could not write plugin contract test: {error}"))?;
         fs::write(temp_dir.join("README.md"), readme)
             .map_err(|error| format!("Could not write plugin README: {error}"))?;
         fs::rename(&temp_dir, &target_dir)
@@ -651,6 +646,9 @@ async fn execute_generated_plugin_tool(
     app: tauri::AppHandle,
     request: PluginToolRequest,
 ) -> Result<Value, String> {
+    let plugin_root = generated_plugins_dir(&app)?;
+    ensure_dir(&plugin_root)?;
+    ensure_shared_plugin_sdk(&plugin_root)?;
     let tool_name = request.tool_name.trim();
     if tool_name.is_empty() {
         return Err("toolName is required.".to_string());
@@ -2267,11 +2265,7 @@ fn plugin_display_name(slug: &str) -> String {
         .join(" ")
 }
 
-fn read_plugin_sample_prompts(plugin_dir: &Path) -> Vec<String> {
-    let prompts = fs::read_to_string(plugin_dir.join("sample-prompts.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .unwrap_or_default();
+fn normalize_plugin_sample_prompts(prompts: Vec<String>) -> Vec<String> {
     if prompts.len() != 3 {
         return Vec::new();
     }
@@ -2286,12 +2280,30 @@ fn read_plugin_sample_prompts(plugin_dir: &Path) -> Vec<String> {
     normalized
 }
 
+fn read_plugin_sample_prompts(manifest: &Value) -> Vec<String> {
+    let manifest_prompts = manifest
+        .get("samplePrompts")
+        .and_then(Value::as_array)
+        .map(|prompts| {
+            prompts
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    normalize_plugin_sample_prompts(manifest_prompts)
+}
+
 fn read_generated_plugin_manifest(
     plugin_dir: &Path,
     manifest_path: &Path,
 ) -> Option<GeneratedPlugin> {
     let raw = fs::read_to_string(manifest_path).ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
+    if parsed.get("sdkVersion").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
     let id = parsed.get("id").and_then(Value::as_str)?.trim().to_string();
     let name = parsed
         .get("name")
@@ -2324,61 +2336,18 @@ fn read_generated_plugin_manifest(
         .unwrap_or("scaffolded")
         .trim()
         .to_string();
-    let tools = parsed
-        .pointer("/contributes/tools")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    if let Some(name) = item.as_str() {
-                        return Some(GeneratedPluginTool {
-                            name: name.trim().to_string(),
-                            description: String::new(),
-                            parameters: json!({
-                                "type": "object",
-                                "properties": {}
-                            }),
-                            card: None,
-                        });
-                    }
-                    let name = item.get("name").and_then(Value::as_str)?.trim().to_string();
-                    if name.is_empty() {
-                        return None;
-                    }
-                    Some(GeneratedPluginTool {
-                        name,
-                        description: item
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .trim()
-                            .to_string(),
-                        parameters: item.get("parameters").cloned().unwrap_or_else(|| {
-                            json!({
-                                "type": "object",
-                                "properties": {}
-                            })
-                        }),
-                        card: item.get("card").filter(|value| value.is_object()).cloned(),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
     Some(GeneratedPlugin {
         id,
         name,
         description,
         version,
         directory: plugin_dir.to_string_lossy().to_string(),
-        entry_path: plugin_dir.join("index.ts").to_string_lossy().to_string(),
+        entry_path: plugin_dir.join("tools.ts").to_string_lossy().to_string(),
         manifest_path: manifest_path.to_string_lossy().to_string(),
         created_at,
         status,
-        sample_prompts: read_plugin_sample_prompts(plugin_dir),
-        tools,
+        sample_prompts: read_plugin_sample_prompts(&parsed),
+        tools: Vec::new(),
     })
 }
 
@@ -2394,7 +2363,7 @@ fn enrich_generated_plugin_tools_from_runtime(plugin: &mut GeneratedPlugin, plug
 
 /// Runtime tool discovery spawns a Node process that transpiles the plugin
 /// (~0.3s each), so we cache the result next to the plugin and only re-run it
-/// when `index.ts` changes. This keeps the plugins sidebar instant after the
+/// when plugin TypeScript changes. This keeps the plugins sidebar instant after the
 /// first load instead of re-spawning Node for every plugin on every open.
 fn load_generated_plugin_runtime_tools_cached(
     plugin_dir: &Path,
@@ -2404,7 +2373,9 @@ fn load_generated_plugin_runtime_tools_cached(
 
     if let (Some(source_mtime), Ok(raw)) = (source_mtime, fs::read_to_string(&cache_path)) {
         if let Ok(cache) = serde_json::from_str::<RuntimeToolsCache>(&raw) {
-            if cache.source_mtime == source_mtime {
+            if cache.source_mtime == source_mtime
+                && cache.tools.iter().all(|tool| tool.card.is_object())
+            {
                 return Some(cache.tools);
             }
         }
@@ -2424,10 +2395,9 @@ fn load_generated_plugin_runtime_tools_cached(
 }
 
 fn generated_plugin_source_mtime_millis(plugin_dir: &Path) -> Option<u128> {
-    // Card templates live in tools.ts, not index.ts, so key the cache on the
-    // newest mtime across every TypeScript source in the plugin (tools.ts,
-    // client.ts, index.ts, …). A card edit then busts the cache like any other
-    // source change.
+    // Key the cache on the newest TypeScript source in the plugin. Shared SDK
+    // upgrades preserve the tool metadata shape and do not need per-plugin
+    // cache invalidation.
     let mut latest: Option<std::time::SystemTime> = None;
     if let Ok(entries) = fs::read_dir(plugin_dir) {
         for entry in entries.flatten() {
@@ -2445,10 +2415,7 @@ fn generated_plugin_source_mtime_millis(plugin_dir: &Path) -> Option<u128> {
     }
     let modified = match latest {
         Some(modified) => modified,
-        None => fs::metadata(plugin_dir.join("index.ts"))
-            .ok()?
-            .modified()
-            .ok()?,
+        None => return None,
     };
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_millis())
 }
@@ -2526,7 +2493,7 @@ fn read_generated_plugin_runtime_tools(
                                 "properties": {}
                             })
                         }),
-                        card: item.get("card").filter(|value| value.is_object()).cloned(),
+                        card: item.get("card").filter(|value| value.is_object())?.clone(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2545,101 +2512,55 @@ fn build_plugin_manifest(
         "name": plugin_display_name(slug),
         "description": description,
         "version": "0.1.0",
+        "sdkVersion": 1,
         "status": "scaffolded",
         "createdAt": created_at,
-        "capabilities": ["api-reference-tool"],
-        "permissions": ["network:api"],
-        "contributes": {
-            "tools": [],
-            "cards": ["api-reference"]
-        },
+        "samplePrompts": [],
         "sourceUrls": source_urls,
-        "provenance": {
-            "createdBy": "raynard-plugin-builder",
-            "builder": "manual-scaffold"
-        }
     });
     serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())
 }
 
-// Shared, pre-tested plumbing vendored into every generated plugin. The
-// canonical sources live in scripts/plugin-runtime/ and are unit-tested there;
-// include_str! embeds them at compile time so the scaffold can never drift from
-// the tested copy.
-const PLUGIN_RUNTIME_TS: &str = include_str!("../../scripts/plugin-runtime/runtime.ts");
-const PLUGIN_TESTING_TS: &str = include_str!("../../scripts/plugin-runtime/testing.ts");
-const PLUGIN_CONTRACT_TEST_TS: &str =
-    include_str!("../../scripts/plugin-runtime/contract.test.ts.template");
+// The SDK is embedded in the desktop binary and installed once under
+// generated-plugins/node_modules.
+const PLUGIN_SDK_PACKAGE_JSON: &str = include_str!("../../scripts/plugin-sdk/package.json");
+const PLUGIN_SDK_INDEX_JS: &str = include_str!("../../scripts/plugin-sdk/index.js");
+const PLUGIN_SDK_INDEX_D_TS: &str = include_str!("../../scripts/plugin-sdk/index.d.ts");
+const PLUGIN_SDK_TESTING_JS: &str = include_str!("../../scripts/plugin-sdk/testing.js");
+const PLUGIN_SDK_TESTING_D_TS: &str = include_str!("../../scripts/plugin-sdk/testing.d.ts");
+const GENERATED_PLUGINS_PACKAGE_JSON: &str = "{\n  \"private\": true,\n  \"type\": \"module\"\n}\n";
 
-fn build_plugin_tools_stub() -> String {
-    // Raw literal (not format!) so the TypeScript braces need no escaping.
-    r#"// Tool registry: add one entry per API tool, keyed by its exact tool name.
-// Import fetch helpers from ./client.ts and shared helpers from ./runtime.ts.
-//
-// Example tool:
-//   import { fetchThing } from './client.ts';
-//   import { createApiReference } from './runtime.ts';
-//   export const tools = {
-//     example_get_thing: {
-//       description: 'What it answers, what it fetches, limits, follow-up tools.',
-//       parameters: { type: 'object', required: ['id'], properties: { id: { type: 'integer', description: 'Record id.' } } },
-//       async execute(args) {
-//         const thing = await fetchThing(Number(args.id));
-//         return {
-//           text: `Thing ${thing.id}`,
-//           references: [createApiReference({ id: String(thing.id), label: thing.name, sourceUrl: '...', quote: thing.name, payload: thing })]
-//         };
-//       }
-//     }
-//   };
-import type { ApiReference, CardTemplate } from './runtime.ts';
-
-// `data` is the structured payload a fixed result card binds to. Set it only on
-// final-data tools (the ones that also declare a `card`); omit it for
-// list/search tools.
-export type ToolResult = { text: string; references: ApiReference[]; data?: Record<string, unknown> };
-
-export type ApiTool = {
-  description: string;
-  parameters: Record<string, unknown>;
-  // A fixed card layout for final-data tools. Presence marks the tool's result
-  // as storable + displayed. List/search tools MUST omit this.
-  card?: CardTemplate;
-  execute: (args: Record<string, unknown>) => Promise<ToolResult>;
-};
-
-// The builder replaces this empty registry with real tools.
-export const tools: Record<string, ApiTool> = {};
-"#
-    .to_string()
+fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
+    if fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return Ok(());
+    }
+    fs::write(path, content).map_err(|error| format!("Could not write {}: {error}", path.display()))
 }
 
-fn build_plugin_entrypoint(slug: &str) -> String {
-    format!(
-        r#"// Plugin entry point. The builder fills in ./client.ts and ./tools.ts.
-// Shared, pre-tested plumbing lives in ./runtime.ts (createApiReference, apiGet,
-// buildQuery, requireNonEmpty, requirePositiveInt) and ./testing.ts (mockFetch).
-// Both are vendored and must not be edited or re-implemented.
-import {{ tools }} from './tools.ts';
+fn ensure_shared_plugin_sdk(root: &Path) -> Result<(), String> {
+    write_if_changed(&root.join("package.json"), GENERATED_PLUGINS_PACKAGE_JSON)?;
+    let sdk_dir = root.join("node_modules/@raynard/plugin-sdk");
+    ensure_dir(&sdk_dir)?;
+    for (name, content) in [
+        ("package.json", PLUGIN_SDK_PACKAGE_JSON),
+        ("index.js", PLUGIN_SDK_INDEX_JS),
+        ("index.d.ts", PLUGIN_SDK_INDEX_D_TS),
+        ("testing.js", PLUGIN_SDK_TESTING_JS),
+        ("testing.d.ts", PLUGIN_SDK_TESTING_D_TS),
+    ] {
+        write_if_changed(&sdk_dir.join(name), content)?;
+    }
+    Ok(())
+}
 
-export {{ tools }};
-export {{ createApiReference }} from './runtime.ts';
-export type {{ ApiReference }} from './runtime.ts';
+fn build_plugin_tools_stub() -> String {
+    r#"// The host supplies this SDK once for every generated plugin.
+import { defineTools } from '@raynard/plugin-sdk';
 
-export const manifest = {{
-  id: 'raynard.generated.{slug}',
-  name: '{name}',
-  version: '0.1.0'
-}};
-
-export default {{
-  manifest,
-  tools
-}};
-"#,
-        slug = slug,
-        name = plugin_display_name(slug).replace('\'', "\\'")
-    )
+// Add one focused API tool per registry entry.
+export const tools = defineTools({});
+"#
+    .to_string()
 }
 
 fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) -> String {
@@ -2652,7 +2573,7 @@ fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) ->
             .collect::<String>()
     };
     format!(
-        "# {}\n\n{}\n\n## Status\n\nThis plugin workspace is scaffolded. The Pi coding-agent sidecar should fill in API tools here after the user confirms code-writing.\n\n## Source Documentation\n\n{}## Build Contract\n\nBuild TypeScript API tooling for Raynard explore mode. Do not build React, routes, pages, CSS, or a standalone visual explorer. The chat UI already exists; this plugin exists so the agent can call API tools and talk to returned data.\n\n## API Surface Contract\n\nTreat the source API documentation as a whole API surface, not only the latest narrow user query. Build a practical suite of small, focused tools for important endpoints/resources such as list/search, detail-by-id, user/profile/account, metadata/status, and update/history endpoints when available. If only a subset is implemented, keep an `Endpoint Inventory` in this README that records each relevant endpoint path, purpose, required and optional parameters, response shape summary, pagination/rate-limit notes, status (`Implemented`, `Planned`, or `Not applicable`), and the future tool that should expose it.\n\n## Tool Description Contract\n\nEvery exported tool must include a specific `description` and JSON `parameters` schema. Explore mode injects generated tool names, descriptions, and schemas into the prompt so the agent can choose the right tool across plugins. Avoid vague descriptions; state what user questions the tool answers, what API data it fetches, required arguments, useful optional arguments, and important limits or follow-up tools.\n\n## Explore-Mode Contract\n\nAPI tools should return concise text plus structured references with `referenceId`, `referenceLabel`, `referenceMeta`, and expanded raw payload content. Assistant answers should cite the returned references when discussing API data.\n\n## Result Card Contract\n\nFinal-data tools (a single record, a detail view, a computed summary, a status snapshot) declare a fixed `card` template on the tool and return a matching `data` object; the host renders the card beneath the assistant message. Every card declares short singular and plural count names, such as `monster` and `monsters`, for the gathered-card summary. List/search tools declare no card and return no data. The card layout is fixed at build time and never varies per call — only the `data` it binds to changes. Note in the Endpoint Inventory which tools are card-bearing.\n",
+        "# {}\n\n{}\n\n## Source documentation\n\n{}## Development\n\nRuntime helpers, tool types, citations, cards, and test helpers come from the host-supplied `@raynard/plugin-sdk`. Keep this workspace focused on API-specific client code, tools, behavior tests, and this documentation.\n\nEvery tool returns concise text, source references, and structured data matching its fixed declarative card. List and search results use bounded cards and preserve useful empty-result data.\n\n## Tools\n\nThe builder documents the implemented tool names and intended routing here.\n\n## Endpoint Inventory\n\n| Endpoint | Status | Parameters and response shape | Tool or future tool |\n| --- | --- | --- | --- |\n| _Builder: replace with documented API endpoints_ | Planned | _Describe parameters, pagination, limits, and response shape_ | _Proposed tool name_ |\n",
         plugin_display_name(slug),
         description,
         source_block
@@ -3106,11 +3027,11 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
-        next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        read_generated_plugin_manifest, refresh_plugin_vendored_runtime, BuilderStreamEvent,
-        GeneratedPluginTool, PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage,
-        StreamEvent,
+        build_plugin_tools_stub, ensure_shared_plugin_sdk, generated_plugin_source_mtime_millis,
+        load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
+        normalize_plugin_slug, normalize_stored_messages, now_millis,
+        read_generated_plugin_manifest, BuilderStreamEvent, GeneratedPluginTool,
+        PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
@@ -3142,18 +3063,21 @@ mod tests {
         let plugin_dir =
             std::env::temp_dir().join(format!("raynard-runtime-cache-{}", now_millis()));
         fs::create_dir_all(&plugin_dir).expect("create plugin dir");
-        fs::write(plugin_dir.join("index.ts"), "export const noop = true;\n")
-            .expect("write index.ts");
+        fs::write(plugin_dir.join("tools.ts"), "export const tools = {};\n")
+            .expect("write tools.ts");
 
         let source_mtime =
-            generated_plugin_source_mtime_millis(&plugin_dir).expect("read index.ts mtime");
+            generated_plugin_source_mtime_millis(&plugin_dir).expect("read tools.ts mtime");
         let cache = RuntimeToolsCache {
             source_mtime,
             tools: vec![GeneratedPluginTool {
                 name: "getThing".to_string(),
                 description: "Fetch a thing".to_string(),
                 parameters: json!({ "type": "object", "properties": {} }),
-                card: None,
+                card: json!({
+                    "name": { "singular": "thing", "plural": "things" },
+                    "layout": [{ "component": "Json" }]
+                }),
             }],
         };
         fs::write(
@@ -3162,9 +3086,8 @@ mod tests {
         )
         .expect("write cache");
 
-        // A fresh cache short-circuits before any Node spawn; there is no
-        // index.ts a runner could load, so a non-empty result proves the cache
-        // was used.
+        // A fresh cache short-circuits before any Node spawn, so a non-empty
+        // result proves the cache was used.
         let tools =
             load_generated_plugin_runtime_tools_cached(&plugin_dir).expect("cached tools returned");
         assert_eq!(tools.len(), 1);
@@ -3174,27 +3097,28 @@ mod tests {
     }
 
     #[test]
-    fn edit_refresh_preserves_author_files_and_adds_runtime() {
-        let plugin_dir =
-            std::env::temp_dir().join(format!("raynard-edit-refresh-{}", now_millis()));
-        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
-        // A pre-vendor plugin: custom tools, no runtime.ts.
-        let custom_tools = "export const tools = { hn_get_item: {} };\n";
-        fs::write(plugin_dir.join("tools.ts"), custom_tools).expect("write tools.ts");
-        assert!(!plugin_dir.join("runtime.ts").exists());
+    fn shared_plugin_sdk_is_installed_once_above_plugin_workspaces() {
+        let root = std::env::temp_dir().join(format!("raynard-shared-sdk-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create generated plugin root");
 
-        refresh_plugin_vendored_runtime(&plugin_dir).expect("refresh vendored runtime");
+        ensure_shared_plugin_sdk(&root).expect("install shared sdk");
+        let sdk = root.join("node_modules/@raynard/plugin-sdk");
+        assert!(root.join("package.json").is_file());
+        assert!(sdk.join("package.json").is_file());
+        assert!(sdk.join("index.js").is_file());
+        assert!(sdk.join("index.d.ts").is_file());
+        assert!(sdk.join("testing.js").is_file());
+        assert!(sdk.join("testing.d.ts").is_file());
 
-        // Author's tools.ts is untouched; runtime.ts is now present with the card types.
-        assert_eq!(
-            fs::read_to_string(plugin_dir.join("tools.ts")).expect("read tools.ts"),
-            custom_tools
-        );
-        let runtime = fs::read_to_string(plugin_dir.join("runtime.ts")).expect("read runtime.ts");
-        assert!(runtime.contains("CardTemplate"));
-        assert!(plugin_dir.join("testing.ts").exists());
+        fs::remove_dir_all(&root).expect("remove generated plugin root");
+    }
 
-        fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+    #[test]
+    fn compact_tools_scaffold_imports_the_shared_sdk() {
+        let tools = build_plugin_tools_stub();
+        assert!(tools.contains("@raynard/plugin-sdk"));
+        assert!(tools.contains("defineTools"));
+        assert!(!tools.contains("./runtime.ts"));
     }
 
     #[test]
@@ -3215,7 +3139,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_plugin_reads_three_private_sample_prompts() {
+    fn generated_plugin_reads_three_manifest_sample_prompts() {
         let plugin_dir =
             std::env::temp_dir().join(format!("raynard-plugin-prompts-{}", now_millis()));
         fs::create_dir_all(&plugin_dir).expect("create plugin dir");
@@ -3223,26 +3147,42 @@ mod tests {
             plugin_dir.join("plugin.json"),
             serde_json::to_string(&json!({
                 "id": "raynard.generated.hacker-news",
-                "name": "Hacker News"
+                "name": "Hacker News",
+                "sdkVersion": 1,
+                "samplePrompts": [
+                    "Who wrote the top story today?",
+                    "Show me the three most discussed stories.",
+                    "What is the newest story?"
+                ]
             }))
             .expect("serialize manifest"),
         )
         .expect("write manifest");
-        fs::write(
-            plugin_dir.join("sample-prompts.json"),
-            serde_json::to_string(&json!([
-                "Who wrote the top story today?",
-                "Show me the three most discussed stories.",
-                "What is the newest story?"
-            ]))
-            .expect("serialize prompts"),
-        )
-        .expect("write prompts");
-
         let plugin = read_generated_plugin_manifest(&plugin_dir, &plugin_dir.join("plugin.json"))
             .expect("read generated plugin");
         assert_eq!(plugin.sample_prompts.len(), 3);
         assert_eq!(plugin.sample_prompts[0], "Who wrote the top story today?");
+
+        fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+    }
+
+    #[test]
+    fn generated_plugin_rejects_a_manifest_without_the_current_sdk_version() {
+        let plugin_dir = std::env::temp_dir().join(format!("raynard-old-plugin-{}", now_millis()));
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_string(&json!({
+                "id": "raynard.generated.old-plugin",
+                "name": "Old Plugin"
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        assert!(
+            read_generated_plugin_manifest(&plugin_dir, &plugin_dir.join("plugin.json")).is_none()
+        );
 
         fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
     }

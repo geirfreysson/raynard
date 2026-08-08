@@ -100,8 +100,8 @@ ${modePolicy}
 
 Result cards (a built-in Raynard feature):
 - A result card is a fixed visual card the app renders beneath the answer for a tool's result. The app owns how cards look and are built — never design markup, choose a visual format (markdown, JSON, HTML, ASCII, etc.), or invent domain-specific "card" types. "Cards" is not a content type to design; it is this rendering feature.
-- A card is a declarative layout the plugin builder attaches to a FINAL-DATA tool (one that returns a single record, detail, or summary), not to list/search tools.
-- When the user asks to add cards, add rendering, visualize a plugin's results, or reposition, resize, or otherwise change an existing card's layout or appearance: do NOT ask what the cards should look like or offer format choices. From the installed tool names, identify that plugin's candidate final-data tools and ask the user which of those tools should get a card (skip the question when they already named the tool or card). Then call request_plugin_build for that plugin, preserving the user's visual request in the description. The separate coding agent implements the card layouts.
+- Every generated API tool, including list/search tools, has a declarative card and matching data. Each actual tool invocation therefore produces one host-rendered result card.
+- When the user asks to add cards, add rendering, visualize a plugin's results, or reposition, resize, or otherwise change an existing card's layout or appearance: do NOT ask what the cards should look like or offer format choices. Identify the affected installed tools, then call request_plugin_build for that plugin, preserving the user's visual request in the description. The separate coding agent implements the card layouts.
 - Populate taskKind and targetTools on every request_plugin_build call. Use taskKind "card-edit" for result-card/layout/rendering changes, "plugin-edit" for other changes to an installed plugin, and "plugin-create" for a new plugin. For a targeted edit, targetTools contains the exact installed tool names affected (for example ["dnd_get_monster"]).
 - "Switched to Build mode" and "Switched to Explore mode" are host-owned status lines. NEVER emit either phrase yourself. Only a real interface transition may show them, and a Build transition requires the user's confirmation of a request_plugin_build result.
 
@@ -113,7 +113,8 @@ Editing an existing plugin (critical):
 
 Core policy:
 - Inspect the available tools before deciding how to answer.
-- Use tools before making claims about current, external, private, or API-backed data.
+- For current, external, private, or API-backed claims, call the relevant installed tools in the current turn even when earlier conversation contains similar results. Never narrate a tool call without actually making it.
+- Never claim that a result card was shown or refreshed unless you invoked the corresponding tool in the current turn. Do not reconstruct a supposed card in prose from conversation history.
 - Continue using tools until you have enough evidence for a complete answer.
 - Cite source URLs returned by tools near the claims they support.
 - Never fabricate tool results, references, API access, or current facts.
@@ -188,8 +189,10 @@ export function createGeneratedPluginTools({ Type, plugins, executePluginTool })
       // Fixed card layout authored by the builder and carried through discovery.
       // Merged into the tool result below so the frontend receives template +
       // data in one event and needs no separate tool-catalog lookup.
-      const card =
-        definition.card && typeof definition.card === 'object' ? definition.card : null;
+      const card = definition.card;
+      if (!card || typeof card !== 'object') {
+        throw new Error(`Generated plugin tool ${name} is missing its required result card.`);
+      }
       tools.push({
         name,
         label: name,
@@ -209,7 +212,7 @@ export function createGeneratedPluginTools({ Type, plugins, executePluginTool })
             signal
           );
           const details =
-            card && result && typeof result === 'object' ? { ...result, card } : result;
+            result && typeof result === 'object' ? { ...result, card } : result;
           return {
             content: [{ type: 'text', text: formatToolResult(result) }],
             details

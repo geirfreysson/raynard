@@ -58,12 +58,23 @@ describe('main agent core', () => {
 
     // Cards are recognized as a rendering feature the app owns.
     expect(build).toContain('Result cards');
-    expect(build).toContain('final-data tool');
+    expect(build).toMatch(/every.*tool.*card/i);
     // It must not interrogate the user about visual format / card types.
     expect(build).toMatch(/do NOT ask what the cards should look like/i);
-    expect(build).toContain('which of those tools should get a card');
+    expect(build).not.toContain('which of those tools should get a card');
     // Adding cards is itself a valid reason to call request_plugin_build.
     expect(build).toContain('adding result cards to specific tools');
+  });
+
+  it('requires a tool call in the current turn before making API claims or claiming cards appeared', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['fpl_search_players']
+    });
+
+    expect(explore).toMatch(/current turn/i);
+    expect(explore).toMatch(/never narrate.*tool call/i);
+    expect(explore).toMatch(/never claim.*card.*shown/i);
   });
 
   it('routes visual changes to existing cards through the plugin builder', () => {
@@ -163,6 +174,10 @@ describe('main agent core', () => {
                 properties: {
                   type: { type: 'string' }
                 }
+              },
+              card: {
+                name: { singular: 'story list', plural: 'story lists' },
+                layout: [{ component: 'Table', columns: [{ header: 'Story', field: 'title' }], rows: 'stories' }]
               }
             }
           ]
@@ -172,7 +187,8 @@ describe('main agent core', () => {
         executions.push(request);
         return {
           text: 'Story one',
-          references: [{ url: 'https://news.ycombinator.com/item?id=1' }]
+          references: [{ url: 'https://news.ycombinator.com/item?id=1' }],
+          data: { stories: [{ title: 'Story one' }] }
         };
       }
     });
@@ -189,6 +205,7 @@ describe('main agent core', () => {
     ]);
     expect(result.content[0].text).toContain('Story one');
     expect(result.details.references).toHaveLength(1);
+    expect(result.details.card.name.singular).toBe('story list');
   });
 
   it('turns semantic build intent into a structured terminating tool result', async () => {

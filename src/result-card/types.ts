@@ -1,4 +1,4 @@
-// Card template shape — mirrors scripts/plugin-runtime/runtime.ts (CardTemplate).
+// Card template shape — mirrors scripts/plugin-sdk/index.d.ts (CardTemplate).
 // Kept as an app-local copy so the frontend has no build dependency on the
 // vendored plugin runtime. The builder authors these; the app renders them.
 
@@ -30,8 +30,8 @@ export type CardBlock =
   | { component: 'Json'; field?: string };
 
 export type CardTemplate = {
-  /** Count label authored by the plugin; optional here for legacy persisted cards. */
-  name?: {
+  /** Count label authored by the plugin. */
+  name: {
     singular: string;
     plural: string;
   };

@@ -1,0 +1,15 @@
+{
+  "name": "@raynard/plugin-sdk",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./testing": {
+      "types": "./testing.d.ts",
+      "default": "./testing.js"
+    }
+  }
+}

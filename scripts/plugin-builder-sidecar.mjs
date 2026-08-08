@@ -2,10 +2,12 @@ import { createInterface } from 'node:readline';
 import { stdin as input, stdout as output, stderr } from 'node:process';
 import { spawn } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
 import {
+  assertBuilderTurnCompleted,
   buildSystemPrompt,
   buildTargetedPluginSnapshot,
   buildUserPrompt,
@@ -117,7 +119,8 @@ async function validatePluginWorkspace() {
   const readme = await readFile(`${pluginDir}/README.md`, 'utf8');
   let samplePrompts;
   try {
-    samplePrompts = JSON.parse(await readFile(`${pluginDir}/sample-prompts.json`, 'utf8'));
+    const manifest = JSON.parse(await readFile(`${pluginDir}/plugin.json`, 'utf8'));
+    samplePrompts = manifest.samplePrompts;
   } catch {
     samplePrompts = undefined;
   }
@@ -165,7 +168,7 @@ if (!apiKey) {
 // Because we always embed the current files, this doubles as cross-turn memory:
 // the state the model sees is authoritative, not something it must reconstruct.
 async function readPluginSnapshot(dir) {
-  const wanted = ['tools.ts', 'client.ts', 'index.ts', 'README.md'];
+  const wanted = ['plugin.json', 'tools.ts', 'client.ts', 'README.md'];
   const parts = [];
   try {
     const entries = await readdir(dir);
@@ -196,7 +199,6 @@ if (request.editMode) {
       const wanted = entries.filter(
         (name) =>
           name === 'tools.ts' ||
-          name === 'runtime.ts' ||
           /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(name)
       );
       await Promise.all(
@@ -204,11 +206,17 @@ if (request.editMode) {
           try {
             files[name] = await readFile(`${pluginDir}/${name}`, 'utf8');
           } catch {
-            // A disappearing optional test file should trigger the general
-            // snapshot fallback, not fail the build turn.
+            // A disappearing optional test file should trigger the complete
+            // workspace snapshot, not fail the build turn.
           }
         })
       );
+      const runnerPath = String(request.pluginRunnerPath || '').trim();
+      if (runnerPath) {
+        try {
+          files['sdk.d.ts'] = await readFile(join(dirname(runnerPath), 'plugin-sdk', 'index.d.ts'), 'utf8');
+        } catch {}
+      }
       targetedSnapshot = buildTargetedPluginSnapshot({
         files,
         taskKind: request.taskKind,
@@ -233,15 +241,18 @@ const agent = new Agent({
   toolExecution: 'sequential'
 });
 
-process.on('SIGTERM', () => {
+process.once('SIGTERM', () => {
   agent.abort();
+  setTimeout(() => process.exit(0), 1_000).unref();
 });
 
 let finalText = '';
+let lastAssistantStopReason = '';
 // Track whether the agent actually modified a file this run. A weak/chatty
 // coding model can read everything and then end its turn without editing; in
 // edit mode we detect that and nudge it once to apply the change.
 const FILE_MUTATING_TOOLS = new Set(['edit', 'write', 'copy', 'multiedit', 'create', 'apply_patch']);
+const pendingFileMutations = new Set();
 let madeFileEdits = false;
 const unsubscribe = agent.subscribe((event) => {
   if (event.type === 'message_update') {
@@ -260,7 +271,7 @@ const unsubscribe = agent.subscribe((event) => {
 
   if (event.type === 'tool_execution_start') {
     if (FILE_MUTATING_TOOLS.has(String(event.toolName || '').toLowerCase())) {
-      madeFileEdits = true;
+      pendingFileMutations.add(String(event.toolCallId || event.toolName || 'mutation'));
     }
     emit({
       type: 'tool_execution_start',
@@ -283,6 +294,10 @@ const unsubscribe = agent.subscribe((event) => {
   }
 
   if (event.type === 'tool_execution_end') {
+    const mutationKey = String(event.toolCallId || event.toolName || 'mutation');
+    if (pendingFileMutations.delete(mutationKey) && !event.isError) {
+      madeFileEdits = true;
+    }
     emit({
       type: 'tool_execution_end',
       toolCallId: event.toolCallId || '',
@@ -295,6 +310,7 @@ const unsubscribe = agent.subscribe((event) => {
 
   if (event.type === 'message_end' && event.message && event.message.role === 'assistant') {
     finalText = extractAssistantText(event.message) || finalText;
+    lastAssistantStopReason = String(event.message.stopReason || '');
   }
 });
 
@@ -309,9 +325,14 @@ try {
     if (!madeFileEdits) {
       emit({ type: 'status', status: 'edit_no_changes_retrying' });
       await agent.prompt(
-        'You inspected the files but have not written any edits yet. Now actually implement the change the user asked for: edit the plugin source (e.g. tools.ts) to add the card templates and matching data, then run the relevant `node --test` files and briefly report what you changed. Do not end your turn until the edits are written to disk.'
+        'You inspected or planned without writing edits. Stop planning now. Use a filesystem tool immediately to implement the requested change, then run the relevant `node --test` files. Do not describe code that remains unwritten.'
       );
     }
+    assertBuilderTurnCompleted({
+      editMode: true,
+      madeFileEdits,
+      stopReason: lastAssistantStopReason
+    });
   } else {
     // Fresh builds are gated by a full validate-or-retry pass.
     try {
@@ -323,6 +344,11 @@ try {
       );
       await validatePluginWorkspace();
     }
+    assertBuilderTurnCompleted({
+      editMode: false,
+      madeFileEdits,
+      stopReason: lastAssistantStopReason
+    });
   }
   unsubscribe();
   emit({ type: 'done', text: finalText || (request.editMode ? 'Done.' : 'Plugin builder completed.') });

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Raynard data connections</title>
+  <desc id="desc">Configuration for connected data APIs and their available tools.</desc>
+  <rect width="1600" height="1000" fill="#f8fafc"/>
+  <rect x="120" y="90" width="1360" height="820" rx="22" fill="#fff" stroke="#e2e8f0" stroke-width="3"/>
+  <text x="190" y="170" font-family="Inter,Arial" font-size="38" font-weight="700" fill="#1e293b">Data connections</text>
+  <text x="190" y="215" font-family="Inter,Arial" font-size="20" fill="#64748b">Connect APIs and make their tools available in conversation.</text>
+  <line x1="190" y1="260" x2="1410" y2="260" stroke="#e2e8f0" stroke-width="2"/>
+  <text x="190" y="330" font-family="Inter,Arial" font-size="18" font-weight="700" fill="#842f25">CONNECTED APIS</text>
+  <rect x="190" y="360" width="560" height="150" rx="14" fill="#fbfaf9" stroke="#d8cbc7" stroke-width="2"/>
+  <circle cx="245" cy="415" r="25" fill="#f3e5e2"/>
+  <text x="235" y="424" font-family="Inter,Arial" font-size="24" font-weight="700" fill="#a0372b">W</text>
+  <text x="290" y="407" font-family="Inter,Arial" font-size="22" font-weight="700" fill="#1e293b">Weather API</text>
+  <text x="290" y="445" font-family="Inter,Arial" font-size="17" fill="#64748b">Current conditions · Forecasts</text>
+  <rect x="585" y="401" width="120" height="40" rx="20" fill="#e9f7ee"/>
+  <text x="617" y="427" font-family="Inter,Arial" font-size="15" font-weight="700" fill="#257a45">Active</text>
+  <text x="190" y="600" font-family="Inter,Arial" font-size="18" font-weight="700" fill="#842f25">MORE DATA</text>
+  <rect x="190" y="630" width="560" height="150" rx="14" fill="#fbfaf9" stroke="#d8cbc7" stroke-width="2"/>
+  <circle cx="245" cy="685" r="25" fill="#f3e5e2"/>
+  <text x="235" y="694" font-family="Inter,Arial" font-size="24" font-weight="700" fill="#a0372b">M</text>
+  <text x="290" y="677" font-family="Inter,Arial" font-size="22" font-weight="700" fill="#1e293b">Markets API</text>
+  <text x="290" y="715" font-family="Inter,Arial" font-size="17" fill="#64748b">Quotes · Company data</text>
+  <rect x="585" y="671" width="120" height="40" rx="20" fill="#e9f7ee"/>
+  <text x="617" y="697" font-family="Inter,Arial" font-size="15" font-weight="700" fill="#257a45">Active</text>
+  <rect x="850" y="330" width="500" height="450" rx="18" fill="#f8fafc"/>
+  <text x="900" y="398" font-family="Inter,Arial" font-size="24" font-weight="700" fill="#1e293b">API credentials stay private</text>
+  <text x="900" y="446" font-family="Inter,Arial" font-size="18" fill="#64748b">API keys are saved in your operating</text>
+  <text x="900" y="476" font-family="Inter,Arial" font-size="18" fill="#64748b">system keychain, not app configuration.</text>
+  <rect x="900" y="535" width="400" height="62" rx="10" fill="#fff" stroke="#cbd5e1"/>
+  <text x="925" y="574" font-family="Inter,Arial" font-size="17" fill="#94a3b8">••••••••••••••••••••</text>
+  <rect x="900" y="630" width="172" height="52" rx="10" fill="#a0372b"/>
+  <text x="941" y="663" font-family="Inter,Arial" font-size="16" font-weight="700" fill="#fff">Connect API</text>
+</svg>

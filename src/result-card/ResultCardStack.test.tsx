@@ -43,18 +43,6 @@ describe('ResultCardStack', () => {
     expect(html).toContain('1 monster · 2 resources');
   });
 
-  it('falls back to card/cards for templates created before named cards', () => {
-    const legacy: StoredResultCard = {
-      toolName: 'get_legacy',
-      template: { layout: [{ component: 'Text', text: 'Legacy' }] },
-      data: {}
-    };
-    const html = renderToStaticMarkup(
-      createElement(ResultCardStack, { cards: [legacy, legacy], collapsible: true })
-    );
-    expect(html).toContain('2 cards');
-  });
-
   it('renders the card directly when not collapsible (preview)', () => {
     const html = render(false);
     expect(html).toContain('Orc');

@@ -3,8 +3,8 @@ import ts from 'typescript';
 // Shared across the fresh-build and interactive-edit prompts so the card
 // contract can never drift between them.
 const CARD_RULES = `Result-card rules (which tool results become a visible card):
-- A FINAL-DATA tool (a single record, a detail view, a computed summary, a status snapshot) MUST declare a static "card" template on the tool AND return a matching "data" object from execute. The host renders the card beneath the assistant message.
-- A LIST/SEARCH tool (returns candidates, ids, or search hits the agent drills into) MUST NOT declare a card and MUST NOT return "data". These are intermediate steps, not final results.
+- EVERY API tool, including list/search tools and intermediate discovery calls, MUST declare a static "card" template on the tool AND return a matching "data" object from every successful execute path. The host renders one coherent card per tool invocation beneath the assistant message.
+- Design list/search cards as bounded tables or summaries of the returned rows. Empty-result paths still return card data with an empty rows array and useful filter/count fields.
 - The card layout is FIXED at build time and stored on the tool. It never varies per call; only the "data" it binds to changes. Do not build a different card shape per response.
 - The card is DECLARATIVE — objects only, no JSX, no functions, no host/React code. You are still forbidden from writing UI; you only describe layout and which data fields go where.
 - Card shape: { name: { singular: string, plural: string }, title?: string, layout: CardBlock[] }. "name" is REQUIRED and contains short lower-case count nouns shown by the host (e.g. { singular: 'monster', plural: 'monsters' } produces "1 monster" / "2 monsters"). Use an explicit plural so irregular nouns work. Strings in "title" and Text blocks support {{path}} interpolation from "data" (e.g. "{{symbol}} — {{name}}"). Block "field"/"rows" are dotted paths into "data" (e.g. "quote.price", "holdings").
@@ -21,9 +21,9 @@ const CARD_RULES = `Result-card rules (which tool results become a visible card)
   - { component: 'Image', field, alt?, variant?: 'avatar' | 'media', fit?: 'cover' | 'contain', aspectRatio?: '1/1' | '3/4' | '4/3' | '16/9' | 'auto' }  // defaults to a rounded header avatar; media renders inline at the container's full width
   - { component: 'Json', field? }  // raw fallback; whole data when field omitted
 - Translate the user's natural-language visual request into these composable primitives. For example, "large image on the right taking 25%" is Columns with widths 3 and 1, with { component: 'Image', variant: 'media', ... } in the right column. Nest Stack/Grid/Columns as needed.
-- Use only documented components and properties. Do not invent a component, CSS class, JSX, or unsupported property. If the requested visual cannot be expressed with this contract, do not claim it was implemented and do not edit runtime.ts. Respond with exactly "HOST_CAPABILITY_REQUIRED: <the missing reusable primitive or behavior>" so the host can be extended first.
-- If the plugin's tool type does not allow "card"/"data" yet, widen it (add optional card?/data? to the tool interface). You may import the CardTemplate type from ./runtime.ts to type the card (optional).
-- Add a test asserting the final-data tool returns "data" whose fields the card binds to (e.g. data.price exists when a MetricRow binds field 'price').`;
+- Use only documented components and properties. Do not invent a component, CSS class, JSX, or unsupported property. If the requested visual cannot be expressed with this contract, do not claim it was implemented. Respond with exactly "HOST_CAPABILITY_REQUIRED: <the missing reusable primitive or behavior>" so the shared SDK and host can be extended first.
+- Import the required CardTemplate, ApiTool, and ToolResult contracts from @raynard/plugin-sdk; do not declare local substitutes.
+- Add tests asserting EVERY tool returns "data" whose fields its card binds to (e.g. data.price exists when a MetricRow binds field 'price').`;
 
 function propertyName(node) {
   const name = node && node.name;
@@ -69,10 +69,18 @@ export function buildTargetedPluginSnapshot({ files, taskKind, targetTools }) {
       if (
         ts.isIdentifier(declaration.name) &&
         declaration.name.text === 'tools' &&
-        declaration.initializer &&
-        ts.isObjectLiteralExpression(declaration.initializer)
+        declaration.initializer
       ) {
-        toolsObject = declaration.initializer;
+        const initializer = declaration.initializer;
+        if (ts.isObjectLiteralExpression(initializer)) {
+          toolsObject = initializer;
+        } else if (
+          ts.isCallExpression(initializer) &&
+          initializer.arguments[0] &&
+          ts.isObjectLiteralExpression(initializer.arguments[0])
+        ) {
+          toolsObject = initializer.arguments[0];
+        }
       }
     }
   }
@@ -102,16 +110,17 @@ export function buildTargetedPluginSnapshot({ files, taskKind, targetTools }) {
     }
   }
 
-  const runtimeSource = String(files?.['runtime.ts'] || '');
-  if (!runtimeSource) return null;
-  const runtimeFile = ts.createSourceFile(
-    'runtime.ts',
-    runtimeSource,
+  const sdkName = 'sdk.d.ts';
+  const sdkSource = String(files?.[sdkName] || '');
+  if (!sdkSource) return null;
+  const sdkFile = ts.createSourceFile(
+    sdkName,
+    sdkSource,
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS
   );
-  const aliases = runtimeFile.statements.filter(
+  const aliases = sdkFile.statements.filter(
     (statement) =>
       ts.isTypeAliasDeclaration(statement) &&
       ['CardBlock', 'CardTemplate', 'CardGap'].includes(statement.name.text)
@@ -132,8 +141,8 @@ export function buildTargetedPluginSnapshot({ files, taskKind, targetTools }) {
         `===== tools.ts :: ${target} =====\n${sourceSlice(toolsSource, byName.get(target))}`
     ),
     ...supportingParts,
-    `===== runtime.ts :: canonical card types =====\n${aliases
-      .map((statement) => sourceSlice(runtimeSource, statement))
+    `===== ${sdkName} :: canonical card types =====\n${aliases
+      .map((statement) => sourceSlice(sdkSource, statement))
       .join('\n\n')}`
   ].join('\n\n');
 }
@@ -160,14 +169,15 @@ Hard constraints:
 - Do not store API keys or secrets in source.
 - Work test-first: create or update executable tests that fail for the missing API behavior before writing the fetcher implementation.
 - Use the Node built-in test runner. Test files must end in .test.ts, .test.js, or .test.mjs and run with node --test.
-- If index.ts imports another TypeScript module, use explicit .ts ESM imports so node --test can execute the source directly, for example import { fetchItems } from './client.ts'.
+- Use explicit .ts extensions for local ESM imports so node --test can execute the source directly, for example import { fetchItems } from './client.ts'.
 - Tests must use mocked fetch and cover every public API fetch helper and every plugin tool.
 - Tests for list tools must assert non-empty mocked IDs and useful rendered result text.
 - Do not rely on skipped network tests or structure-only tests.
 - Run all tests and fix failures before reporting completion.
 - Implement API/client/tool code that fetches data and returns structured, citeable references.
-- The workspace is pre-scaffolded with shared, vendored plumbing you MUST reuse and MUST NOT edit or re-implement: runtime.ts (createApiReference, apiGet, buildQuery, requireNonEmpty, requirePositiveInt), testing.ts (mockFetch, expectToolResult), tools.ts (an empty registry with ToolResult/ApiTool types to fill), contract.test.ts (keep it), and index.ts (already wires tools + manifest).
-- Do NOT write your own fetch wrapper, HTTP error handling, query-string builder, createApiReference, reference.ts, or test harness — import apiGet/createApiReference from ./runtime.ts and mockFetch from ./testing.ts.
+- The host supplies one shared, versioned @raynard/plugin-sdk. Import defineTools, createApiReference, apiGet, buildQuery, requireNonEmpty, and requirePositiveInt from it. Import mockFetch and expectToolResult from @raynard/plugin-sdk/testing.
+- The author-owned workspace is intentionally small: plugin.json, tools.ts, optional client.ts/supporting modules, behavior tests, and README.md. Do not create index.ts, runtime.ts, testing.ts, contract.test.ts, reference.ts, or another SDK wrapper.
+- You MUST reuse the SDK and MUST NOT re-implement its fetch wrapper, HTTP error handling, query-string builder, references, tool contracts, card types, or test harness.
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
 - Treat provided API documentation as a whole API surface. Do not only build the single narrow call implied by the user's latest question unless the docs truly cover only that call.
 - Build a practical suite of focused tools for important list/search, detail, user/account, metadata/status, and update/history endpoints when available.
@@ -176,28 +186,25 @@ Hard constraints:
 - For unimplemented endpoints record path, purpose, required and optional parameters, response shape, pagination/rate limits, and a proposed future tool.
 - Every exported tool must have a routing-quality description and a JSON parameter schema with descriptions, required fields, enum values, and useful optional limits or filters.
 - Update README.md with implemented tools, the endpoint inventory, future endpoint notes, and source docs.
-- Create sample-prompts.json as a JSON array containing exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>". This file feeds the host's empty-chat splash and is not plugin documentation.
+- Set plugin.json.samplePrompts to exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>".
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
 parameter schemas, response types, and rendering differ between plugins. Write
-just client.ts, the tools in tools.ts, mocked tests, and sample-prompts.json:
+just client.ts, the tools in tools.ts, mocked tests, README.md, and plugin.json metadata:
 
 // client.ts — one thin fetch helper per endpoint using the shared apiGet.
-import { apiGet } from './runtime.ts';
+import { apiGet } from '@raynard/plugin-sdk';
 const BASE = 'https://api.example.com';
 export type Thing = { id: number; name: string };
 export const fetchThing = (id: number) => apiGet<Thing>(\`\${BASE}/things/\${id}\`);
 // Range/filter endpoints: apiGet(url, { query: { min, max } }) drops undefined params.
 
-// tools.ts — replace the empty registry with real tools. ToolResult/ApiTool are
-// already declared at the top of tools.ts by the scaffold; keep them.
+// tools.ts — the only runtime entry point; defineTools type-checks the registry.
 import { fetchThing } from './client.ts';
-import { createApiReference } from './runtime.ts';
+import { createApiReference, defineTools } from '@raynard/plugin-sdk';
 
-export const tools = {
-  // A FINAL-DATA tool: fetches one record, so it declares a fixed card and
-  // returns a matching \`data\` object. The card layout is authored ONCE here and
-  // never varies per call — only \`data\` changes.
+export const tools = defineTools({
+  // Every API tool declares a fixed card and returns matching \`data\`.
   example_get_thing: {
     description: 'What question this answers, what API data it fetches, limits, and follow-up tools.',
     parameters: {
@@ -216,7 +223,7 @@ export const tools = {
         { component: 'KeyValue', pairs: [{ label: 'Category', field: 'category' }] }
       ]
     },
-    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    async execute(args) {
       const thing = await fetchThing(Number(args?.id));
       return {
         text: \`Thing \${thing.id}: \${thing.name}\`,
@@ -232,24 +239,30 @@ export const tools = {
       };
     }
   },
-  // A LIST/SEARCH tool: NOT a final result, so it has NO card and NO data.
+  // A LIST/SEARCH tool also has a bounded result card.
   example_search_things: {
     description: 'Search things by keyword. Returns candidate ids for a follow-up detail call.',
     parameters: { type: 'object', required: ['q'], properties: { q: { type: 'string', description: 'Search text.' } } },
-    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    card: {
+      name: { singular: 'search', plural: 'searches' },
+      title: 'Search results for {{query}}',
+      layout: [{ component: 'Table', columns: [{ header: 'ID', field: 'id' }, { header: 'Name', field: 'name' }], rows: 'hits' }]
+    },
+    async execute(args) {
       const hits = await searchThings(String(args?.q ?? ''));
       return {
         text: hits.map((h) => \`\${h.id}: \${h.name}\`).join('\\n'),
+        data: { query: String(args?.q ?? ''), hits },
         references: hits.map((h) => createApiReference({ id: String(h.id), label: h.name, sourceUrl: \`\${BASE}/things/\${h.id}\`, quote: h.name, payload: h }))
       };
     }
   }
-};
+});
 
 // client.test.ts / tools.test.ts — mock the network with the shared harness.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mockFetch, expectToolResult } from './testing.ts';
+import { mockFetch, expectToolResult } from '@raynard/plugin-sdk/testing';
 import { tools } from './tools.ts';
 
 test('example_get_thing renders text and a citation', async () => {
@@ -265,9 +278,9 @@ test('example_get_thing renders text and a citation', async () => {
 
 Mandatory tool-interface rules (identical across all plugins):
 - The runtime invokes each tool as tools[name].execute(args). The callable MUST be named exactly "execute". Never use "handler", "run", "call", or a default-export function.
-- "tools" is keyed by the exact tool name; each tool has description (string), parameters (JSON Schema object), and async execute(args) returning { text, references }.
-- Build fetch helpers with apiGet from ./runtime.ts (drop to the global fetch only for auth handshakes, non-JSON, or POST/PUT). Build every reference with createApiReference from ./runtime.ts.
-- Test with mockFetch from ./testing.ts and keep the provided contract.test.ts. Cover every fetch helper and every tool with mocked responses.
+- "tools" is keyed by the exact tool name; each tool has description (string), parameters (JSON Schema object), card, and async execute(args) returning { text, references, data }.
+- Build fetch helpers with apiGet from @raynard/plugin-sdk (drop to the global fetch only for auth handshakes, non-JSON, or POST/PUT). Build every reference with createApiReference from the same SDK.
+- Test with mockFetch from @raynard/plugin-sdk/testing. Cover every fetch helper and every tool with mocked responses; the host performs structural contract validation, so do not duplicate it in a local contract.test.ts.
 - Only endpoints, parameters, response types, and rendering change between plugins.
 
 ${CARD_RULES}
@@ -293,7 +306,7 @@ CARD-EDIT FAST PATH — targets: ${targetTools.join(', ')}
 - Apply the explicit visual request directly. A right-side image at 25% width is one Columns block with widths 3 and 1 (75% / 25%): existing compact details on the left, and { component: 'Image', variant: 'media', fit: 'contain', ... } on the right.
 - Keep long tables or verbose Section content full-width below the Columns block so narrow columns remain readable.
 - Preserve execute(), API behavior, references, and the existing data shape unless a genuinely new card binding is required. Update the nearest existing structural card test first, make the card change, then run the plugin's Node tests.
-- The canonical card types in the snapshot are authoritative and runtime.ts is vendored. Never edit runtime.ts or cast around missing documented primitives. If those supplied types do not contain a documented primitive required by the request, stop with exactly "HOST_RUNTIME_OUTDATED: <missing primitive>".
+- The canonical card types in the snapshot come from the shared SDK and are authoritative. Never create or edit a local runtime.ts or cast around missing documented primitives. If those supplied types do not contain a documented primitive required by the request, stop with exactly "HOST_SDK_OUTDATED: <missing primitive>".
 `
       : '';
   return `You are Pi, an interactive coding agent editing an existing Raynard plugin in Build mode.
@@ -305,7 +318,7 @@ How to work:
 - The user message embeds an authoritative current-source snapshot. A targeted card edit contains the exact tool, matching tests, and canonical card types; a general edit contains the broader plugin files. DO NOT re-read source already shown. Only read something absent from the snapshot or use file tools to make edits. Real tools already exist here; this is never a fresh scaffold.
 - Cards live on tools in tools.ts: a tool's \`card\` property is its result card, and the tool name tells you which card it is (e.g. the "monster card" is the \`card\` on the dnd_get_monster tool). To change a card, edit that tool's \`card\` template.
 - Make the SMALLEST change that satisfies the user's request. Preserve existing tool names, behavior, exports, and passing tests. Do not rewrite the plugin from scratch or delete working code.
-- Adapt to THIS plugin's conventions. Some plugins predate the shared runtime and use their own reference helper (e.g. references.ts) and a local tool interface instead of ./runtime.ts — keep using whatever the plugin already uses. Only import from ./runtime.ts if the plugin already does or if you clearly need a shared helper (apiGet, createApiReference) or the CardTemplate type.
+- Reuse helpers and types from @raynard/plugin-sdk. Do not add local SDK, runtime, reference, or testing wrappers.
 - Stay within the plugin. Do not modify the host app. Do not build React, pages, routes, CSS, or any UI — this is TypeScript API tooling only.
 - Keep secrets out of source.
 - Tests: use your bash tool to run \`node --test <files>\` when the user asks or after a substantive change, and fix failures. You are not forced to pass whole-plugin validation on every turn — respond to what the user asked.
@@ -313,7 +326,7 @@ How to work:
 ${cardFastPath}
 ${CARD_RULES}
 
-When the user asks for "nice rendering" of a tool's results, that means: add a fixed result-card (and matching "data") to the relevant FINAL-DATA tool(s) per the rules above, widening the plugin's tool type to allow card?/data? if needed.`;
+When the user asks for "nice rendering" of a tool's results, that means: edit the fixed result-card (and matching "data") on the relevant tool(s) per the rules above.`;
 }
 
 // A short recap of recent build-conversation turns, so a follow-up like "now
@@ -349,7 +362,7 @@ ${instruction || '(no instruction provided)'}
 
 Make the smallest change that satisfies the request. Preserve existing tools and passing tests. Run node --test after a substantive change.
 
-Important: reading files is not the task — you MUST apply the change by editing the source files this turn. Do not end your turn after only inspecting the code; keep going until the edits are written to disk and (for code changes) the tests run. Finish with a one or two sentence summary of what you changed.`;
+Important: reading files is not the task — you MUST apply the change by editing the source files this turn. Use at most a brief plan, then make the first required edit. Do not exhaust the response by describing code you intend to write. Do not end your turn after only inspecting the code; keep going until the edits are written to disk and (for code changes) the tests run. Finish with a one or two sentence summary of what you changed.`;
   }
   return `Implement this Raynard Explore-mode API plugin.
 
@@ -359,15 +372,30 @@ ${String(request.prompt || request.description || '').trim()}
 Plugin workspace:
 ${String(request.pluginDir || '').trim()}
 
-Expected output (the workspace is already scaffolded — reuse runtime.ts/testing.ts, do not edit them):
-- client.ts: one thin fetch helper per endpoint, built on apiGet from ./runtime.ts.
-- tools.ts: fill the exported tools registry with focused tools, each with a specific description and JSON parameter schema, returning { text, references } via createApiReference.
-- Result cards: give every FINAL-DATA tool (detail/record/summary/status) a fixed "card" template plus a matching "data" object; give LIST/SEARCH tools neither. Follow the Result-card rules in the system prompt.
-- Executable mocked-fetch tests in *.test.ts files using mockFetch from ./testing.ts; keep contract.test.ts.
+Expected output (the workspace is already scaffolded and the shared SDK is installed by the host):
+- client.ts: one thin fetch helper per endpoint, built on apiGet from @raynard/plugin-sdk.
+- tools.ts: export defineTools({...}) with focused tools, each with a specific description and JSON parameter schema, returning { text, references, data } via the SDK.
+- Result cards: give EVERY tool, including list/search tools, a fixed "card" template plus a matching "data" object on every successful result path. Follow the Result-card rules in the system prompt.
+- Executable mocked-fetch tests in *.test.ts files using @raynard/plugin-sdk/testing.
+- plugin.json: keep its identity/source metadata and set exactly three samplePrompts.
 - README.md with an Endpoint Inventory covering implemented and future endpoints.
-- No UI code and no re-implemented plumbing.
+- No index.ts, local runtime/testing/contract plumbing, or UI code.
+
+Use only a brief plan (at most five bullets), then immediately create the first failing test with a filesystem tool. Do not exhaust the response by designing every type, endpoint, or card in prose; put that detail directly into the files.
 
 Run node --test with every test file. Do not report completion until tests pass and the plugin exports at least one runtime tool.`;
+}
+
+export function assertBuilderTurnCompleted({ editMode, madeFileEdits, stopReason }) {
+  if (stopReason === 'length') {
+    throw new Error('Plugin builder reached the model output limit before completing the turn.');
+  }
+  if (stopReason === 'aborted' || stopReason === 'error') {
+    throw new Error('Plugin builder was interrupted before completing the turn.');
+  }
+  if (editMode && !madeFileEdits) {
+    throw new Error('Plugin builder stopped without writing any changes after its retry.');
+  }
 }
 
 export function findPluginTestFiles(files) {
@@ -377,9 +405,8 @@ export function findPluginTestFiles(files) {
     .sort();
 }
 
-// Components the host card renderer knows how to draw. A card that names an
-// unknown component still renders (raw-JSON fallback) but is rejected here so
-// the builder fixes typos before completion.
+// Components the host card renderer knows how to draw. Unknown components are
+// rejected so the builder fixes typos before completion.
 const CARD_COMPONENTS = new Set([
   'MetricRow',
   'Table',
@@ -410,8 +437,10 @@ function collectCardComponents(layout, found = []) {
 
 function validateToolCard(tool) {
   const card = tool && tool.card;
-  if (card == null) return;
   const name = String(tool.name || '(unnamed)');
+  if (card == null) {
+    throw new Error(`Every tool must declare a result card. Missing card: "${name}".`);
+  }
   if (typeof card !== 'object' || !Array.isArray(card.layout) || card.layout.length === 0) {
     throw new Error(`Tool "${name}" has a card with no layout blocks. Give it a { name: { singular, plural }, title?, layout: [...] } or remove the card.`);
   }
@@ -465,13 +494,12 @@ export function validatePluginArtifacts({
       ? samplePrompts.map((prompt) => typeof prompt === 'string' ? prompt.trim() : '')
       : [];
     if (
-      !files.includes('sample-prompts.json') ||
       prompts.length !== 3 ||
       prompts.some((prompt) => !prompt) ||
       new Set(prompts).size !== 3
     ) {
       throw new Error(
-        'Fresh plugins must include sample-prompts.json with exactly three distinct, non-empty prompt strings.'
+        'Fresh plugins must set plugin.json.samplePrompts to exactly three distinct, non-empty prompt strings.'
       );
     }
   }

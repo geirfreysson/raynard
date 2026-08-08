@@ -20,6 +20,19 @@ npm install
 npm run tauri:dev
 ```
 
+## Run the Documentation Site
+
+The Docusaurus documentation site lives in `docs/` and runs independently from
+the desktop app:
+
+```bash
+cd docs
+npm install
+npm start
+```
+
+The development site is available at `http://localhost:3000` by default.
+
 ## Build Checks
 
 ```bash

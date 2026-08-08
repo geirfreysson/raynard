@@ -150,7 +150,10 @@ const agent = new Agent({
   toolExecution: 'sequential'
 });
 
-process.on('SIGTERM', () => agent.abort());
+process.once('SIGTERM', () => {
+  agent.abort();
+  setTimeout(() => process.exit(0), 1_000).unref();
+});
 
 let finalText = '';
 const unsubscribe = agent.subscribe((event) => {

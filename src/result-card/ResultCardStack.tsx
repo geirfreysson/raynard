@@ -3,9 +3,10 @@ import { ResultCard } from './ResultCard';
 import type { StoredResultCard } from './types';
 
 function cardName(card: StoredResultCard): { singular: string; plural: string } {
-  const singular = card?.template?.name?.singular?.trim();
-  const plural = card?.template?.name?.plural?.trim();
-  return singular && plural ? { singular, plural } : { singular: 'card', plural: 'cards' };
+  return {
+    singular: card.template.name.singular.trim(),
+    plural: card.template.name.plural.trim()
+  };
 }
 
 export function cardCountLabel(cards: StoredResultCard[]): string {

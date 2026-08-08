@@ -26,7 +26,7 @@ export type MentionPlugin = {
   tools?: Array<{
     name?: string;
     description?: string;
-    card?: { name?: { singular?: string; plural?: string } } | null;
+    card: { name: { singular: string; plural: string } };
   }>;
 };
 
@@ -97,16 +97,14 @@ export function buildMentionItems(plugins: MentionPlugin[]): MentionItem[] {
         description: `tool · ${displayName || slug}`,
         insertText: toolName
       });
-      if (tool?.card) {
-        const singular = String(tool.card.name?.singular || '').trim() || toolName;
-        items.push({
-          kind: 'card',
-          match: `${singular} card ${toolName}`.toLowerCase(),
-          label: `${singular} card`,
-          description: `card · ${toolName}`,
-          insertText: `${singular} card`
-        });
-      }
+      const singular = tool.card.name.singular.trim();
+      items.push({
+        kind: 'card',
+        match: `${singular} card ${toolName}`.toLowerCase(),
+        label: `${singular} card`,
+        description: `card · ${toolName}`,
+        insertText: `${singular} card`
+      });
     }
   }
   return items;

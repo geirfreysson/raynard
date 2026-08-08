@@ -31,6 +31,7 @@ import {
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
 import { ChatRunRegistry, type ChatRun } from './chat-run-registry';
+import { recoverInterruptedMessages, shouldUsePluginEditMode } from './plugin-build-state';
 import { selectSplashPrompts } from './plugin-suggestions';
 import { renderResultCards } from './result-card/mount';
 import { buildExampleData } from './result-card/example';
@@ -132,7 +133,7 @@ type GeneratedPluginTool = {
   name: string;
   description: string;
   parameters: unknown;
-  card?: CardTemplate;
+  card: CardTemplate;
 };
 
 type GeneratedPluginList = {
@@ -154,6 +155,8 @@ type PluginScaffoldStatus = {
   normalizedName: string;
   exists: boolean;
   nextAvailableName: string;
+  hasRuntimeTools: boolean;
+  status: string;
 };
 type SidebarView = 'chats' | 'plugins';
 
@@ -1183,16 +1186,13 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   }
 
   pluginDetailView.appendChild(createPluginCodeSection('plugin.json', detail.manifestText));
-  pluginDetailView.appendChild(createPluginCodeSection('index.ts', detail.code || '// No index.ts found.'));
+  pluginDetailView.appendChild(createPluginCodeSection('tools.ts', detail.code || '// No tools.ts found.'));
 }
 
-// Preview the result cards a plugin's tools render, using synthesized example
-// data (no API call). Only tools that declare a `card` appear.
+// Preview every plugin tool's result card using synthesized example data.
 function renderPluginCardPreviews(plugin: GeneratedPlugin) {
   if (!pluginDetailView) return;
-  const cardTools = plugin.tools.filter(
-    (tool) => tool.card && typeof tool.card === 'object' && Array.isArray(tool.card.layout)
-  );
+  const cardTools = plugin.tools;
 
   const section = document.createElement('section');
   section.className = 'plugin-detail-section';
@@ -1201,8 +1201,7 @@ function renderPluginCardPreviews(plugin: GeneratedPlugin) {
   if (!cardTools.length) {
     const empty = document.createElement('p');
     empty.className = 'plugin-detail-empty';
-    empty.textContent =
-      'No result cards yet. In Build mode, ask to add cards to this plugin’s detail tools.';
+    empty.textContent = 'No valid runtime tools were discovered for this plugin.';
     section.appendChild(empty);
     pluginDetailView.appendChild(section);
     return;
@@ -1437,13 +1436,18 @@ async function openSavedChat(chatId: string) {
 
   const chat = await invoke<ChatHistoryPayload>('read_chat_history', { chatId });
   if (viewRevision !== mainViewRevision) return;
+  const recovered = recoverInterruptedMessages(chat.messages);
   bindChatState({
     chatId: chat.chatId,
     name: chat.name,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
     activeBuildPlugin: chat.activeBuildPlugin
-  }, chat.messages);
+  }, recovered.messages);
+  if (recovered.recovered) {
+    await persistChatSnapshot(activeChatMeta, storedMessages);
+    await refreshChatHistory();
+  }
   renderStoredTranscript();
 
   showConversation();
@@ -1956,7 +1960,7 @@ async function scaffoldAndRunPluginBuilder(
         options = {
           ...options,
           conflictStrategy: 'edit',
-          editMode: true,
+          editMode: shouldUsePluginEditMode(status),
           name: status.normalizedName
         };
       }
