@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import { ResultCard } from './ResultCard';
+import { ResultCard, filterTableRows } from './ResultCard';
 import type { CardTemplate } from './types';
 
 function render(template: CardTemplate, data: unknown): string {
@@ -37,6 +37,25 @@ describe('ResultCard', () => {
     );
     expect(html).toContain('AAPL');
     expect(html).toContain('MSFT');
+    expect(html).toContain('aria-label="Filter table rows"');
+    expect(html).toContain('2 rows');
+  });
+
+  it('filters table rows across all displayed columns, case-insensitively', () => {
+    const rows = [
+      { period: '2023', area: 'Iceland', value: 41 },
+      { period: '2022', area: 'United Kingdom', value: 52 },
+      { period: '2023', area: 'Ireland', value: 63 }
+    ];
+    const columns = [
+      { header: 'Period', field: 'period' },
+      { header: 'Area', field: 'area' },
+      { header: 'Value', field: 'value' }
+    ];
+
+    expect(filterTableRows(rows, columns, 'ICELAND')).toEqual([rows[0]]);
+    expect(filterTableRows(rows, columns, 'kingdom 2022')).toEqual([rows[1]]);
+    expect(filterTableRows(rows, columns, '63')).toEqual([rows[2]]);
   });
 
   it('shows an empty-state row for a missing table array', () => {

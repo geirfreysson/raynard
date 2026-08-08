@@ -40,6 +40,8 @@ describe('plugin builder core', () => {
     expect(prompt).toContain('Do not build React components');
     expect(prompt).toContain("name: { singular: 'thing', plural: 'things' }");
     expect(prompt).toMatch(/name.*REQUIRED.*lower-case count nouns/i);
+    expect(prompt).toMatch(/every row returned.*fetched API page/i);
+    expect(prompt).toMatch(/model-visible text.*bounded/i);
     expect(prompt).toContain('samplePrompts');
     expect(prompt).toMatch(/exactly three/i);
   });

@@ -4,7 +4,7 @@ import ts from 'typescript';
 // contract can never drift between them.
 const CARD_RULES = `Result-card rules (which tool results become a visible card):
 - EVERY API tool, including list/search tools and intermediate discovery calls, MUST declare a static "card" template on the tool AND return a matching "data" object from every successful execute path. The host renders one coherent card per tool invocation beneath the assistant message.
-- Design list/search cards as bounded tables or summaries of the returned rows. Empty-result paths still return card data with an empty rows array and useful filter/count fields.
+- Keep model-visible text bounded, but preserve every row returned by the fetched API page in table-bound card data so the host's table filter can search the full fetched set. Do not apply a text display limit to card data. A tool does not need to fetch unseen API pages unless its documented behavior says it does. Empty-result paths still return card data with an empty rows array and useful fetched/stored/total count fields.
 - The card layout is FIXED at build time and stored on the tool. It never varies per call; only the "data" it binds to changes. Do not build a different card shape per response.
 - The card is DECLARATIVE — objects only, no JSX, no functions, no host/React code. You are still forbidden from writing UI; you only describe layout and which data fields go where.
 - Card shape: { name: { singular: string, plural: string }, title?: string, layout: CardBlock[] }. "name" is REQUIRED and contains short lower-case count nouns shown by the host (e.g. { singular: 'monster', plural: 'monsters' } produces "1 monster" / "2 monsters"). Use an explicit plural so irregular nouns work. Strings in "title" and Text blocks support {{path}} interpolation from "data" (e.g. "{{symbol}} — {{name}}"). Block "field"/"rows" are dotted paths into "data" (e.g. "quote.price", "holdings").
@@ -239,7 +239,7 @@ export const tools = defineTools({
       };
     }
   },
-  // A LIST/SEARCH tool also has a bounded result card.
+  // A LIST/SEARCH tool also has a filterable result card with all fetched rows.
   example_search_things: {
     description: 'Search things by keyword. Returns candidate ids for a follow-up detail call.',
     parameters: { type: 'object', required: ['q'], properties: { q: { type: 'string', description: 'Search text.' } } },

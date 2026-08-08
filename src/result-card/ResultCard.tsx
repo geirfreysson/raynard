@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import type { CardBlock, CardGap, CardTemplate } from './types';
 import { formatValue, getPath, interpolate, resolveRows } from './resolve';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -6,6 +7,25 @@ import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 
 type ImageBlock = Extract<CardBlock, { component: 'Image' }>;
+type TableBlock = Extract<CardBlock, { component: 'Table' }>;
+type TableColumn = TableBlock['columns'][number];
+
+export function filterTableRows(
+  rows: Record<string, unknown>[],
+  columns: TableColumn[],
+  query: string
+): Record<string, unknown>[] {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return rows;
+
+  return rows.filter((row) => {
+    const searchable = columns
+      .map((column) => formatValue(getPath(row, column.field)))
+      .join(' ')
+      .toLocaleLowerCase();
+    return terms.every((term) => searchable.includes(term));
+  });
+}
 
 function deltaTone(value: string): 'up' | 'down' | 'flat' {
   const t = value.trim();
@@ -47,6 +67,62 @@ function renderLayout(layout: CardBlock[] | undefined, data: unknown) {
   return (layout || []).map((child, i) => <Block key={i} block={child} data={data} />);
 }
 
+function ResultTable({ block, data }: { block: TableBlock; data: unknown }) {
+  const [query, setQuery] = useState('');
+  const rows = resolveRows(data, block.rows);
+  const filteredRows = useMemo(
+    () => filterTableRows(rows, block.columns, query),
+    [rows, block.columns, query]
+  );
+  const countLabel = query.trim()
+    ? `${filteredRows.length} of ${rows.length} rows`
+    : `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.length > 0 && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-xs text-muted-foreground">{countLabel}</span>
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            aria-label="Filter table rows"
+            placeholder="Filter rows…"
+            className="h-8 w-56 max-w-full rounded-md border border-input bg-transparent px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
+          />
+        </div>
+      )}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {block.columns.map((col, i) => (
+              <TableHead key={i}>{col.header}</TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {filteredRows.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={block.columns.length} className="italic text-muted-foreground">
+                {rows.length === 0 ? 'No rows' : 'No matching rows'}
+              </TableCell>
+            </TableRow>
+          ) : (
+            filteredRows.map((row, r) => (
+              <TableRow key={r}>
+                {block.columns.map((col, c) => (
+                  <TableCell key={c}>{formatValue(getPath(row, col.field))}</TableCell>
+                ))}
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 function Block({ block, data }: { block: CardBlock; data: unknown }) {
   switch (block.component) {
     case 'MetricRow':
@@ -74,35 +150,7 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
       );
 
     case 'Table': {
-      const rows = resolveRows(data, block.rows);
-      return (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {block.columns.map((col, i) => (
-                <TableHead key={i}>{col.header}</TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={block.columns.length} className="italic text-muted-foreground">
-                  No rows
-                </TableCell>
-              </TableRow>
-            ) : (
-              rows.map((row, r) => (
-                <TableRow key={r}>
-                  {block.columns.map((col, c) => (
-                    <TableCell key={c}>{formatValue(getPath(row, col.field))}</TableCell>
-                  ))}
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      );
+      return <ResultTable block={block} data={data} />;
     }
 
     case 'KeyValue':

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import { ResultCardStack } from './ResultCardStack';
+import { ResultCardList, ResultCardStack, cardItemLabel } from './ResultCardStack';
 import type { StoredResultCard } from './types';
 
 const card: StoredResultCard = {
@@ -41,6 +41,34 @@ describe('ResultCardStack', () => {
       createElement(ResultCardStack, { cards: [card, resource, resource], collapsible: true })
     );
     expect(html).toContain('1 monster · 2 resources');
+  });
+
+  it('labels each gathered card with its kind and resolved title', () => {
+    expect(cardItemLabel(card)).toBe('Monster: Orc');
+
+    const observation: StoredResultCard = {
+      toolName: 'data360_get_data',
+      template: {
+        name: { singular: 'observation', plural: 'observations' },
+        title: 'Data360 observations — {{indicatorId}}',
+        layout: [{ component: 'Text', text: '{{value}}' }]
+      },
+      data: { indicatorId: 'WB_WDI_SP_POP_TOTL', value: '8.1 billion' }
+    };
+    expect(cardItemLabel(observation)).toBe(
+      'Observation: Data360 observations — WB_WDI_SP_POP_TOTL'
+    );
+  });
+
+  it('shows named item disclosures without expanding every card body', () => {
+    const html = renderToStaticMarkup(
+      createElement(ResultCardList, { cards: [card, { ...card, data: { name: 'Goblin', type: 'Humanoid' } }] })
+    );
+    expect(html).toContain('Monster: Orc');
+    expect(html).toContain('Monster: Goblin');
+    expect(html.match(/aria-expanded="false"/g)).toHaveLength(2);
+    expect(html.match(/bg-transparent/g)).toHaveLength(2);
+    expect(html).not.toContain('Humanoid');
   });
 
   it('renders the card directly when not collapsible (preview)', () => {
