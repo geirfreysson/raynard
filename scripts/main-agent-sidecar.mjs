@@ -6,6 +6,7 @@ import { streamSimple, Type } from '@mariozechner/pi-ai';
 import {
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
+  createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
   extractAssistantText,
@@ -114,11 +115,16 @@ const generatedTools = createGeneratedPluginTools({
   executePluginTool
 });
 let buildRequest = null;
+let directAnswer = null;
 const buildRequestTool = createBuildRequestTool(Type, (nextRequest) => {
   buildRequest = nextRequest;
   emit({ type: 'build_request', buildRequest: nextRequest });
 });
-const tools = [...generatedTools, buildRequestTool];
+const directAnswerTool = createDirectAnswerTool(Type, (answer) => {
+  directAnswer = answer;
+});
+const tools = [...generatedTools, buildRequestTool, directAnswerTool];
+const internalToolNames = new Set([directAnswerTool.name]);
 
 // Real identities of installed plugins so the agent edits an existing plugin by
 // its exact name instead of inventing a near-miss name that scaffolds a
@@ -172,6 +178,7 @@ const unsubscribe = agent.subscribe((event) => {
     return;
   }
   if (event.type === 'tool_execution_start') {
+    if (internalToolNames.has(event.toolName || '')) return;
     emit({
       type: 'tool_call',
       toolName: event.toolName || '',
@@ -180,6 +187,7 @@ const unsubscribe = agent.subscribe((event) => {
     return;
   }
   if (event.type === 'tool_execution_end') {
+    if (internalToolNames.has(event.toolName || '')) return;
     emit({
       type: event.isError ? 'tool_error' : 'tool_result',
       toolName: event.toolName || '',
@@ -195,7 +203,7 @@ const unsubscribe = agent.subscribe((event) => {
 try {
   await agent.prompt(String(currentMessage.content).trim());
   unsubscribe();
-  emit({ type: 'done', text: finalText, buildRequest });
+  emit({ type: 'done', text: directAnswer || finalText, buildRequest });
 } catch (error) {
   unsubscribe();
   const message = error?.message || String(error);

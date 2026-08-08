@@ -92,6 +92,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
+Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, request_plugin_build for missing or changed capabilities, or answer_without_api only for greetings, casual conversation, and stable explanations that do not depend on external, private, current, or API-backed facts.
 1. BUILD REQUEST: If the user wants to create, edit, fix, or otherwise change a plugin, API capability, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. This includes follow-ups that refer to an existing plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
 3. MISSING CAPABILITY: If a data question cannot be answered with installed tools because API access is missing, call request_plugin_build. Never treat a request to change a plugin/card as a data query merely because an installed tool can return its current output.
@@ -245,6 +246,33 @@ function normalizeSourceUrls(values) {
     } catch {}
   }
   return urls;
+}
+
+export function createDirectAnswerTool(Type, onDirectAnswer) {
+  return {
+    name: 'answer_without_api',
+    label: 'Answer Without API',
+    description:
+      'Finish a turn without API evidence only for greetings, casual conversation, or stable explanations. Never use this for external, private, current, or API-backed factual claims, comparisons, records, or follow-ups that installed tools can answer.',
+    parameters: Type.Object({
+      answer: Type.String({
+        description: 'The complete concise answer to show to the user.'
+      }),
+      reason: Type.String({
+        description: 'Why this answer does not require current-turn API evidence.'
+      })
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const answer = String(args?.answer || '').trim() || 'How can I help?';
+      onDirectAnswer(answer);
+      return {
+        content: [{ type: 'text', text: answer }],
+        details: { type: 'direct-answer', answer },
+        terminate: true
+      };
+    }
+  };
 }
 
 export function createBuildRequestTool(Type, onBuildRequest) {

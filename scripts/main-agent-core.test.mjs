@@ -3,6 +3,7 @@ import {
   buildPiTypeFromSchema,
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
+  createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
   toAgentMessages
@@ -75,6 +76,23 @@ describe('main agent core', () => {
     expect(explore).toMatch(/current turn/i);
     expect(explore).toMatch(/never narrate.*tool call/i);
     expect(explore).toMatch(/never claim.*card.*shown/i);
+    expect(explore).toMatch(/first response MUST be a tool call/i);
+    expect(explore).toContain('answer_without_api');
+  });
+
+  it('provides a terminating direct-answer action only for non-API conversation', async () => {
+    const answers = [];
+    const tool = createDirectAnswerTool(Type, (answer) => answers.push(answer));
+    const result = await tool.execute('direct-1', {
+      answer: 'Hello! How can I help?',
+      reason: 'Greeting without external factual claims.'
+    });
+
+    expect(tool.name).toBe('answer_without_api');
+    expect(tool.description).toMatch(/never.*external|not.*external/i);
+    expect(answers).toEqual(['Hello! How can I help?']);
+    expect(result.terminate).toBe(true);
+    expect(result.details.type).toBe('direct-answer');
   });
 
   it('routes visual changes to existing cards through the plugin builder', () => {
