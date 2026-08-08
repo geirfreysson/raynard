@@ -31,6 +31,7 @@ import {
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
 import { ChatRunRegistry, type ChatRun } from './chat-run-registry';
+import { selectSplashPrompts } from './plugin-suggestions';
 import { renderResultCards } from './result-card/mount';
 import { buildExampleData } from './result-card/example';
 import type { CardTemplate, StoredResultCard } from './result-card/types';
@@ -123,6 +124,7 @@ type GeneratedPlugin = {
   manifestPath: string;
   createdAt: string;
   status: string;
+  samplePrompts: string[];
   tools: GeneratedPluginTool[];
 };
 
@@ -169,6 +171,11 @@ const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
 const MAX_MARKDOWN_TABLE_COLUMNS = 8;
+const DEFAULT_SPLASH_PROMPTS = [
+  'Start a lightweight research conversation',
+  'Summarize what this barebones app can do',
+  'Say hello and show the conversation view'
+] as const;
 const appIcons: Record<string, IconNode> = {
   'message-square': MessageSquare,
   plus: Plus,
@@ -971,6 +978,7 @@ async function refreshGeneratedPlugins() {
   try {
     const result = await invoke<GeneratedPluginList>('list_generated_plugins');
     generatedPlugins = result.plugins;
+    renderSplashPrompts();
     renderGeneratedPlugins();
     if (sidebarView === 'plugins' && chatHistoryStatus) {
       chatHistoryStatus.textContent = generatedPlugins.length ? '' : 'No generated plugins yet.';
@@ -980,6 +988,16 @@ async function refreshGeneratedPlugins() {
       chatHistoryStatus.textContent = getErrorMessage(error, 'Could not load plugins.');
     }
   }
+}
+
+function renderSplashPrompts() {
+  const prompts = selectSplashPrompts(generatedPlugins, DEFAULT_SPLASH_PROMPTS);
+  suggestionButtons.forEach((button, index) => {
+    const prompt = prompts[index];
+    if (!prompt) return;
+    button.textContent = prompt;
+    button.dataset.suggestion = prompt;
+  });
 }
 
 function renderGeneratedPlugins() {
@@ -2118,6 +2136,7 @@ async function runPluginBuilderTurn(
   syncRemountedTurn();
   await persistChatSnapshot(turnMeta, turnStored);
   await refreshChatHistory();
+  await refreshGeneratedPlugins();
 }
 
 function renderBuilderRun(

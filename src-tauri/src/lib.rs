@@ -189,6 +189,9 @@ struct GeneratedPlugin {
     manifest_path: String,
     created_at: String,
     status: String,
+    /// Builder-authored prompts for the empty-chat splash. Stored separately
+    /// from plugin.json so they are not shown in the plugin detail screen.
+    sample_prompts: Vec<String>,
     tools: Vec<GeneratedPluginTool>,
 }
 
@@ -2264,6 +2267,25 @@ fn plugin_display_name(slug: &str) -> String {
         .join(" ")
 }
 
+fn read_plugin_sample_prompts(plugin_dir: &Path) -> Vec<String> {
+    let prompts = fs::read_to_string(plugin_dir.join("sample-prompts.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    if prompts.len() != 3 {
+        return Vec::new();
+    }
+    let mut normalized = Vec::new();
+    for prompt in prompts {
+        let prompt = prompt.trim().chars().take(240).collect::<String>();
+        if prompt.is_empty() || normalized.contains(&prompt) {
+            return Vec::new();
+        }
+        normalized.push(prompt);
+    }
+    normalized
+}
+
 fn read_generated_plugin_manifest(
     plugin_dir: &Path,
     manifest_path: &Path,
@@ -2355,6 +2377,7 @@ fn read_generated_plugin_manifest(
         manifest_path: manifest_path.to_string_lossy().to_string(),
         created_at,
         status,
+        sample_prompts: read_plugin_sample_prompts(plugin_dir),
         tools,
     })
 }
@@ -3085,8 +3108,9 @@ mod tests {
     use super::{
         generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
         next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        refresh_plugin_vendored_runtime, BuilderStreamEvent, GeneratedPluginTool,
-        PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage, StreamEvent,
+        read_generated_plugin_manifest, refresh_plugin_vendored_runtime, BuilderStreamEvent,
+        GeneratedPluginTool, PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage,
+        StreamEvent,
     };
     use serde_json::json;
     use std::fs;
@@ -3188,6 +3212,39 @@ mod tests {
             "hacker-news-3"
         );
         fs::remove_dir_all(root).expect("remove test plugin root");
+    }
+
+    #[test]
+    fn generated_plugin_reads_three_private_sample_prompts() {
+        let plugin_dir =
+            std::env::temp_dir().join(format!("raynard-plugin-prompts-{}", now_millis()));
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_string(&json!({
+                "id": "raynard.generated.hacker-news",
+                "name": "Hacker News"
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin_dir.join("sample-prompts.json"),
+            serde_json::to_string(&json!([
+                "Who wrote the top story today?",
+                "Show me the three most discussed stories.",
+                "What is the newest story?"
+            ]))
+            .expect("serialize prompts"),
+        )
+        .expect("write prompts");
+
+        let plugin = read_generated_plugin_manifest(&plugin_dir, &plugin_dir.join("plugin.json"))
+            .expect("read generated plugin");
+        assert_eq!(plugin.sample_prompts.len(), 3);
+        assert_eq!(plugin.sample_prompts[0], "Who wrote the top story today?");
+
+        fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
     }
 
     #[test]

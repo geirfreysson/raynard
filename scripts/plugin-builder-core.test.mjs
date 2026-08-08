@@ -19,6 +19,31 @@ describe('plugin builder core', () => {
     expect(prompt).toContain('Do not build React components');
     expect(prompt).toContain("name: { singular: 'thing', plural: 'things' }");
     expect(prompt).toMatch(/name.*REQUIRED.*lower-case count nouns/i);
+    expect(prompt).toContain('sample-prompts.json');
+    expect(prompt).toMatch(/exactly three/i);
+  });
+
+  it('requires three usable splash prompts for fresh plugin builds', () => {
+    const valid = {
+      files: ['index.ts', 'index.test.ts', 'sample-prompts.json'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- stories',
+      tools: [{ name: 'hn_list_stories', callable: true }],
+      requireSamplePrompts: true
+    };
+
+    expect(() =>
+      validatePluginArtifacts({ ...valid, samplePrompts: ['Only one prompt'] })
+    ).toThrow(/exactly three/i);
+    expect(
+      validatePluginArtifacts({
+        ...valid,
+        samplePrompts: [
+          'Who wrote the top Hacker News story today?',
+          'Show me the three most discussed stories.',
+          'What is the newest story on Hacker News?'
+        ]
+      })
+    ).toEqual({ testFiles: ['index.test.ts'], toolCount: 1, cardCount: 0 });
   });
 
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {

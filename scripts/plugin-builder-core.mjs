@@ -176,10 +176,11 @@ Hard constraints:
 - For unimplemented endpoints record path, purpose, required and optional parameters, response shape, pagination/rate limits, and a proposed future tool.
 - Every exported tool must have a routing-quality description and a JSON parameter schema with descriptions, required fields, enum values, and useful optional limits or filters.
 - Update README.md with implemented tools, the endpoint inventory, future endpoint notes, and source docs.
+- Create sample-prompts.json as a JSON array containing exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>". This file feeds the host's empty-chat splash and is not plugin documentation.
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
 parameter schemas, response types, and rendering differ between plugins. Write
-just client.ts, the tools in tools.ts, and mocked tests:
+just client.ts, the tools in tools.ts, mocked tests, and sample-prompts.json:
 
 // client.ts — one thin fetch helper per endpoint using the shared apiGet.
 import { apiGet } from './runtime.ts';
@@ -434,7 +435,13 @@ function validateToolCard(tool) {
   }
 }
 
-export function validatePluginArtifacts({ files, readme, tools }) {
+export function validatePluginArtifacts({
+  files,
+  readme,
+  tools,
+  samplePrompts,
+  requireSamplePrompts = false
+}) {
   const testFiles = findPluginTestFiles(files);
   if (!testFiles.length) {
     throw new Error('Plugin validation requires at least one executable test file.');
@@ -452,6 +459,21 @@ export function validatePluginArtifacts({ files, readme, tools }) {
     throw new Error(
       `Every tool must expose an async execute(args) method. Not callable: ${notCallable.join(', ')}. Rename the tool method to "execute" (never "handler", "run", or "call").`
     );
+  }
+  if (requireSamplePrompts) {
+    const prompts = Array.isArray(samplePrompts)
+      ? samplePrompts.map((prompt) => typeof prompt === 'string' ? prompt.trim() : '')
+      : [];
+    if (
+      !files.includes('sample-prompts.json') ||
+      prompts.length !== 3 ||
+      prompts.some((prompt) => !prompt) ||
+      new Set(prompts).size !== 3
+    ) {
+      throw new Error(
+        'Fresh plugins must include sample-prompts.json with exactly three distinct, non-empty prompt strings.'
+      );
+    }
   }
   for (const tool of tools) validateToolCard(tool);
   const cardCount = tools.filter((tool) => tool && tool.card).length;

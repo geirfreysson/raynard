@@ -115,6 +115,12 @@ function runCommand(command, args, options = {}) {
 async function validatePluginWorkspace() {
   const files = await readdir(pluginDir);
   const readme = await readFile(`${pluginDir}/README.md`, 'utf8');
+  let samplePrompts;
+  try {
+    samplePrompts = JSON.parse(await readFile(`${pluginDir}/sample-prompts.json`, 'utf8'));
+  } catch {
+    samplePrompts = undefined;
+  }
   const runnerPath = String(request.pluginRunnerPath || '').trim();
   if (!runnerPath) throw new Error('Plugin tool runner path is missing.');
   const listed = await runCommand('node', [runnerPath], {
@@ -130,7 +136,9 @@ async function validatePluginWorkspace() {
   const validation = validatePluginArtifacts({
     files,
     readme,
-    tools: payload.result?.tools
+    tools: payload.result?.tools,
+    samplePrompts,
+    requireSamplePrompts: true
   });
   emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });
   await runCommand('node', ['--test', ...validation.testFiles]);
