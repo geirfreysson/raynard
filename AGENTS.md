@@ -8,7 +8,11 @@ generated API plugins.
 - `src/main.ts`: renderer UI, chat flow, slash commands, markdown rendering, and chat history interactions.
 - `src/agent-runtime.ts`: typed frontend boundary for main-agent and plugin-builder streams.
 - `src/build-request-flow.ts`: Explore-to-Build mode transition rules.
+- `src/chat-run-registry.ts`: per-chat ownership for concurrent main-agent and builder runs.
 - `src/errors.ts`: shared error formatting helpers.
+- `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
+- `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
+- `src/components/ui/`: shadcn-style primitives used by the host result-card renderer.
 - `src/styles.css`: global app, chat, sidebar, modal, and markdown styles.
 - `src/*.test.ts`: Vitest unit tests for frontend helpers/runtime behavior.
 - `scripts/main-agent-sidecar.mjs`: real Pi chat agent, native generated-plugin tools, and semantic build requests.
@@ -20,6 +24,38 @@ generated API plugins.
 - `src-tauri/src/lib.rs`: Rust Tauri commands for sidecar streaming, cancellation, keychain/config, chat history, logs, and generated-plugin files.
 - `src-tauri/Cargo.toml`: Rust dependencies and Tauri crate configuration.
 - `dist/`: generated Vite build output; do not edit by hand.
+
+## Current UI
+
+- Startup briefly shows the centered Northfox mark, then opens with the sidebar
+  folded. A persistent 54 px rail provides Chats, Generated Plugins, and New
+  Chat actions; opening Chats or Plugins expands the secondary sidebar.
+- Utility icons come from Lucide. The Northfox fox is a local brand SVG, not a
+  Lucide icon.
+- An empty conversation shows the Northfox wordmark, three suggestion cards,
+  and the composer. When generated plugins provide `sample-prompts.json`, the
+  suggestions are drawn round-robin across plugins before any plugin repeats.
+  If fewer than three usable plugin prompts exist, the three built-in prompts
+  are shown. Clicking a suggestion fills the composer without submitting it.
+- Explore and Build are automatic, host-owned states. The mode controls are
+  visible but disabled, the composer identifies the selected model/role, and a
+  persisted status line is inserted when the host actually changes mode.
+- User messages use a muted gray block across the message width. Assistant
+  output uses the app sans-serif font and supports bounded Markdown, reasoning
+  details, citations, tables, and persisted result cards.
+- Result cards are host-rendered React/shadcn UI beneath assistant output and
+  are collapsed by default. Their disclosure label uses each plugin card's
+  singular/plural names (`1 monster`, `2 monsters`, `1 resource`) and matches
+  the assistant output typography while retaining the existing card color.
+- The plugin sidebar lists generated plugins and opens a detail screen with
+  metadata, runtime tools, card previews, README content, and selected source
+  files. Splash prompts are intentionally not displayed on this screen.
+- Builder turns render a live activity timeline with filesystem/test events,
+  reasoning, heartbeat, and final summary. Runs belong to chats: multiple chats
+  can work concurrently, navigation does not cancel them, and returning to a
+  busy chat reconnects its live state and Stop control.
+- `/models` opens provider configuration. Chat/Explore and Coding/Build models
+  are selected independently, and API keys are stored through the OS keychain.
 
 ## Agent Architecture
 
@@ -46,14 +82,15 @@ active chat path.
    be requested semantically and confirmed again.
 8. The builder is a separate Pi coding agent with filesystem coding tools
    (read/edit/write/grep/ls/bash) scoped to that plugin directory. It uses the
-   selected coding model. Each Build-mode message is one editing pass;
+   selected coding model. Each confirmed coding request is one editing pass;
    `run_plugin_builder_stream` forwards `editMode` and the recent conversation so
    follow-ups have context.
 9. A fresh build is gated on executable mocked tests, `node --test`, runtime tool
-   discovery, at least one exported tool, and a README Endpoint Inventory
-   (validation failure gives one repair pass). An interactive edit turn is not
-   forced through that gate — the agent makes the smallest change and runs
-   `node --test` via bash when appropriate.
+   discovery, at least one exported tool, a README Endpoint Inventory, and
+   exactly three valid splash prompts in `sample-prompts.json` (validation
+   failure gives one repair pass). An interactive edit turn is not forced
+   through that gate — the agent makes the smallest change and runs the
+   relevant tests via `node --test` when appropriate.
 10. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
     by the host as a React/shadcn card; list/search tools do not. The builder
     only authors the declarative template — never React.
@@ -77,6 +114,8 @@ directory, not in this repository. A completed plugin normally contains:
 - `plugin.json`: plugin metadata.
 - `index.ts`: exported plugin object and tool definitions.
 - `README.md`: tools, source documentation, and Endpoint Inventory.
+- `sample-prompts.json`: exactly three distinct questions for the empty-chat
+  splash. This file is consumed by the host but hidden from plugin detail UI.
 - `*.test.ts`, `*.test.js`, or `*.test.mjs`: executable mocked API tests.
 - Optional supporting `.ts` modules imported with explicit `.ts` ESM paths.
 
@@ -191,7 +230,7 @@ Call one plugin tool directly:
 
 ```bash
 node scripts/plugin-tool-runner.mjs <<EOF
-{"pluginDir":"$PLUGIN_DIR","toolName":"getStoryList","args":{"type":"top","limit":15}}
+{"pluginDir":"$PLUGIN_DIR","toolName":"hn_list_top_stories","args":{"limit":15}}
 EOF
 ```
 

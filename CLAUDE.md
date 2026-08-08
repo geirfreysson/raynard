@@ -2,6 +2,28 @@
 
 Read and follow `AGENTS.md`; it is the canonical repository guide.
 
+## Current UI Snapshot
+
+Raynard starts with a short Northfox boot screen and a folded left sidebar. The
+54 px rail uses Lucide utility icons for Chats, Generated Plugins, and New Chat;
+the fox itself remains the local brand artwork. Opening a rail section expands
+its sidebar.
+
+The empty-chat screen centers the Northfox wordmark above three prompt cards and
+the composer. Fresh plugin builds create a hidden `sample-prompts.json` with
+three concrete questions. The host distributes the three visible suggestions
+round-robin across installed plugins before repeating one plugin; built-in
+prompts are the fallback when plugins cannot supply a complete set. These
+prompts do not appear in the plugin detail screen.
+
+The transcript uses full-width muted blocks for user messages and app-font
+assistant output with Markdown, reasoning, citations, and result cards.
+Host-rendered React/shadcn cards are collapsed behind a disclosure such as `1
+monster`, `2 monsters`, or `1 resource`. Plugin details show metadata, tools,
+card previews, README content, and source. Builder responses show a live
+filesystem/test activity timeline. Multiple chats can keep independent runs
+active while the user navigates between them.
+
 ## Current Architecture
 
 Raynard is a Tauri v2 app with two separate Pi agents:
@@ -34,9 +56,10 @@ src/main.ts
 ```
 
 A fresh build must produce TypeScript API tools, executable mocked tests,
-reference-bearing results, and README endpoint documentation, and is validated
-with `node --test` and runtime tool discovery. An interactive **edit** turn is
-not forced through that whole-plugin validation — the coding agent reads the
+reference-bearing results, README endpoint documentation, and exactly three
+distinct questions in the hidden `sample-prompts.json`. It is validated with
+`node --test` and runtime tool discovery. An interactive **edit** turn is not
+forced through that whole-plugin validation — the coding agent reads the
 existing files, makes the smallest change the user asked for, and runs
 `node --test` via its bash tool when appropriate. Neither mode may produce React
 UI. Final-data tools carry a fixed declarative result-`card` (+ `data`) rendered
@@ -58,6 +81,18 @@ CHAT_ID="$(basename "$LATEST_CHAT" .json)"
 TURN_LOG="$APP_DATA/agent-turn-logs/$CHAT_ID.jsonl"
 
 jq . "$LATEST_CHAT"
+```
+
+Show the message timeline, including stored reasoning, model, status, and
+errors:
+
+```bash
+jq -r '.messages[] | [.timestamp, .role, (.status // ""), (.provider // ""), (.model // ""), (.thinking // ""), .text, (.error // "")] | @tsv' "$LATEST_CHAT"
+```
+
+Then inspect the matching main-agent event log:
+
+```bash
 tail -n 100 "$TURN_LOG" | jq .
 ```
 
@@ -78,7 +113,7 @@ directly:
 ```bash
 PLUGIN_DIR="$APP_DATA/generated-plugins/hacker-news"
 node scripts/plugin-tool-runner.mjs <<EOF
-{"pluginDir":"$PLUGIN_DIR","toolName":"getStoryList","args":{"type":"top","limit":15}}
+{"pluginDir":"$PLUGIN_DIR","toolName":"hn_list_top_stories","args":{"limit":15}}
 EOF
 ```
 
