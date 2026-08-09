@@ -90,14 +90,14 @@
         "mediaLabel": "Placeholder for Stripe refund analysis screenshot"
       },
       {
-        "title": "Find leads that went quiet",
-        "prompt": "Which Salesforce leads went cold after their demo?",
-        "body": "An installed Salesforce plugin can compare demo dates with the latest recorded activity.",
+        "title": "Get data-backed analysis with references",
+        "prompt": "How does Britain's productivity compare with the EU and why?",
+        "body": "The agent can interrogate multiple APIs and to build confidence it cites the results directly.",
         "bullets": [
           "Returns the matching records with source links",
           "Keeps the supporting API response with the result"
         ],
-        "mediaLabel": "Placeholder for Salesforce lead analysis screenshot",
+        "mediaLabel": "Placeholder for research result",
         "reverse": true
       },
       {

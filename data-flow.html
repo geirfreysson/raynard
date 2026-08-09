@@ -1,0 +1,1567 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="An interactive map of Raynard's Explore and Build mode data flow."
+    />
+    <title>Raynard — Agent data flow</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f5f1e9;
+        --paper-deep: #e9e1d5;
+        --ink: #201d1a;
+        --muted: #6d655e;
+        --line: #d3c8ba;
+        --card: rgba(255, 253, 249, 0.88);
+        --card-solid: #fffdf9;
+        --fox: #a52c22;
+        --fox-dark: #5f120d;
+        --explore: #2b6e58;
+        --explore-soft: #dcebe4;
+        --build: #3c568d;
+        --build-soft: #e1e6f1;
+        --pi: #c16625;
+        --pi-soft: #f6e6d7;
+        --shadow: 0 18px 50px rgba(56, 40, 28, 0.09);
+        --mono: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
+        --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-width: 320px;
+        max-width: 100%;
+        margin: 0;
+        overflow-x: hidden;
+        background:
+          radial-gradient(circle at 10% 4%, rgba(165, 44, 34, 0.08), transparent 24rem),
+          radial-gradient(circle at 90% 30%, rgba(43, 110, 88, 0.07), transparent 26rem),
+          var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.5;
+      }
+
+      button,
+      a {
+        font: inherit;
+      }
+
+      button:focus-visible,
+      a:focus-visible {
+        outline: 3px solid rgba(165, 44, 34, 0.25);
+        outline-offset: 3px;
+      }
+
+      .page {
+        width: min(1460px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 28px 0 72px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 8px 0 34px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 11px;
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .brand img {
+        width: 35px;
+        height: 32px;
+        object-fit: contain;
+      }
+
+      .brand-copy {
+        display: grid;
+        line-height: 1.05;
+      }
+
+      .brand-copy strong {
+        font-size: 15px;
+        letter-spacing: 0.02em;
+      }
+
+      .brand-copy span {
+        margin-top: 5px;
+        color: var(--muted);
+        font: 10px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .repo-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 13px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(255, 253, 249, 0.56);
+        font: 11px/1 var(--mono);
+      }
+
+      .repo-chip::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--explore);
+        box-shadow: 0 0 0 4px rgba(43, 110, 88, 0.1);
+        content: "";
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(310px, 0.7fr);
+        gap: 52px;
+        align-items: end;
+        padding: 50px 0 44px;
+        border-top: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 18px;
+        color: var(--fox);
+        font: 700 11px/1.2 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 30px;
+        height: 1px;
+        background: currentColor;
+        content: "";
+      }
+
+      h1 {
+        max-width: 880px;
+        margin: 0;
+        overflow-wrap: anywhere;
+        font-size: clamp(42px, 6vw, 84px);
+        font-weight: 590;
+        letter-spacing: -0.055em;
+        line-height: 0.96;
+      }
+
+      h1 em {
+        color: var(--fox);
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 400;
+      }
+
+      .hero-summary {
+        max-width: 500px;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(16px, 1.5vw, 20px);
+        line-height: 1.58;
+      }
+
+      .hero-summary strong {
+        color: var(--ink);
+        font-weight: 650;
+      }
+
+      .view-tabs {
+        position: sticky;
+        top: 14px;
+        z-index: 20;
+        display: flex;
+        width: fit-content;
+        max-width: 100%;
+        margin: 0 auto 26px;
+        padding: 5px;
+        overflow-x: auto;
+        border: 1px solid rgba(106, 94, 82, 0.19);
+        border-radius: 14px;
+        background: rgba(255, 253, 249, 0.86);
+        box-shadow: 0 10px 32px rgba(56, 40, 28, 0.09);
+        backdrop-filter: blur(16px);
+      }
+
+      .view-tab {
+        min-width: 112px;
+        padding: 9px 17px;
+        border: 0;
+        border-radius: 9px;
+        color: var(--muted);
+        background: transparent;
+        font-size: 13px;
+        font-weight: 650;
+        cursor: pointer;
+        transition: 160ms ease;
+      }
+
+      .view-tab:hover {
+        color: var(--ink);
+      }
+
+      .view-tab[aria-selected="true"] {
+        color: #fff;
+        background: var(--ink);
+        box-shadow: 0 5px 16px rgba(32, 29, 26, 0.18);
+      }
+
+      .view-tab[data-view="explore"][aria-selected="true"] {
+        background: var(--explore);
+      }
+
+      .view-tab[data-view="build"][aria-selected="true"] {
+        background: var(--build);
+      }
+
+      .diagram-shell {
+        position: relative;
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background:
+          linear-gradient(rgba(255, 253, 249, 0.78), rgba(255, 253, 249, 0.78)),
+          repeating-linear-gradient(0deg, transparent, transparent 31px, rgba(98, 82, 68, 0.06) 32px),
+          repeating-linear-gradient(90deg, transparent, transparent 31px, rgba(98, 82, 68, 0.06) 32px);
+        box-shadow: var(--shadow);
+      }
+
+      .diagram-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 28px;
+        padding: 27px 30px 22px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 253, 249, 0.7);
+      }
+
+      .diagram-header h2 {
+        margin: 0 0 4px;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .diagram-header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 9px 16px;
+        padding-top: 2px;
+        color: var(--muted);
+        font: 10px/1.2 var(--mono);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .legend i {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--line);
+      }
+
+      .legend .is-pi {
+        background: var(--pi);
+        box-shadow: 0 0 0 4px rgba(193, 102, 37, 0.12);
+      }
+
+      .legend .is-host {
+        background: var(--fox);
+      }
+
+      .legend .is-data {
+        border: 2px solid var(--explore);
+        background: transparent;
+      }
+
+      .flow-view {
+        display: none;
+        min-width: 0;
+        padding: 30px;
+        animation: rise 220ms ease both;
+      }
+
+      .flow-view.is-active {
+        display: block;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(5px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .overview-flow {
+        display: grid;
+        grid-template-columns: minmax(150px, 0.68fr) 44px minmax(200px, 1fr) 44px minmax(0, 2.1fr);
+        align-items: stretch;
+        min-height: 460px;
+      }
+
+      .overview-flow > *,
+      .detail-flow > *,
+      .route-row > * {
+        min-width: 0;
+      }
+
+      .flow-card {
+        position: relative;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--card);
+        box-shadow: 0 8px 26px rgba(56, 40, 28, 0.06);
+      }
+
+      .flow-card.user-card,
+      .flow-card.host-card {
+        display: flex;
+        min-height: 190px;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+
+      .flow-card.host-card {
+        border-color: rgba(165, 44, 34, 0.3);
+      }
+
+      .card-index {
+        color: var(--muted);
+        font: 10px/1 var(--mono);
+        letter-spacing: 0.08em;
+      }
+
+      .flow-card h3 {
+        margin: 28px 0 8px;
+        font-size: 21px;
+        letter-spacing: -0.035em;
+      }
+
+      .flow-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .file-label {
+        display: inline-flex;
+        width: fit-content;
+        margin-top: 18px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        color: #665d55;
+        background: #ede7de;
+        font: 10px/1 var(--mono);
+      }
+
+      .arrow {
+        position: relative;
+        align-self: center;
+        height: 1px;
+        margin: 0 8px;
+        background: #ad9f91;
+      }
+
+      .arrow::after {
+        position: absolute;
+        top: -4px;
+        right: -1px;
+        width: 7px;
+        height: 7px;
+        border-top: 1px solid #ad9f91;
+        border-right: 1px solid #ad9f91;
+        transform: rotate(45deg);
+        content: "";
+      }
+
+      .mode-split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      .mode-lane {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.38);
+      }
+
+      .mode-lane.explore {
+        border-color: rgba(43, 110, 88, 0.32);
+      }
+
+      .mode-lane.build {
+        border-color: rgba(60, 86, 141, 0.32);
+      }
+
+      .lane-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .explore .lane-head {
+        background: var(--explore-soft);
+      }
+
+      .build .lane-head {
+        background: var(--build-soft);
+      }
+
+      .lane-head strong {
+        font-size: 14px;
+      }
+
+      .lane-head span {
+        color: var(--muted);
+        font: 9px/1 var(--mono);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .lane-steps {
+        display: grid;
+        align-content: start;
+        gap: 0;
+        margin: 0;
+        padding: 18px;
+        list-style: none;
+      }
+
+      .lane-steps li {
+        position: relative;
+        display: grid;
+        grid-template-columns: 22px 1fr;
+        gap: 10px;
+        min-height: 62px;
+        padding-bottom: 15px;
+      }
+
+      .lane-steps li:not(:last-child)::before {
+        position: absolute;
+        top: 21px;
+        bottom: 0;
+        left: 10px;
+        width: 1px;
+        background: var(--line);
+        content: "";
+      }
+
+      .step-dot {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        width: 21px;
+        height: 21px;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        color: var(--muted);
+        background: var(--card-solid);
+        font: 8px/1 var(--mono);
+      }
+
+      .lane-steps h4 {
+        margin: 1px 0 4px;
+        font-size: 12px;
+      }
+
+      .lane-steps p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .pi-step .step-dot {
+        border-color: var(--pi);
+        color: #fff;
+        background: var(--pi);
+        box-shadow: 0 0 0 4px var(--pi-soft);
+      }
+
+      .pi-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        width: fit-content;
+        margin-bottom: 7px;
+        padding: 5px 7px;
+        border: 1px solid rgba(193, 102, 37, 0.3);
+        border-radius: 999px;
+        color: #814215;
+        background: var(--pi-soft);
+        font: 700 9px/1 var(--mono);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .pi-tag::before {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--pi);
+        content: "";
+        animation: pulse 1.8s ease-in-out infinite;
+      }
+
+      .pi-tag.off {
+        border-color: var(--line);
+        color: var(--muted);
+        background: #eee8df;
+      }
+
+      .pi-tag.off::before {
+        background: #a49a90;
+        animation: none;
+      }
+
+      @keyframes pulse {
+        50% {
+          box-shadow: 0 0 0 4px rgba(193, 102, 37, 0.14);
+        }
+      }
+
+      .detail-flow {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(270px, 0.36fr);
+        gap: 22px;
+      }
+
+      .route-map {
+        min-width: 0;
+        padding: 8px 0;
+      }
+
+      .route-row {
+        display: grid;
+        grid-template-columns: 112px 42px minmax(160px, 1fr) 42px minmax(180px, 1.1fr);
+        align-items: center;
+      }
+
+      .route-row + .route-row {
+        margin-top: 12px;
+      }
+
+      .route-node {
+        min-height: 106px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--card-solid);
+      }
+
+      .route-node.pi-node {
+        border-color: rgba(193, 102, 37, 0.48);
+        background: linear-gradient(135deg, #fffaf5, var(--pi-soft));
+      }
+
+      .route-node.data-node {
+        border-color: rgba(43, 110, 88, 0.32);
+      }
+
+      .build-view .route-node.data-node {
+        border-color: rgba(60, 86, 141, 0.32);
+      }
+
+      .route-node h3 {
+        margin: 14px 0 5px;
+        font-size: 14px;
+        letter-spacing: -0.02em;
+      }
+
+      .route-node p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .route-node code {
+        color: #665d55;
+        font: 9px/1.2 var(--mono);
+        overflow-wrap: anywhere;
+      }
+
+      .route-arrow {
+        position: relative;
+        height: 1px;
+        margin: 0 9px;
+        background: #ad9f91;
+      }
+
+      .route-arrow::after {
+        position: absolute;
+        top: -3px;
+        right: 0;
+        width: 6px;
+        height: 6px;
+        border-top: 1px solid #ad9f91;
+        border-right: 1px solid #ad9f91;
+        transform: rotate(45deg);
+        content: "";
+      }
+
+      .branch-label {
+        display: block;
+        margin: 22px 0 9px 154px;
+        color: var(--muted);
+        font: 700 9px/1 var(--mono);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .side-note {
+        align-self: start;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 253, 249, 0.82);
+      }
+
+      .side-note header {
+        padding: 17px 18px 15px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .side-note h3 {
+        margin: 0 0 4px;
+        font-size: 14px;
+      }
+
+      .side-note header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .side-note dl {
+        margin: 0;
+      }
+
+      .side-note dl div {
+        display: grid;
+        grid-template-columns: 78px 1fr;
+        gap: 12px;
+        padding: 13px 18px;
+        border-bottom: 1px solid rgba(211, 200, 186, 0.65);
+      }
+
+      .side-note dl div:last-child {
+        border-bottom: 0;
+      }
+
+      .side-note dt {
+        color: var(--muted);
+        font: 9px/1.45 var(--mono);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .side-note dd {
+        margin: 0;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .callout {
+        display: flex;
+        align-items: flex-start;
+        gap: 11px;
+        margin-top: 18px;
+        padding: 13px 14px;
+        border-radius: 12px;
+        color: #69411f;
+        background: var(--pi-soft);
+        font-size: 11px;
+      }
+
+      .callout strong {
+        white-space: nowrap;
+        font: 700 9px/1.5 var(--mono);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .build-paths {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 20px;
+        margin-left: 154px;
+      }
+
+      .build-path {
+        padding: 15px;
+        border: 1px solid rgba(60, 86, 141, 0.25);
+        border-radius: 14px;
+        background: var(--build-soft);
+      }
+
+      .build-path strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 12px;
+      }
+
+      .build-path p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 10px;
+      }
+
+      .facts {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+        padding: 70px 0 22px;
+      }
+
+      .fact {
+        padding: 23px 24px;
+        border-top: 1px solid var(--line);
+      }
+
+      .fact-number {
+        display: block;
+        margin-bottom: 18px;
+        color: var(--fox);
+        font: 10px/1 var(--mono);
+        letter-spacing: 0.08em;
+      }
+
+      .fact h3 {
+        margin: 0 0 9px;
+        font-size: 17px;
+        letter-spacing: -0.03em;
+      }
+
+      .fact p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .source-map {
+        display: grid;
+        grid-template-columns: minmax(250px, 0.6fr) 1fr;
+        gap: 54px;
+        margin-top: 44px;
+        padding: 34px 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .source-map h2 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        letter-spacing: -0.04em;
+      }
+
+      .source-map > div > p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .source-links {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .source-links a {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 44px;
+        padding: 10px 12px;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        color: var(--ink);
+        text-decoration: none;
+        background: rgba(255, 253, 249, 0.48);
+        font: 11px/1.2 var(--mono);
+      }
+
+      .source-links a:hover {
+        border-color: var(--line);
+        background: var(--card-solid);
+      }
+
+      .source-links a::after {
+        color: var(--muted);
+        content: "↗";
+      }
+
+      footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding-top: 26px;
+        color: var(--muted);
+        font: 10px/1.4 var(--mono);
+      }
+
+      .footer-mark {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .footer-mark::before {
+        width: 18px;
+        height: 1px;
+        background: var(--fox);
+        content: "";
+      }
+
+      @media (max-width: 1100px) {
+        .overview-flow {
+          grid-template-columns: 1fr 36px 1fr;
+        }
+
+        .overview-flow > .mode-split {
+          grid-column: 1 / -1;
+          margin-top: 28px;
+        }
+
+        .overview-flow > .mode-split::before {
+          display: block;
+          grid-column: 1 / -1;
+          width: 1px;
+          height: 22px;
+          margin: -28px auto 6px;
+          background: var(--line);
+          content: "";
+        }
+
+        .detail-flow {
+          grid-template-columns: 1fr;
+        }
+
+        .side-note {
+          display: grid;
+          grid-template-columns: 240px 1fr;
+        }
+
+        .side-note header {
+          border-right: 1px solid var(--line);
+          border-bottom: 0;
+        }
+
+        .source-map {
+          grid-template-columns: 1fr;
+          gap: 24px;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          width: min(100% - 22px, 1460px);
+          padding-top: 14px;
+        }
+
+        .topbar {
+          padding-bottom: 18px;
+        }
+
+        .repo-chip {
+          display: none;
+        }
+
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 24px;
+          padding: 38px 0 34px;
+        }
+
+        h1 {
+          font-size: clamp(38px, 11vw, 50px);
+        }
+
+        .view-tabs {
+          top: 8px;
+          width: 100%;
+        }
+
+        .view-tab {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .diagram-header {
+          padding: 22px 20px;
+        }
+
+        .legend {
+          display: none;
+        }
+
+        .flow-view {
+          padding: 20px;
+        }
+
+        .overview-flow {
+          grid-template-columns: 1fr;
+          min-height: 0;
+        }
+
+        .overview-flow > .arrow {
+          width: 1px;
+          height: 30px;
+          margin: 0 auto;
+        }
+
+        .overview-flow > .arrow::after {
+          top: auto;
+          right: -3px;
+          bottom: 0;
+          transform: rotate(135deg);
+        }
+
+        .mode-split {
+          grid-template-columns: 1fr;
+        }
+
+        .overview-flow > .mode-split {
+          margin-top: 20px;
+        }
+
+        .overview-flow > .mode-split::before {
+          height: 14px;
+          margin-top: -20px;
+        }
+
+        .route-row {
+          grid-template-columns: 1fr;
+          gap: 0;
+        }
+
+        .route-arrow {
+          width: 1px;
+          height: 24px;
+          margin: 0 auto;
+        }
+
+        .route-arrow::after {
+          top: auto;
+          right: -3px;
+          bottom: 0;
+          transform: rotate(135deg);
+        }
+
+        .branch-label {
+          margin-left: 0;
+        }
+
+        .build-paths {
+          grid-template-columns: 1fr;
+          margin-left: 0;
+        }
+
+        .side-note {
+          display: block;
+        }
+
+        .side-note header {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .facts {
+          grid-template-columns: 1fr;
+          gap: 0;
+          padding-top: 48px;
+        }
+
+        .source-links {
+          grid-template-columns: 1fr;
+        }
+
+        footer {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <nav class="topbar" aria-label="Page">
+        <a class="brand" href="#" aria-label="Raynard data flow home">
+          <img src="./src/assets/northfox-fox-logo.svg" alt="" />
+          <span class="brand-copy">
+            <strong>Raynard</strong>
+            <span>System map</span>
+          </span>
+        </a>
+        <span class="repo-chip">Tauri v2 · Pi agent runtime</span>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Agent architecture</p>
+          <h1>From question to data — and from intent to <em>code.</em></h1>
+        </div>
+        <p class="hero-summary">
+          Raynard uses <strong>two separate Pi agents.</strong> The main agent researches and
+          routes. The coding agent edits plugins. They start at different moments, use different
+          models, and never share write access.
+        </p>
+      </header>
+
+      <div class="view-tabs" role="tablist" aria-label="Choose a data flow">
+        <button
+          class="view-tab"
+          id="tab-overview"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="view-overview"
+          data-view="overview"
+        >
+          Overview
+        </button>
+        <button
+          class="view-tab"
+          id="tab-explore"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="view-explore"
+          data-view="explore"
+        >
+          Explore mode
+        </button>
+        <button
+          class="view-tab"
+          id="tab-build"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="view-build"
+          data-view="build"
+        >
+          Build mode
+        </button>
+      </div>
+
+      <section class="diagram-shell" aria-labelledby="diagram-title">
+        <header class="diagram-header">
+          <div>
+            <h2 id="diagram-title">Runtime path</h2>
+            <p id="diagram-caption">One host, two Pi agents, two sharply scoped jobs.</p>
+          </div>
+          <div class="legend" aria-label="Diagram legend">
+            <span><i class="is-pi"></i> Pi agent active</span>
+            <span><i class="is-host"></i> Tauri host</span>
+            <span><i class="is-data"></i> data / files</span>
+          </div>
+        </header>
+
+        <div
+          class="flow-view is-active"
+          id="view-overview"
+          role="tabpanel"
+          aria-labelledby="tab-overview"
+          data-panel="overview"
+        >
+          <div class="overview-flow">
+            <article class="flow-card user-card">
+              <span class="card-index">01 / INPUT</span>
+              <div>
+                <h3>User message</h3>
+                <p>The selected mode and current chat state determine the route.</p>
+              </div>
+              <span class="file-label">src/main.ts</span>
+            </article>
+
+            <span class="arrow" aria-hidden="true"></span>
+
+            <article class="flow-card host-card">
+              <span class="card-index">02 / HOST BOUNDARY</span>
+              <div>
+                <h3>Renderer → Rust</h3>
+                <p>Tauri commands resolve models, plugins, paths, streaming, and cancellation.</p>
+              </div>
+              <span class="file-label">src-tauri/src/lib.rs</span>
+            </article>
+
+            <span class="arrow" aria-hidden="true"></span>
+
+            <div class="mode-split">
+              <article class="mode-lane explore">
+                <header class="lane-head">
+                  <strong>Explore mode</strong>
+                  <span>Research path</span>
+                </header>
+                <ol class="lane-steps">
+                  <li class="pi-step">
+                    <span class="step-dot">π</span>
+                    <div>
+                      <span class="pi-tag">Main Pi active</span>
+                      <h4>Reason over the request</h4>
+                      <p>Uses the Chat / Explore model and inspects installed API tools.</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span class="step-dot">2</span>
+                    <div>
+                      <h4>Call a generated plugin</h4>
+                      <p>The isolated runner fetches API data and returns text, references, and cards.</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span class="step-dot">3</span>
+                    <div>
+                      <h4>Stream an evidenced answer</h4>
+                      <p>Rust forwards deltas and tool events to the renderer and chat history.</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span class="step-dot">×</span>
+                    <div>
+                      <span class="pi-tag off">Coding Pi not running</span>
+                      <p>Missing capability becomes an offer to switch modes. No code is written.</p>
+                    </div>
+                  </li>
+                </ol>
+              </article>
+
+              <article class="mode-lane build">
+                <header class="lane-head">
+                  <strong>Build mode</strong>
+                  <span>Coding path</span>
+                </header>
+                <ol class="lane-steps">
+                  <li class="pi-step">
+                    <span class="step-dot">π</span>
+                    <div>
+                      <span class="pi-tag">Main Pi active first</span>
+                      <h4>Resolve intent semantically</h4>
+                      <p>On a new build, the main Pi prepares a structured plugin request.</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span class="step-dot">2</span>
+                    <div>
+                      <h4>User confirms code writing</h4>
+                      <p>Rust creates a new workspace or opens an existing plugin in place.</p>
+                    </div>
+                  </li>
+                  <li class="pi-step">
+                    <span class="step-dot">π</span>
+                    <div>
+                      <span class="pi-tag">Coding Pi active</span>
+                      <h4>Edit, inspect, and test</h4>
+                      <p>Uses the Coding / Build model with filesystem tools scoped to one plugin.</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span class="step-dot">↻</span>
+                    <div>
+                      <h4>Follow-ups go direct</h4>
+                      <p>With an active plugin, later Build turns bypass the main Pi.</p>
+                    </div>
+                  </li>
+                </ol>
+              </article>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="flow-view"
+          id="view-explore"
+          role="tabpanel"
+          aria-labelledby="tab-explore"
+          data-panel="explore"
+          hidden
+        >
+          <div class="detail-flow">
+            <div class="route-map">
+              <div class="route-row">
+                <article class="route-node">
+                  <code>USER</code>
+                  <h3>Ask a question</h3>
+                  <p>Message + recent chat history</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <code>TAURI HOST</code>
+                  <h3>Discover plugins</h3>
+                  <p>Resolve Chat model, API key, generated tools, and sidecar request.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node pi-node">
+                  <span class="pi-tag">Main Pi active</span>
+                  <h3>Research agent</h3>
+                  <p>Chooses tools, reasons over results, and decides when evidence is sufficient.</p>
+                </article>
+              </div>
+
+              <span class="branch-label">Path A · installed capability exists</span>
+              <div class="route-row">
+                <article class="route-node data-node">
+                  <code>PLUGIN TOOL</code>
+                  <h3>Generated definition</h3>
+                  <p>JSON schema becomes a native Pi tool.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node data-node">
+                  <code>ISOLATED NODE PROCESS</code>
+                  <h3>Tool runner → API</h3>
+                  <p>Executes TypeScript and returns model-visible text plus structured references.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <code>STREAM EVENTS</code>
+                  <h3>Answer + citations</h3>
+                  <p>Deltas, tool activity, result cards, and final text flow back through Rust.</p>
+                </article>
+              </div>
+
+              <span class="branch-label">Path B · capability is missing</span>
+              <div class="route-row">
+                <article class="route-node">
+                  <code>NATIVE TOOL</code>
+                  <h3>request_plugin_build</h3>
+                  <p>Returns name, broad capability, documentation URLs, and reason—then terminates.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <code>RENDERER GATE</code>
+                  <h3>Offer Build mode</h3>
+                  <p>The same structured request is carried forward if the user switches.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <span class="pi-tag off">Coding Pi not running</span>
+                  <h3>No filesystem access</h3>
+                  <p>Explore mode cannot scaffold, edit, or invoke the coding agent.</p>
+                </article>
+              </div>
+            </div>
+
+            <aside class="side-note">
+              <header>
+                <h3>Explore activation</h3>
+                <p>What wakes up, and when.</p>
+              </header>
+              <dl>
+                <div>
+                  <dt>Main Pi</dt>
+                  <dd>Starts for every normal Explore message.</dd>
+                </div>
+                <div>
+                  <dt>Coding Pi</dt>
+                  <dd>Never starts while the app remains in Explore mode.</dd>
+                </div>
+                <div>
+                  <dt>Model</dt>
+                  <dd>The separately selected Chat / Explore model.</dd>
+                </div>
+                <div>
+                  <dt>Writes</dt>
+                  <dd>Chat snapshots and logs only; no plugin source code.</dd>
+                </div>
+                <div>
+                  <dt>Stop</dt>
+                  <dd>Terminates the active main-agent sidecar via the shared stream ID.</dd>
+                </div>
+              </dl>
+            </aside>
+          </div>
+        </div>
+
+        <div
+          class="flow-view build-view"
+          id="view-build"
+          role="tabpanel"
+          aria-labelledby="tab-build"
+          data-panel="build"
+          hidden
+        >
+          <div class="detail-flow">
+            <div class="route-map">
+              <span class="branch-label" style="margin-top: 0">First turn · no active plugin yet</span>
+              <div class="route-row">
+                <article class="route-node">
+                  <code>USER + BUILD MODE</code>
+                  <h3>Request a capability</h3>
+                  <p>The request still enters through the normal chat boundary.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node pi-node">
+                  <span class="pi-tag">Main Pi active</span>
+                  <h3>Semantic resolver</h3>
+                  <p>Uses the Chat model to call <code>request_plugin_build</code> with structured intent.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <code>USER GATE</code>
+                  <h3>Confirm writing code</h3>
+                  <p>Only confirmation allows the host to resolve or scaffold a plugin directory.</p>
+                </article>
+              </div>
+
+              <span class="branch-label">Confirmed build · second Pi lifecycle</span>
+              <div class="route-row">
+                <article class="route-node data-node">
+                  <code>APP LOCAL DATA</code>
+                  <h3>Plugin workspace</h3>
+                  <p>New scaffold, or existing files preserved with only vendored plumbing refreshed.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node pi-node">
+                  <span class="pi-tag">Coding Pi active</span>
+                  <h3>Scoped coding agent</h3>
+                  <p>Read, edit, write, grep, list, and bash tools are confined to this plugin directory.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node data-node">
+                  <code>FILES + EVENTS</code>
+                  <h3>Code and progress</h3>
+                  <p>Tool execution, reasoning status, test results, and final summary stream to the UI.</p>
+                </article>
+              </div>
+
+              <div class="build-paths">
+                <article class="build-path">
+                  <strong>Fresh plugin</strong>
+                  <p>
+                    Must pass mocked tests, <code>node --test</code>, runtime discovery, exported-tool,
+                    and README inventory checks. One Pi repair pass is allowed.
+                  </p>
+                </article>
+                <article class="build-path">
+                  <strong>Existing plugin / follow-up</strong>
+                  <p>
+                    Interactive edit mode makes the smallest requested change. Whole-plugin validation
+                    is not forced on every turn; tests run when appropriate.
+                  </p>
+                </article>
+              </div>
+
+              <span class="branch-label">Later turn · activeBuildPlugin is already stored</span>
+              <div class="route-row">
+                <article class="route-node">
+                  <code>USER FOLLOW-UP</code>
+                  <h3>“Add pagination”</h3>
+                  <p>The chat already knows the exact plugin directory and name.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node">
+                  <span class="pi-tag off">Main Pi bypassed</span>
+                  <h3>No re-resolution</h3>
+                  <p>No build request tool and no per-message confirmation.</p>
+                </article>
+                <span class="route-arrow" aria-hidden="true"></span>
+                <article class="route-node pi-node">
+                  <span class="pi-tag">Coding Pi active</span>
+                  <h3>Continue editing</h3>
+                  <p>Receives the prompt plus up to six recent conversation turns for context.</p>
+                </article>
+              </div>
+            </div>
+
+            <aside class="side-note">
+              <header>
+                <h3>Build activation</h3>
+                <p>There are two distinct entry paths.</p>
+              </header>
+              <dl>
+                <div>
+                  <dt>New build</dt>
+                  <dd>Main Pi first → user confirmation → coding Pi.</dd>
+                </div>
+                <div>
+                  <dt>Follow-up</dt>
+                  <dd>Renderer routes directly to coding Pi when an active plugin exists.</dd>
+                </div>
+                <div>
+                  <dt>Chat model</dt>
+                  <dd>Used by the main Pi for semantic resolution.</dd>
+                </div>
+                <div>
+                  <dt>Coding model</dt>
+                  <dd>Used only by the separate Pi coding-agent sidecar.</dd>
+                </div>
+                <div>
+                  <dt>Stop</dt>
+                  <dd>Terminates whichever sidecar owns the active stream ID.</dd>
+                </div>
+              </dl>
+            </aside>
+          </div>
+          <div class="callout">
+            <strong>Important</strong>
+            <span>
+              Selecting Build mode does not itself start the coding Pi. It starts only after the
+              request is resolved, the user confirms writing code, and a plugin directory exists—or
+              immediately on a follow-up when that chat already has an active plugin.
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section class="facts" aria-label="Key architecture facts">
+        <article class="fact">
+          <span class="fact-number">01</span>
+          <h3>Pi is process-scoped</h3>
+          <p>
+            Each agent lives in a Node sidecar created for one stream. Rust owns its process ID,
+            forwards events, and terminates it on Stop.
+          </p>
+        </article>
+        <article class="fact">
+          <span class="fact-number">02</span>
+          <h3>Tools are native, not textual</h3>
+          <p>
+            Generated plugin schemas become native Pi tools. There is no regex intent router and no
+            Markdown pseudo-tool protocol in the live chat path.
+          </p>
+        </article>
+        <article class="fact">
+          <span class="fact-number">03</span>
+          <h3>Models have separate roles</h3>
+          <p>
+            The Chat / Explore model drives the main Pi. The Coding / Build model drives the coding
+            Pi. The <code>/models</code> flow configures them independently.
+          </p>
+        </article>
+      </section>
+
+      <section class="source-map" aria-labelledby="source-title">
+        <div>
+          <h2 id="source-title">Trace it in the source</h2>
+          <p>
+            These are the runtime boundaries represented above. Links open the local repository files.
+          </p>
+        </div>
+        <div class="source-links">
+          <a href="./src/main.ts">Renderer routing · src/main.ts</a>
+          <a href="./src/agent-runtime.ts">Tauri stream boundary · agent-runtime.ts</a>
+          <a href="./src-tauri/src/lib.rs">Process host · src-tauri/src/lib.rs</a>
+          <a href="./scripts/main-agent-sidecar.mjs">Main Pi sidecar</a>
+          <a href="./scripts/plugin-builder-sidecar.mjs">Coding Pi sidecar</a>
+          <a href="./scripts/plugin-tool-runner.mjs">Isolated plugin runner</a>
+        </div>
+      </section>
+
+      <footer>
+        <span class="footer-mark">Raynard runtime architecture</span>
+        <span>Based on the current application path · Explore ↔ Build</span>
+      </footer>
+    </main>
+
+    <script>
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+      const caption = document.querySelector("#diagram-caption");
+      const captions = {
+        overview: "One host, two Pi agents, two sharply scoped jobs.",
+        explore: "The main Pi researches. The coding Pi remains off.",
+        build: "Intent is resolved before filesystem access is granted."
+      };
+
+      function selectView(view, updateHash = true) {
+        for (const tab of tabs) {
+          const selected = tab.dataset.view === view;
+          tab.setAttribute("aria-selected", String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        }
+
+        for (const panel of panels) {
+          const selected = panel.dataset.panel === view;
+          panel.classList.toggle("is-active", selected);
+          panel.hidden = !selected;
+        }
+
+        if (caption) caption.textContent = captions[view] || captions.overview;
+        if (updateHash) history.replaceState(null, "", `#${view}`);
+      }
+
+      tabs.forEach((tab, index) => {
+        tab.addEventListener("click", () => selectView(tab.dataset.view));
+        tab.addEventListener("keydown", (event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          let nextIndex = index;
+          if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+          if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+          if (event.key === "Home") nextIndex = 0;
+          if (event.key === "End") nextIndex = tabs.length - 1;
+          tabs[nextIndex].focus();
+          selectView(tabs[nextIndex].dataset.view);
+        });
+      });
+
+      const initialView = location.hash.slice(1);
+      if (captions[initialView]) selectView(initialView, false);
+    </script>
+  </body>
+</html>

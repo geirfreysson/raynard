@@ -1,8 +1,36 @@
 ---
-sidebar_position: 4
+sidebar_position: 5
 ---
 
 # Creating generated plugins
+
+<div className="plugin-creation-intro">
+  <div className="plugin-creation-intro__copy">
+    <p className="plugin-creation-intro__eyebrow">Start with the API</p>
+    <h2>Connect Raynard to a new service</h2>
+    <p>
+      Find a link to the documentation for the API you want to use, then ask
+      Raynard to connect to it. Include the link in your message and describe
+      what you would like to do with the service.
+    </p>
+    <p className="plugin-creation-intro__example">
+      “Connect to the Hacker News API using
+      https://github.com/HackerNews/API and let me browse the top stories.”
+    </p>
+    <p>
+      Raynard will propose a plugin for you to review before it writes any code.
+    </p>
+  </div>
+  <div
+    className="plugin-creation-intro__screenshot"
+    role="img"
+    aria-label="Placeholder for a screenshot of asking Raynard to connect to an API"
+  >
+    <span className="plugin-creation-intro__screenshot-icon" aria-hidden="true">▧</span>
+    <strong>Screenshot placeholder</strong>
+    <span>Ask Raynard to connect to an API</span>
+  </div>
+</div>
 
 Generated plugins give Raynard API-backed tools without adding feature-specific
 code to the desktop application. A plugin describes one API, exposes a focused

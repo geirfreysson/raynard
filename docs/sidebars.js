@@ -6,6 +6,7 @@ const sidebars = {
     'intro',
     'getting-started',
     'chat-and-models',
+    'powered-by-pi',
     'plugins',
     'development',
   ],

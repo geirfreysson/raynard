@@ -1,0 +1,1349 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A guided map of Raynard's repository structure, code organization, and main files."
+    />
+    <title>Raynard — Code organization</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f5f1e9;
+        --paper-deep: #e9e1d5;
+        --ink: #201d1a;
+        --muted: #6d655e;
+        --line: #d3c8ba;
+        --card: rgba(255, 253, 249, 0.9);
+        --card-solid: #fffdf9;
+        --fox: #a52c22;
+        --fox-soft: #f1ddd8;
+        --frontend: #2b6e58;
+        --frontend-soft: #dcebe4;
+        --runtime: #3c568d;
+        --runtime-soft: #e1e6f1;
+        --native: #a35a20;
+        --native-soft: #f4e4d2;
+        --test: #725587;
+        --test-soft: #ece4f1;
+        --shadow: 0 18px 50px rgba(56, 40, 28, 0.09);
+        --mono: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
+        --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-width: 320px;
+        margin: 0;
+        overflow-x: hidden;
+        background:
+          radial-gradient(circle at 8% 3%, rgba(165, 44, 34, 0.08), transparent 25rem),
+          radial-gradient(circle at 94% 28%, rgba(60, 86, 141, 0.07), transparent 28rem),
+          var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.5;
+      }
+
+      button,
+      input,
+      a {
+        font: inherit;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      button:focus-visible,
+      input:focus-visible,
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid rgba(165, 44, 34, 0.24);
+        outline-offset: 3px;
+      }
+
+      .page {
+        width: min(1420px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 28px 0 76px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 8px 0 34px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 11px;
+        text-decoration: none;
+      }
+
+      .brand img {
+        width: 35px;
+        height: 32px;
+        object-fit: contain;
+      }
+
+      .brand-copy {
+        display: grid;
+        line-height: 1.05;
+      }
+
+      .brand-copy strong {
+        font-size: 15px;
+        letter-spacing: 0.02em;
+      }
+
+      .brand-copy span {
+        margin-top: 5px;
+        color: var(--muted);
+        font: 10px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .top-links {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      .top-link {
+        display: inline-flex;
+        min-height: 35px;
+        align-items: center;
+        padding: 0 13px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(255, 253, 249, 0.58);
+        font: 11px/1 var(--mono);
+        text-decoration: none;
+      }
+
+      .top-link:hover {
+        border-color: #a99a8a;
+        color: var(--ink);
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(310px, 0.65fr);
+        gap: 54px;
+        align-items: end;
+        padding: 50px 0 48px;
+        border-top: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 18px;
+        color: var(--fox);
+        font: 700 11px/1.2 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 30px;
+        height: 1px;
+        background: currentColor;
+        content: "";
+      }
+
+      h1 {
+        max-width: 930px;
+        margin: 0;
+        font-size: clamp(42px, 6vw, 82px);
+        font-weight: 590;
+        letter-spacing: -0.055em;
+        line-height: 0.96;
+      }
+
+      h1 em {
+        color: var(--fox);
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 400;
+      }
+
+      .hero-summary {
+        max-width: 500px;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(16px, 1.45vw, 20px);
+        line-height: 1.6;
+      }
+
+      .hero-summary strong {
+        color: var(--ink);
+      }
+
+      .section-nav {
+        position: sticky;
+        top: 14px;
+        z-index: 20;
+        display: flex;
+        width: fit-content;
+        max-width: 100%;
+        margin: 0 auto 26px;
+        padding: 5px;
+        overflow-x: auto;
+        border: 1px solid rgba(106, 94, 82, 0.19);
+        border-radius: 14px;
+        background: rgba(255, 253, 249, 0.88);
+        box-shadow: 0 10px 32px rgba(56, 40, 28, 0.09);
+        backdrop-filter: blur(16px);
+      }
+
+      .section-nav a {
+        min-width: 112px;
+        padding: 9px 16px;
+        border-radius: 9px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 650;
+        text-align: center;
+        text-decoration: none;
+      }
+
+      .section-nav a:hover {
+        color: var(--ink);
+        background: var(--paper-deep);
+      }
+
+      .architecture-strip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        margin-bottom: 26px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--card);
+        box-shadow: var(--shadow);
+      }
+
+      .layer {
+        position: relative;
+        min-height: 174px;
+        padding: 25px 27px;
+      }
+
+      .layer + .layer {
+        border-left: 1px solid var(--line);
+      }
+
+      .layer-index {
+        position: absolute;
+        top: 20px;
+        right: 22px;
+        color: rgba(32, 29, 26, 0.16);
+        font: 600 34px/1 var(--mono);
+      }
+
+      .layer-kicker {
+        margin: 0 0 12px;
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .layer.frontend .layer-kicker { color: var(--frontend); }
+      .layer.runtime .layer-kicker { color: var(--runtime); }
+      .layer.native .layer-kicker { color: var(--native); }
+
+      .layer h2 {
+        margin: 0 0 9px;
+        font-size: 21px;
+        letter-spacing: -0.025em;
+      }
+
+      .layer p {
+        max-width: 360px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .layer-paths {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 16px;
+      }
+
+      code,
+      .path-chip {
+        font-family: var(--mono);
+      }
+
+      .path-chip {
+        padding: 5px 8px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--card-solid);
+        color: var(--muted);
+        font-size: 10px;
+      }
+
+      .section-shell {
+        margin-top: 26px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background:
+          linear-gradient(rgba(255, 253, 249, 0.79), rgba(255, 253, 249, 0.79)),
+          repeating-linear-gradient(0deg, transparent, transparent 31px, rgba(98, 82, 68, 0.055) 32px),
+          repeating-linear-gradient(90deg, transparent, transparent 31px, rgba(98, 82, 68, 0.055) 32px);
+        box-shadow: var(--shadow);
+        scroll-margin-top: 92px;
+      }
+
+      .section-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 28px;
+        padding: 27px 30px 23px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 253, 249, 0.72);
+      }
+
+      .section-header h2 {
+        margin: 0 0 5px;
+        font-size: clamp(25px, 3vw, 36px);
+        letter-spacing: -0.035em;
+      }
+
+      .section-header p {
+        max-width: 720px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .tree-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+
+      .tree-search {
+        width: 190px;
+        height: 37px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--card-solid);
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .small-button {
+        height: 37px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        color: var(--muted);
+        background: var(--card-solid);
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .small-button:hover {
+        border-color: #a99a8a;
+        color: var(--ink);
+      }
+
+      .tree-layout {
+        display: grid;
+        grid-template-columns: minmax(410px, 0.92fr) minmax(440px, 1.08fr);
+        min-height: 670px;
+      }
+
+      .tree {
+        padding: 24px 27px 28px;
+        border-right: 1px solid var(--line);
+        background: rgba(255, 253, 249, 0.48);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .tree details {
+        position: relative;
+      }
+
+      .tree details details {
+        margin-left: 21px;
+      }
+
+      .tree summary,
+      .file-row {
+        display: grid;
+        gap: 7px;
+        align-items: baseline;
+        min-height: 31px;
+        padding: 5px 7px;
+        border-radius: 7px;
+      }
+
+      .tree summary {
+        grid-template-columns: 12px 20px minmax(130px, auto) 1fr;
+        list-style: none;
+        cursor: pointer;
+      }
+
+      .file-row {
+        grid-template-columns: 20px minmax(130px, auto) 1fr;
+      }
+
+      .file-row > span:first-child {
+        display: none;
+      }
+
+      .tree summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .tree summary:hover,
+      .file-row:hover {
+        background: rgba(233, 225, 213, 0.65);
+      }
+
+      .tree summary::before {
+        color: var(--muted);
+        content: "▸";
+        transition: transform 140ms ease;
+      }
+
+      .tree details[open] > summary::before {
+        transform: rotate(90deg);
+      }
+
+      .tree-icon {
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .folder-name {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      .file-name {
+        color: var(--ink);
+      }
+
+      .file-row::before {
+        color: #a39586;
+        content: "·";
+        text-align: center;
+      }
+
+      .tree-note {
+        min-width: 0;
+        color: var(--muted);
+        font: 11px/1.45 var(--sans);
+      }
+
+      .tree .test-file .file-name {
+        color: var(--test);
+      }
+
+      .tree .main-file .file-name {
+        color: var(--fox);
+        font-weight: 700;
+      }
+
+      .tree-item[hidden] {
+        display: none;
+      }
+
+      .folder-guide {
+        padding: 25px 27px 30px;
+      }
+
+      .guide-title {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .folder-cards {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .folder-card {
+        min-height: 147px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--card-solid);
+      }
+
+      .folder-card.wide {
+        grid-column: 1 / -1;
+        min-height: auto;
+      }
+
+      .folder-card code {
+        display: inline-block;
+        margin-bottom: 9px;
+        color: var(--fox);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .folder-card h3 {
+        margin: 0 0 7px;
+        font-size: 15px;
+      }
+
+      .folder-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.58;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 15px;
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ink);
+      }
+
+      .dot.main { background: var(--fox); }
+      .dot.test { background: var(--test); }
+
+      .rules-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+      }
+
+      .rule {
+        min-height: 210px;
+        padding: 25px 25px 27px;
+        background: rgba(255, 253, 249, 0.54);
+      }
+
+      .rule + .rule {
+        border-left: 1px solid var(--line);
+      }
+
+      .rule-number {
+        display: block;
+        margin-bottom: 21px;
+        color: var(--fox);
+        font: 700 11px/1 var(--mono);
+      }
+
+      .rule h3 {
+        margin: 0 0 9px;
+        font-size: 17px;
+        letter-spacing: -0.02em;
+      }
+
+      .rule p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .main-files {
+        display: grid;
+        gap: 0;
+      }
+
+      .file-deep-dive {
+        display: grid;
+        grid-template-columns: 0.72fr 1.28fr;
+        min-height: 330px;
+        background: rgba(255, 253, 249, 0.56);
+        scroll-margin-top: 92px;
+      }
+
+      .file-deep-dive + .file-deep-dive {
+        border-top: 1px solid var(--line);
+      }
+
+      .file-identity {
+        padding: 29px 30px;
+        border-right: 1px solid var(--line);
+      }
+
+      .file-number {
+        color: var(--fox);
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.12em;
+      }
+
+      .file-identity h3 {
+        margin: 16px 0 9px;
+        overflow-wrap: anywhere;
+        font: 700 clamp(19px, 2.2vw, 29px)/1.15 var(--mono);
+        letter-spacing: -0.045em;
+      }
+
+      .file-role {
+        display: inline-flex;
+        margin-bottom: 18px;
+        padding: 5px 8px;
+        border-radius: 6px;
+        background: var(--fox-soft);
+        color: var(--fox);
+        font: 700 9px/1 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .file-identity p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .file-details {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .detail-block {
+        padding: 28px 28px 24px;
+      }
+
+      .detail-block:nth-child(even) {
+        border-left: 1px solid var(--line);
+      }
+
+      .detail-block:nth-child(n + 3) {
+        border-top: 1px solid var(--line);
+      }
+
+      .detail-block h4 {
+        margin: 0 0 9px;
+        color: var(--muted);
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      .detail-block p,
+      .detail-block ul {
+        margin: 0;
+        color: var(--ink);
+        font-size: 12px;
+        line-height: 1.62;
+      }
+
+      .detail-block ul {
+        padding-left: 17px;
+      }
+
+      .detail-block li + li {
+        margin-top: 4px;
+      }
+
+      .callout {
+        margin: 26px 30px 30px;
+        padding: 18px 20px;
+        border: 1px solid rgba(165, 44, 34, 0.22);
+        border-radius: 14px;
+        background: var(--fox-soft);
+        color: var(--fox-dark, #5f120d);
+        font-size: 13px;
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        padding: 34px 2px 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      footer a {
+        color: var(--fox);
+        text-decoration: none;
+      }
+
+      @media (max-width: 1040px) {
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 26px;
+        }
+
+        .architecture-strip {
+          grid-template-columns: 1fr;
+        }
+
+        .layer + .layer {
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+
+        .tree-layout,
+        .file-deep-dive {
+          grid-template-columns: 1fr;
+        }
+
+        .tree {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .file-identity {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .rules-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .rule:nth-child(3) {
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+
+        .rule:nth-child(4) {
+          border-top: 1px solid var(--line);
+        }
+      }
+
+      @media (max-width: 720px) {
+        .page {
+          width: min(100% - 22px, 1420px);
+          padding-top: 16px;
+        }
+
+        .topbar,
+        .section-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .top-links {
+          width: 100%;
+          overflow-x: auto;
+        }
+
+        .hero {
+          padding-top: 34px;
+        }
+
+        .section-nav {
+          justify-content: flex-start;
+          width: 100%;
+        }
+
+        .section-header {
+          padding: 22px;
+        }
+
+        .tree-toolbar {
+          width: 100%;
+        }
+
+        .tree-search {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .tree {
+          padding: 18px 12px 22px;
+          overflow-x: auto;
+        }
+
+        .tree summary {
+          grid-template-columns: 12px 18px minmax(115px, auto) minmax(175px, 1fr);
+        }
+
+        .file-row {
+          grid-template-columns: 18px minmax(115px, auto) minmax(175px, 1fr);
+        }
+
+        .folder-guide {
+          padding: 21px;
+        }
+
+        .folder-cards,
+        .rules-grid,
+        .file-details {
+          grid-template-columns: 1fr;
+        }
+
+        .folder-card.wide {
+          grid-column: auto;
+        }
+
+        .rule + .rule,
+        .rule:nth-child(3),
+        .rule:nth-child(4),
+        .detail-block:nth-child(even),
+        .detail-block:nth-child(n + 3) {
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+
+        .file-identity,
+        .detail-block {
+          padding: 23px 22px;
+        }
+
+        footer {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <a class="brand" href="#top" aria-label="Raynard code organization">
+          <img src="src/assets/northfox-fox-logo.svg" alt="" />
+          <span class="brand-copy">
+            <strong>raynard</strong>
+            <span>engineering map</span>
+          </span>
+        </a>
+        <nav class="top-links" aria-label="Related documents">
+          <a class="top-link" href="data-flow.html">Agent data flow ↗</a>
+          <a class="top-link" href="README.md">README ↗</a>
+          <span class="top-link">Tauri v2 · TypeScript · Rust</span>
+        </nav>
+      </header>
+
+      <section class="hero" id="top">
+        <div>
+          <p class="eyebrow">Repository anatomy</p>
+          <h1>Where the code lives — and <em>why.</em></h1>
+        </div>
+        <p class="hero-summary">
+          Raynard is arranged around <strong>three execution boundaries</strong>: the browser-like
+          renderer, isolated Node agent processes, and the native Rust host. This map shows every
+          working area, what belongs there, and which files carry the architecture.
+        </p>
+      </section>
+
+      <nav class="section-nav" aria-label="Page sections">
+        <a href="#layers">Layers</a>
+        <a href="#tree">Code tree</a>
+        <a href="#principles">Organization</a>
+        <a href="#main-files">Main files</a>
+      </nav>
+
+      <section class="architecture-strip" id="layers" aria-label="Three code layers">
+        <article class="layer frontend">
+          <span class="layer-index">01</span>
+          <p class="layer-kicker">Renderer</p>
+          <h2>Interface &amp; local UI state</h2>
+          <p>The Vite frontend draws the application, handles chat interaction, and translates native stream events into visible state.</p>
+          <div class="layer-paths">
+            <span class="path-chip">src/</span>
+            <span class="path-chip">index.html</span>
+          </div>
+        </article>
+        <article class="layer runtime">
+          <span class="layer-index">02</span>
+          <p class="layer-kicker">Agent processes</p>
+          <h2>Reasoning, tools &amp; plugin code</h2>
+          <p>Node sidecars host the two Pi agents. Pure “core” modules hold prompts and policies; runners isolate generated plugin execution.</p>
+          <div class="layer-paths">
+            <span class="path-chip">scripts/</span>
+            <span class="path-chip">generated-plugins/*</span>
+          </div>
+        </article>
+        <article class="layer native">
+          <span class="layer-index">03</span>
+          <p class="layer-kicker">Native host</p>
+          <h2>Security, storage &amp; processes</h2>
+          <p>Rust owns credentials, app data, sidecar lifecycles, cancellation, plugin workspaces, and the Tauri command API.</p>
+          <div class="layer-paths">
+            <span class="path-chip">src-tauri/</span>
+            <span class="path-chip">OS keychain</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="section-shell" id="tree" aria-labelledby="tree-title">
+        <header class="section-header">
+          <div>
+            <h2 id="tree-title">The code tree</h2>
+            <p>Open folders to scan their contents. Red filenames are architectural entry points; purple filenames are tests.</p>
+          </div>
+          <div class="tree-toolbar">
+            <label>
+              <span hidden>Filter the code tree</span>
+              <input id="treeSearch" class="tree-search" type="search" placeholder="Filter files…" />
+            </label>
+            <button id="toggleTree" class="small-button" type="button">Collapse</button>
+          </div>
+        </header>
+
+        <div class="tree-layout">
+          <div class="tree" id="codeTree" aria-label="Repository file tree">
+            <details open class="tree-item" data-search="src frontend renderer ui">
+              <summary><span class="tree-icon">▣</span><span class="folder-name">src/</span><span class="tree-note">Renderer application</span></summary>
+              <div class="file-row tree-item main-file" data-search="src main ts renderer ui chat"><span></span><span class="file-name">main.ts</span><span class="tree-note">UI composition and chat controller</span></div>
+              <div class="file-row tree-item main-file" data-search="src agent runtime stream tauri"><span></span><span class="file-name">agent-runtime.ts</span><span class="tree-note">Typed frontend ↔ Tauri agent boundary</span></div>
+              <div class="file-row tree-item" data-search="src build request flow mode"><span></span><span class="file-name">build-request-flow.ts</span><span class="tree-note">Explore-to-Build transition rules</span></div>
+              <div class="file-row tree-item" data-search="src builder activity timeline"><span></span><span class="file-name">builder-activity.ts</span><span class="tree-note">Builder tool-event timeline state</span></div>
+              <div class="file-row tree-item" data-search="src navigation state chat"><span></span><span class="file-name">navigation-state.ts</span><span class="tree-note">Safe saved-chat navigation decisions</span></div>
+              <div class="file-row tree-item" data-search="src errors helper"><span></span><span class="file-name">errors.ts</span><span class="tree-note">Unknown-error normalization</span></div>
+              <div class="file-row tree-item" data-search="src styles css ui"><span></span><span class="file-name">styles.css</span><span class="tree-note">Global application and markdown styles</span></div>
+              <details open class="tree-item" data-search="src result card rendering react">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">result-card/</span><span class="tree-note">Declarative tool-result renderer</span></summary>
+                <div class="file-row tree-item main-file" data-search="result card react component"><span></span><span class="file-name">ResultCard.tsx</span><span class="tree-note">Maps card blocks to React/shadcn UI</span></div>
+                <div class="file-row tree-item" data-search="result card types contract"><span></span><span class="file-name">types.ts</span><span class="tree-note">Card template and stored-card types</span></div>
+                <div class="file-row tree-item" data-search="result card mount react dom"><span></span><span class="file-name">mount.ts</span><span class="tree-note">Mounts React cards into DOM messages</span></div>
+                <div class="file-row tree-item" data-search="result card resolve interpolation paths"><span></span><span class="file-name">resolve.ts</span><span class="tree-note">Data-path lookup and interpolation</span></div>
+                <div class="file-row tree-item" data-search="result card example preview"><span></span><span class="file-name">example.ts</span><span class="tree-note">Generates preview data from templates</span></div>
+                <div class="file-row tree-item" data-search="result card css theme"><span></span><span class="file-name">result-card.css / theme.css</span><span class="tree-note">Scoped visual tokens and styling</span></div>
+              </details>
+              <details open class="tree-item" data-search="src components ui shadcn">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">components/ui/</span><span class="tree-note">Small reusable React primitives</span></summary>
+                <div class="file-row tree-item" data-search="components card avatar badge table"><span></span><span class="file-name">card · avatar · badge · table</span><span class="tree-note">shadcn-style card building blocks</span></div>
+              </details>
+              <details open class="tree-item" data-search="src assets">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">assets/</span><span class="tree-note">Bundled renderer assets</span></summary>
+                <div class="file-row tree-item" data-search="northfox fox logo svg"><span></span><span class="file-name">northfox-fox-logo.svg</span><span class="tree-note">Brand mark imported by the UI</span></div>
+              </details>
+              <div class="file-row tree-item test-file" data-search="src test vitest"><span></span><span class="file-name">*.test.ts / *.test.tsx</span><span class="tree-note">Focused co-located Vitest tests</span></div>
+              <div class="file-row tree-item" data-search="src lib utils class names"><span></span><span class="file-name">lib/utils.ts</span><span class="tree-note">Shared UI class-name helper</span></div>
+              <div class="file-row tree-item" data-search="vite env types"><span></span><span class="file-name">vite-env.d.ts</span><span class="tree-note">Vite TypeScript declarations</span></div>
+            </details>
+
+            <details open class="tree-item" data-search="scripts node agent sidecar plugin">
+              <summary><span class="tree-icon">▣</span><span class="folder-name">scripts/</span><span class="tree-note">Node agent and plugin runtime</span></summary>
+              <div class="file-row tree-item main-file" data-search="main agent sidecar pi process"><span></span><span class="file-name">main-agent-sidecar.mjs</span><span class="tree-note">Runs the Explore/chat Pi Agent</span></div>
+              <div class="file-row tree-item main-file" data-search="main agent core prompt tools schema"><span></span><span class="file-name">main-agent-core.mjs</span><span class="tree-note">Pure prompt, model, schema, tool logic</span></div>
+              <div class="file-row tree-item main-file" data-search="plugin builder sidecar coding agent"><span></span><span class="file-name">plugin-builder-sidecar.mjs</span><span class="tree-note">Runs the scoped Pi coding agent</span></div>
+              <div class="file-row tree-item main-file" data-search="plugin builder core prompt validation"><span></span><span class="file-name">plugin-builder-core.mjs</span><span class="tree-note">Builder policy and artifact validation</span></div>
+              <div class="file-row tree-item main-file" data-search="plugin tool runner isolation typescript"><span></span><span class="file-name">plugin-tool-runner.mjs</span><span class="tree-note">Discovers and executes plugin tools</span></div>
+              <details open class="tree-item" data-search="plugin runtime generated vendored">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">plugin-runtime/</span><span class="tree-note">Vendored into generated plugins</span></summary>
+                <div class="file-row tree-item" data-search="plugin runtime api get references card contract"><span></span><span class="file-name">runtime.ts</span><span class="tree-note">HTTP, reference, and card contracts</span></div>
+                <div class="file-row tree-item" data-search="plugin testing mock fetch"><span></span><span class="file-name">testing.ts</span><span class="tree-note">Mocked-fetch test helpers</span></div>
+                <div class="file-row tree-item test-file" data-search="plugin contract test template"><span></span><span class="file-name">contract.test.ts.template</span><span class="tree-note">Scaffolded plugin contract test</span></div>
+              </details>
+              <details open class="tree-item" data-search="scripts fixtures plugin test">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">fixtures/</span><span class="tree-note">Deterministic runner test plugins</span></summary>
+                <div class="file-row tree-item" data-search="reference broken plugin fixtures"><span></span><span class="file-name">reference-plugin/ · broken-plugin/</span><span class="tree-note">Valid and invalid sample plugins</span></div>
+              </details>
+              <div class="file-row tree-item test-file" data-search="scripts test node"><span></span><span class="file-name">*.test.mjs</span><span class="tree-note">Node tests for prompts and runners</span></div>
+            </details>
+
+            <details open class="tree-item" data-search="src tauri rust native backend">
+              <summary><span class="tree-icon">▣</span><span class="folder-name">src-tauri/</span><span class="tree-note">Native desktop host</span></summary>
+              <details open class="tree-item" data-search="src tauri src rust">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">src/</span><span class="tree-note">Rust application code</span></summary>
+                <div class="file-row tree-item main-file" data-search="tauri lib rust commands storage sidecars"><span></span><span class="file-name">lib.rs</span><span class="tree-note">Commands, storage, keychain, processes</span></div>
+                <div class="file-row tree-item" data-search="tauri main rust entry"><span></span><span class="file-name">main.rs</span><span class="tree-note">Thin executable entry point</span></div>
+              </details>
+              <details class="tree-item" data-search="tauri icons">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">icons/</span><span class="tree-note">Desktop bundle icons</span></summary>
+                <div class="file-row tree-item" data-search="icon png icns ico"><span></span><span class="file-name">icon.png · icon.icns · icon.ico</span><span class="tree-note">Platform-specific app icons</span></div>
+              </details>
+              <details class="tree-item" data-search="tauri gen schemas generated">
+                <summary><span class="tree-icon">▣</span><span class="folder-name">gen/schemas/</span><span class="tree-note">Tauri-generated permission schemas</span></summary>
+              </details>
+              <div class="file-row tree-item" data-search="tauri config window bundle"><span></span><span class="file-name">tauri.conf.json</span><span class="tree-note">Window, build, identifier, bundle config</span></div>
+              <div class="file-row tree-item" data-search="cargo toml rust dependencies"><span></span><span class="file-name">Cargo.toml</span><span class="tree-note">Rust crate and dependencies</span></div>
+              <div class="file-row tree-item" data-search="cargo lock dependencies"><span></span><span class="file-name">Cargo.lock</span><span class="tree-note">Pinned Rust dependency graph</span></div>
+              <div class="file-row tree-item" data-search="tauri build rust"><span></span><span class="file-name">build.rs</span><span class="tree-note">Tauri compile-time setup</span></div>
+            </details>
+
+            <details open class="tree-item" data-search="root configuration docs build">
+              <summary><span class="tree-icon">▣</span><span class="folder-name">repository root</span><span class="tree-note">Build and project metadata</span></summary>
+              <div class="file-row tree-item" data-search="index html vite root"><span></span><span class="file-name">index.html</span><span class="tree-note">Vite document shell and #app root</span></div>
+              <div class="file-row tree-item" data-search="package json npm dependencies"><span></span><span class="file-name">package.json / package-lock.json</span><span class="tree-note">Node scripts and locked dependencies</span></div>
+              <div class="file-row tree-item" data-search="vite config react dev"><span></span><span class="file-name">vite.config.ts</span><span class="tree-note">React plugin and dev server</span></div>
+              <div class="file-row tree-item" data-search="typescript config"><span></span><span class="file-name">tsconfig.json</span><span class="tree-note">TypeScript compiler rules</span></div>
+              <div class="file-row tree-item" data-search="tailwind postcss config"><span></span><span class="file-name">tailwind.config.js / postcss.config.js</span><span class="tree-note">Result-card CSS toolchain</span></div>
+              <div class="file-row tree-item" data-search="readme documentation"><span></span><span class="file-name">README.md</span><span class="tree-note">Setup and product overview</span></div>
+              <div class="file-row tree-item" data-search="agents claude instructions"><span></span><span class="file-name">AGENTS.md / CLAUDE.md</span><span class="tree-note">Repository guidance for coding agents</span></div>
+              <div class="file-row tree-item" data-search="data flow html documentation"><span></span><span class="file-name">data-flow.html</span><span class="tree-note">Interactive agent-flow documentation</span></div>
+              <div class="file-row tree-item main-file" data-search="code organization html documentation"><span></span><span class="file-name">code-organization.html</span><span class="tree-note">This repository map</span></div>
+              <div class="file-row tree-item" data-search="dist generated build"><span></span><span class="file-name">dist/</span><span class="tree-note">Generated Vite output — do not edit</span></div>
+            </details>
+          </div>
+
+          <aside class="folder-guide" aria-label="Folder explanations">
+            <p class="guide-title">What each area owns</p>
+            <div class="folder-cards">
+              <article class="folder-card">
+                <code>src/</code>
+                <h3>What the user sees</h3>
+                <p>Owns DOM/React rendering, interaction state, markdown, saved-chat navigation, model settings, builder progress, and result cards. It never reads secrets or plugin files directly.</p>
+              </article>
+              <article class="folder-card">
+                <code>scripts/</code>
+                <h3>What the agents do</h3>
+                <p>Owns Pi agent setup, model adapters, native tool registration, coding-agent prompts, plugin validation, and isolated TypeScript tool execution.</p>
+              </article>
+              <article class="folder-card">
+                <code>src-tauri/</code>
+                <h3>What the machine permits</h3>
+                <p>Owns the trusted boundary: operating-system credentials, local app data, validated paths, process spawning, cancellation, and native commands.</p>
+              </article>
+              <article class="folder-card">
+                <code>generated-plugins/</code>
+                <h3>What gets created</h3>
+                <p>Lives in Tauri app data, not this repository. Each workspace contains a manifest, entry point, API tools, docs, and executable mocked tests.</p>
+              </article>
+              <article class="folder-card wide">
+                <code>tests + fixtures</code>
+                <h3>Contracts stay beside their logic</h3>
+                <p>Frontend tests sit next to TypeScript modules; agent and runner tests sit in <code>scripts/</code>; Rust unit tests live inside <code>lib.rs</code>. Fixtures provide real modules without requiring live API calls.</p>
+              </article>
+            </div>
+            <div class="legend" aria-label="Tree legend">
+              <span><i class="dot main"></i>Main architecture file</span>
+              <span><i class="dot test"></i>Test or test template</span>
+              <span><i class="dot"></i>Supporting file</span>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section-shell" id="principles" aria-labelledby="principles-title">
+        <header class="section-header">
+          <div>
+            <h2 id="principles-title">How the code is organized</h2>
+            <p>Four rules explain most placement decisions in the repository.</p>
+          </div>
+        </header>
+        <div class="rules-grid">
+          <article class="rule">
+            <span class="rule-number">RULE 01</span>
+            <h3>Separate by trust boundary</h3>
+            <p>The renderer can request work, but Rust owns secrets, storage, filesystem validation, and child processes. Generated code executes in a separate runner rather than inside the UI.</p>
+          </article>
+          <article class="rule">
+            <span class="rule-number">RULE 02</span>
+            <h3>Separate policy from process</h3>
+            <p><code>*-core.mjs</code> files contain testable prompts, conversions, and validation. <code>*-sidecar.mjs</code> files handle stdin/stdout, Pi Agent lifecycle, signals, and subprocesses.</p>
+          </article>
+          <article class="rule">
+            <span class="rule-number">RULE 03</span>
+            <h3>Keep boundaries typed</h3>
+            <p><code>agent-runtime.ts</code> defines the stream protocol used by the renderer. Plugin tools use JSON Schema plus a small result contract: visible text, references, and optional card data.</p>
+          </article>
+          <article class="rule">
+            <span class="rule-number">RULE 04</span>
+            <h3>Keep helpers small and testable</h3>
+            <p>Navigation decisions, build transitions, builder timelines, errors, and card data resolution are extracted from the large UI controller into pure modules with focused tests.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-shell" id="main-files" aria-labelledby="main-files-title">
+        <header class="section-header">
+          <div>
+            <h2 id="main-files-title">The main files, explained</h2>
+            <p>These seven files carry most of the application’s behavior. Read them in this order to understand the system quickly.</p>
+          </div>
+        </header>
+
+        <div class="main-files">
+          <article class="file-deep-dive" id="file-main-ts">
+            <div class="file-identity">
+              <span class="file-number">01 · RENDERER ORCHESTRATOR</span>
+              <h3>src/main.ts</h3>
+              <span class="file-role">Frontend entry point</span>
+              <p>The largest renderer file. It builds the application shell and coordinates every user-facing workflow, while delegating stream transport and pure decisions to smaller modules.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Owns</h4>
+                <ul>
+                  <li>Chat composer, sidebar, modals, markdown, and history UI</li>
+                  <li>Explore/Build mode state and active plugin sessions</li>
+                  <li>Tool activity, citations, result cards, and cancellation UI</li>
+                </ul>
+              </div>
+              <div class="detail-block">
+                <h4>Calls into</h4>
+                <p><code>agent-runtime.ts</code> for agent streams and Tauri <code>invoke()</code> for storage, model settings, plugin scaffolding, and inspection.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Key idea</h4>
+                <p>It is a controller, not the agent runtime. The file turns domain events into visible application state; the actual Pi agents live in sidecars.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Read next</h4>
+                <p>Follow <code>submitMessage()</code>, <code>runBuildTurn()</code>, and <code>runPluginBuilderTurn()</code> to see the two conversation paths.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-agent-runtime">
+            <div class="file-identity">
+              <span class="file-number">02 · FRONTEND BOUNDARY</span>
+              <h3>src/agent-runtime.ts</h3>
+              <span class="file-role">Typed stream adapter</span>
+              <p>The narrow contract between UI code and native agent commands. It prevents the renderer from knowing how Rust launches or manages the sidecars.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Owns</h4>
+                <ul>
+                  <li>Message, build-request, tool-event, and stream payload types</li>
+                  <li>Main-agent and plugin-builder Tauri invocations</li>
+                  <li>Per-stream filtering and event-to-handler dispatch</li>
+                </ul>
+              </div>
+              <div class="detail-block">
+                <h4>Public surface</h4>
+                <p><code>runMainAgentStream()</code>, <code>runPluginBuilderStream()</code>, <code>cancelAgentTurnStream()</code>, and the pure <code>applyStreamPayload()</code>.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Key idea</h4>
+                <p>Each request gets a stream ID. Events for other runs are ignored, while deltas, thinking, tools, build requests, and completion are routed independently.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Why it matters</h4>
+                <p>The UI can evolve without coupling itself to Rust process details, and stream behavior can be tested without starting Tauri or a model.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-rust">
+            <div class="file-identity">
+              <span class="file-number">03 · TRUSTED HOST</span>
+              <h3>src-tauri/src/lib.rs</h3>
+              <span class="file-role">Native backend</span>
+              <p>The trusted center of the desktop application. It exposes the command API, owns persistent data, resolves credentials, and supervises every external process.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Command groups</h4>
+                <ul>
+                  <li>Chat history and agent-turn logs</li>
+                  <li>Provider configuration and keychain credentials</li>
+                  <li>Generated plugin discovery, scaffolding, reading, and deletion</li>
+                  <li>Main-agent, builder, direct-chat, and cancellation streams</li>
+                </ul>
+              </div>
+              <div class="detail-block">
+                <h4>Process role</h4>
+                <p>Resolves the chosen model, discovers plugins, starts the appropriate Node sidecar, translates its JSON lines into Tauri channel events, and terminates it on Stop.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Filesystem role</h4>
+                <p>Constrains generated-plugin paths, stores chats under app-local data, scaffolds new workspaces, and refreshes only vendored runtime files when editing.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Reading tip</h4>
+                <p>Start at <code>run_main_agent_stream</code>, <code>run_plugin_builder_stream</code>, and the final <code>run()</code> command registration; then trace helper functions as needed.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-main-agent">
+            <div class="file-identity">
+              <span class="file-number">04 · RESEARCH AGENT</span>
+              <h3>scripts/main-agent-sidecar.mjs</h3>
+              <span class="file-role">Main Pi process</span>
+              <p>A short-lived Node process that hosts the real chat/research agent. It receives one JSON request on stdin and emits newline-delimited events on stdout.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Startup</h4>
+                <p>Validates the request, converts discovered plugin definitions into native Pi tools, adds <code>request_plugin_build</code>, creates the model, and restores recent history.</p>
+              </div>
+              <div class="detail-block">
+                <h4>During a turn</h4>
+                <p>Streams text and thinking deltas. Plugin tool calls spawn <code>plugin-tool-runner.mjs</code> and feed its structured result back into Pi.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Completion</h4>
+                <p>Emits final text plus any structured build request. <code>SIGTERM</code> aborts the agent when the user presses Stop.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Paired core</h4>
+                <p><code>main-agent-core.mjs</code> holds model adapters, history conversion, system policy, schema-to-Pi types, tool factories, and result formatting.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-builder">
+            <div class="file-identity">
+              <span class="file-number">05 · CODING AGENT</span>
+              <h3>scripts/plugin-builder-sidecar.mjs</h3>
+              <span class="file-role">Scoped Pi coder</span>
+              <p>The separate Build-mode coding process. Its filesystem tools are rooted in exactly one generated-plugin directory, keeping authoring away from the host repository.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Fresh builds</h4>
+                <p>The agent fills the scaffold, then validation checks mocked tests, runtime tool discovery, callable exports, endpoint inventory, and valid result cards. One repair pass is available.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Edit turns</h4>
+                <p>Current plugin source and recent conversation are supplied up front. The agent makes the smallest requested change and runs tests when appropriate.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Stream events</h4>
+                <p>Native coding-tool start, update, and end events are forwarded so <code>builder-activity.ts</code> can maintain a stable progress timeline in the renderer.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Paired core</h4>
+                <p><code>plugin-builder-core.mjs</code> contains fresh/edit prompts, conversation recaps, test discovery, card rules, and final artifact validation.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-runner">
+            <div class="file-identity">
+              <span class="file-number">06 · PLUGIN EXECUTION</span>
+              <h3>scripts/plugin-tool-runner.mjs</h3>
+              <span class="file-role">Isolated TypeScript runner</span>
+              <p>The execution boundary for generated code. It loads a plugin from its directory, either reports its tool catalog or invokes one named tool with JSON arguments.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>How it loads</h4>
+                <p>Copies allowed plugin files to a temporary ESM directory, transpiles TypeScript with the compiler API, skips tests, and dynamically imports the temporary entry point.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Two modes</h4>
+                <p><code>listTools: true</code> returns definitions, schemas, cards, and callability. Execution mode calls <code>tools[name].execute(args)</code>.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Protocol</h4>
+                <p>Reads one JSON object from stdin and prints one JSON object. Success is <code>{ ok: true, result }</code>; failures return <code>{ ok: false, error }</code>.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Cleanup</h4>
+                <p>The temporary module directory is always removed. Each call gets a fresh import URL, avoiding stale module state between executions.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="file-deep-dive" id="file-card">
+            <div class="file-identity">
+              <span class="file-number">07 · RESULT PRESENTATION</span>
+              <h3>src/result-card/ResultCard.tsx</h3>
+              <span class="file-role">Declarative renderer</span>
+              <p>The only place that turns plugin-authored card templates into visual UI. Plugins supply data and layout objects; the host keeps control of React and styling.</p>
+            </div>
+            <div class="file-details">
+              <div class="detail-block">
+                <h4>Supported blocks</h4>
+                <p>Metric rows, tables, key/value pairs, text, nested sections, badges, images, and a raw JSON fallback.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Data binding</h4>
+                <p><code>resolve.ts</code> resolves dotted fields and <code>{{path}}</code> interpolation. A top-level image is promoted into the card header.</p>
+              </div>
+              <div class="detail-block">
+                <h4>Host boundary</h4>
+                <p>Generated plugins never author JSX. Their fixed <code>card</code> template travels with the tool definition; the call result supplies matching <code>data</code>.</p>
+              </div>
+              <div class="detail-block">
+                <h4>DOM bridge</h4>
+                <p><code>mount.ts</code> creates React roots inside ordinary chat-message elements, letting the mostly DOM-driven renderer embed isolated React cards.</p>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="callout">
+          <strong>A useful reading path:</strong> begin with <code>src/main.ts</code> to see the product,
+          move through <code>src/agent-runtime.ts</code> into <code>src-tauri/src/lib.rs</code>, then choose
+          either the main-agent pair or builder pair in <code>scripts/</code>. Read the tool runner and
+          result-card folder last to understand the generated-plugin contract end to end.
+        </div>
+      </section>
+
+      <footer>
+        <span>Repository map for Raynard · generated from the current source layout</span>
+        <span><a href="#top">Back to top ↑</a> · <a href="data-flow.html">Open the agent data-flow map →</a></span>
+      </footer>
+    </main>
+
+    <script>
+      const tree = document.querySelector('#codeTree');
+      const search = document.querySelector('#treeSearch');
+      const toggle = document.querySelector('#toggleTree');
+      let expanded = true;
+
+      function setAllFolders(open) {
+        tree.querySelectorAll('details').forEach((details) => {
+          details.open = open;
+        });
+        expanded = open;
+        toggle.textContent = open ? 'Collapse' : 'Expand';
+      }
+
+      toggle.addEventListener('click', () => setAllFolders(!expanded));
+
+      search.addEventListener('input', () => {
+        const query = search.value.trim().toLowerCase();
+        const terms = query.split(/\s+/).filter(Boolean);
+        const items = [...tree.querySelectorAll('.tree-item')];
+
+        if (!query) {
+          items.forEach((item) => {
+            item.hidden = false;
+          });
+          return;
+        }
+
+        items.forEach((item) => {
+          const ownText = (item.dataset.search || item.textContent || '').toLowerCase();
+          const descendantMatch = [...item.querySelectorAll('.tree-item')].some((child) =>
+            terms.every((term) =>
+              (child.dataset.search || child.textContent || '').toLowerCase().includes(term)
+            )
+          );
+          const ownMatch = terms.every((term) => ownText.includes(term));
+          item.hidden = !ownMatch && !descendantMatch;
+          if (item.tagName === 'DETAILS' && !item.hidden) item.open = true;
+        });
+      });
+    </script>
+  </body>
+</html>

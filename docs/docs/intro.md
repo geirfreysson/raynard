@@ -24,5 +24,6 @@ confirmation before entering **Build** mode.
 
 1. Follow [Getting started](./getting-started.md) to run the desktop app.
 2. Learn how [chat and model roles](./chat-and-models.md) work.
-3. See how Raynard creates and runs [generated plugins](./plugins.md).
-4. Use the [development guide](./development.md) when changing the app.
+3. See how Raynard is [powered by two Pi agent loops](./powered-by-pi.md).
+4. Learn how Raynard creates and runs [generated plugins](./plugins.md).
+5. Use the [development guide](./development.md) when changing the app.
