@@ -3,88 +3,10 @@ import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import homepageCopy from '../content/homepage-copy.json';
 import styles from './index.module.css';
 
-const extensionRowA = [
-  'Postgres', 'Snowflake', 'BigQuery', 'Stripe', 'Salesforce',
-  'HubSpot', 'Slack', 'Notion', 'Zendesk', 'QuickBooks',
-  'Shopify', 'Sheets', 'S3', 'MongoDB', 'Twilio',
-  'Plaid', 'Segment', 'Mixpanel', 'Airtable', 'Your API',
-];
-
-const extensionRowB = [...extensionRowA].reverse();
-
-const featureCards = [
-  {
-    icon: '”',
-    title: 'Cited answers',
-    body: 'Every figure Raynard gives you links back to the API response and source reference it came from.',
-  },
-  {
-    icon: '⇄',
-    title: 'Connect anything',
-    body: 'Send Raynard a link to an API’s docs and it can build the connection for you—no config files.',
-  },
-  {
-    icon: '$',
-    title: 'Plain English, real numbers',
-    body: 'Ask questions the way you would ask a colleague. Get grounded numbers, not guesses.',
-  },
-  {
-    icon: '⌘',
-    title: 'Native to your Mac',
-    body: 'A real desktop app that keeps conversations, connections, and credentials under your control.',
-  },
-];
-
-const steps = [
-  {
-    title: 'Point it at your data',
-    body: 'Paste a link to an API’s docs or request a data source. Raynard sets up the extension after you approve it.',
-  },
-  {
-    title: 'Ask in plain English',
-    body: 'No query language and no dashboard to build. Just type the question you actually have.',
-  },
-  {
-    title: 'Get answers with receipts',
-    body: 'Every number retains its source, so you can double-check the evidence before you rely on it.',
-  },
-];
-
-const promptShowcases = [
-  {
-    title: 'Refunds, broken down and sourced',
-    prompt: 'What was our Stripe refund rate last quarter, by plan?',
-    body: 'With a Stripe plugin installed, Raynard can compare refunds and charges and break the result down by plan.',
-    bullets: [
-      'Returns source references with the supporting transactions',
-      'Queries the API again when you rerun the question',
-    ],
-    mediaLabel: 'Stripe refund analysis screenshot',
-  },
-  {
-    title: 'Find leads that went quiet',
-    prompt: 'Which Salesforce leads went cold after their demo?',
-    body: 'An installed Salesforce plugin can compare demo dates with the latest recorded activity.',
-    bullets: [
-      'Returns the matching records with source links',
-      'Keeps the supporting API response with the result',
-    ],
-    mediaLabel: 'Salesforce lead analysis screenshot',
-    reverse: true,
-  },
-  {
-    title: 'Surface inventory below target',
-    prompt: 'Show me warehouse inventory turns below target this month.',
-    body: 'A generated inventory plugin can compare current records with the target thresholds exposed by its API.',
-    bullets: [
-      'Returns the affected SKUs with supporting references',
-      'Reruns against current data when thresholds change',
-    ],
-    mediaLabel: 'Warehouse inventory analysis screenshot',
-  },
-];
+const extensionRowB = [...homepageCopy.extensions.items].reverse();
 
 function ExtensionRow({items, reverse = false}) {
   const repeated = [...items, ...items];
@@ -100,20 +22,20 @@ function ExtensionRow({items, reverse = false}) {
 }
 
 function Hero() {
+  const {hero, extensions} = homepageCopy;
+
   return (
     <>
       <header className={styles.hero}>
-        <p className={styles.eyebrow}>Desktop app for macOS</p>
-        <Heading as="h1" className={styles.heroTitle}>The AI analyst that cites its sources</Heading>
+        <p className={styles.eyebrow}>{hero.eyebrow}</p>
+        <Heading as="h1" className={styles.heroTitle}>{hero.title}</Heading>
         <p className={styles.heroSlogan}>
-          Talk <span>data</span> to me.
+          {hero.slogan.before} <span>{hero.slogan.emphasis}</span> {hero.slogan.after}
         </p>
-        <p className={styles.heroBody}>
-          Raynard connects to data APIs so you can ask questions in plain English—every number comes back with a reference you can check.
-        </p>
+        <p className={styles.heroBody}>{hero.body}</p>
         <div className={styles.heroActions}>
-          <Link className={styles.primaryButton} to="/docs/getting-started">Download for macOS</Link>
-          <Link className={styles.secondaryButton} to="/docs/intro">Read the Docs</Link>
+          <Link className={styles.primaryButton} to={hero.primaryAction.to}>{hero.primaryAction.label}</Link>
+          <Link className={styles.secondaryButton} to={hero.secondaryAction.to}>{hero.secondaryAction.label}</Link>
         </div>
 
         <div className={styles.demoFrame}>
@@ -126,26 +48,30 @@ function Hero() {
             <div className={styles.playButton} aria-hidden="true">
               <span className={styles.playIcon} />
             </div>
-            <span className={styles.demoLabel}>Product demo — cited answers from live API data</span>
+            <span className={styles.demoLabel}>{hero.demoLabel}</span>
           </div>
         </div>
       </header>
 
-      <section className={styles.extensionsSection} aria-labelledby="extensions-heading">
-        <h2 className={styles.eyebrow} id="extensions-heading">40+ extensions, ready on install</h2>
-        <div className={styles.extensionMarquee}>
-          <ExtensionRow items={extensionRowA} />
-          <ExtensionRow items={extensionRowB} reverse />
-        </div>
-      </section>
+      {extensions.enabled && (
+        <section className={styles.extensionsSection} aria-labelledby="extensions-heading">
+          <h2 className={styles.eyebrow} id="extensions-heading">{extensions.heading}</h2>
+          <div className={styles.extensionMarquee}>
+            <ExtensionRow items={extensions.items} />
+            <ExtensionRow items={extensionRowB} reverse />
+          </div>
+        </section>
+      )}
     </>
   );
 }
 
 function PromptShowcases() {
+  const {showcases} = homepageCopy;
+
   return (
-    <section className={styles.showcaseSection} aria-label="Example prompts">
-      {promptShowcases.map((showcase) => (
+    <section className={styles.showcaseSection} aria-label={showcases.ariaLabel}>
+      {showcases.items.map((showcase) => (
         <article
           className={clsx(styles.showcaseRow, showcase.reverse && styles.showcaseRowReverse)}
           key={showcase.title}
@@ -164,9 +90,9 @@ function PromptShowcases() {
           <div
             className={styles.screenshotPlaceholder}
             role="img"
-            aria-label={`Placeholder for ${showcase.mediaLabel}`}
+            aria-label={showcase.mediaLabel}
           >
-            <span>Screenshot</span>
+            <span>{showcases.placeholderText}</span>
           </div>
         </article>
       ))}
@@ -175,14 +101,16 @@ function PromptShowcases() {
 }
 
 function Features() {
+  const {features} = homepageCopy;
+
   return (
     <section className={styles.section}>
       <div className={styles.sectionHeading}>
-        <p className={styles.eyebrow}>Why Raynard</p>
-        <Heading as="h2">Built for analysts who need proof</Heading>
+        <p className={styles.eyebrow}>{features.eyebrow}</p>
+        <Heading as="h2">{features.title}</Heading>
       </div>
       <div className={styles.featureGrid}>
-        {featureCards.map((feature) => (
+        {features.cards.map((feature) => (
           <article className={styles.featureCard} key={feature.title}>
             <span className={styles.featureIcon}>{feature.icon}</span>
             <h3>{feature.title}</h3>
@@ -195,14 +123,16 @@ function Features() {
 }
 
 function HowItWorks() {
+  const {howItWorks} = homepageCopy;
+
   return (
     <section className={clsx(styles.section, styles.stepsSection)}>
       <div className={styles.sectionHeading}>
-        <p className={styles.eyebrow}>How it works</p>
-        <Heading as="h2">From question to receipt in three steps</Heading>
+        <p className={styles.eyebrow}>{howItWorks.eyebrow}</p>
+        <Heading as="h2">{howItWorks.title}</Heading>
       </div>
       <div className={styles.steps}>
-        {steps.map((step, index) => (
+        {howItWorks.steps.map((step, index) => (
           <article className={styles.step} key={step.title}>
             <span className={styles.stepNumber}>{index + 1}</span>
             <h3>{step.title}</h3>
@@ -215,11 +145,13 @@ function HowItWorks() {
 }
 
 function CTA() {
+  const {cta} = homepageCopy;
+
   return (
     <section className={styles.cta}>
-      <Heading as="h2">Ready to talk data?</Heading>
-      <p>Connect your sources and start asking questions.</p>
-      <Link className={styles.primaryButton} to="/docs/getting-started">Download for macOS</Link>
+      <Heading as="h2">{cta.title}</Heading>
+      <p>{cta.body}</p>
+      <Link className={styles.primaryButton} to={cta.action.to}>{cta.action.label}</Link>
     </section>
   );
 }
@@ -227,7 +159,7 @@ function CTA() {
 export default function Home() {
   const {siteConfig} = useDocusaurusContext();
   return (
-    <Layout title={siteConfig.title} description="Talk to data APIs in plain English with Raynard.">
+    <Layout title={siteConfig.title} description={homepageCopy.meta.description}>
       <main className={styles.page}>
         <Hero />
         <Features />

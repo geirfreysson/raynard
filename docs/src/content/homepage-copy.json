@@ -1,0 +1,141 @@
+{
+  "meta": {
+    "description": "Talk to data APIs in plain English with Raynard."
+  },
+  "hero": {
+    "eyebrow": "Desktop app for macOS",
+    "title": "The AI analyst that cites its sources",
+    "slogan": {
+      "before": "Talk",
+      "emphasis": "data",
+      "after": "to me."
+    },
+    "body": "Raynard connects to data APIs so you can ask questions in plain English—every number comes back with a reference you can check.",
+    "primaryAction": {
+      "label": "Download for macOS",
+      "to": "/docs/getting-started"
+    },
+    "secondaryAction": {
+      "label": "Read the Docs",
+      "to": "/docs/intro"
+    },
+    "demoLabel": "Product demo — cited answers from live API data"
+  },
+  "extensions": {
+    "enabled": false,
+    "heading": "40+ extensions, ready on install",
+    "items": [
+      "Postgres",
+      "Snowflake",
+      "BigQuery",
+      "Stripe",
+      "Salesforce",
+      "HubSpot",
+      "Slack",
+      "Notion",
+      "Zendesk",
+      "QuickBooks",
+      "Shopify",
+      "Sheets",
+      "S3",
+      "MongoDB",
+      "Twilio",
+      "Plaid",
+      "Segment",
+      "Mixpanel",
+      "Airtable",
+      "Your API"
+    ]
+  },
+  "features": {
+    "eyebrow": "Why Raynard",
+    "title": "Built for analysts who need proof",
+    "cards": [
+      {
+        "icon": "”",
+        "title": "Cited answers",
+        "body": "Every figure Raynard gives you links back to the API response and source reference it came from."
+      },
+      {
+        "icon": "⇄",
+        "title": "Connect anything",
+        "body": "Send Raynard a link to an API’s docs and it can build the connection for you—no config files."
+      },
+      {
+        "icon": "$",
+        "title": "Plain English, real numbers",
+        "body": "Ask questions the way you would ask a colleague. Get grounded numbers, not guesses."
+      },
+      {
+        "icon": "⌘",
+        "title": "Native to your Mac",
+        "body": "A real desktop app that keeps conversations, connections, and credentials under your control."
+      }
+    ]
+  },
+  "showcases": {
+    "ariaLabel": "Example prompts",
+    "placeholderText": "Screenshot",
+    "items": [
+      {
+        "title": "Create your own extension with one prompt",
+        "prompt": "Please add World Bank data for me to chat with, it's at data360.worldbank.org/en/api",
+        "body": "",
+        "bullets": [
+          "Builds and tests an API connector with just a prompt",
+          "The agent will have access to this data source in future chats",
+          "Share your connector with the community or keep it private on your own machine"
+
+        ],
+        "mediaLabel": "Placeholder for Stripe refund analysis screenshot"
+      },
+      {
+        "title": "Find leads that went quiet",
+        "prompt": "Which Salesforce leads went cold after their demo?",
+        "body": "An installed Salesforce plugin can compare demo dates with the latest recorded activity.",
+        "bullets": [
+          "Returns the matching records with source links",
+          "Keeps the supporting API response with the result"
+        ],
+        "mediaLabel": "Placeholder for Salesforce lead analysis screenshot",
+        "reverse": true
+      },
+      {
+        "title": "Surface inventory below target",
+        "prompt": "Show me warehouse inventory turns below target this month.",
+        "body": "A generated inventory plugin can compare current records with the target thresholds exposed by its API.",
+        "bullets": [
+          "Returns the affected SKUs with supporting references",
+          "Reruns against current data when thresholds change"
+        ],
+        "mediaLabel": "Placeholder for warehouse inventory analysis screenshot"
+      }
+    ]
+  },
+  "howItWorks": {
+    "eyebrow": "How it works",
+    "title": "From question to receipt in three steps",
+    "steps": [
+      {
+        "title": "Point it at your data",
+        "body": "Paste a link to an API’s docs or request a data source. Raynard sets up the extension after you approve it."
+      },
+      {
+        "title": "Ask in plain English",
+        "body": "No query language and no dashboard to build. Just type the question you actually have."
+      },
+      {
+        "title": "Get answers with receipts",
+        "body": "Every number retains its source, so you can double-check the evidence before you rely on it."
+      }
+    ]
+  },
+  "cta": {
+    "title": "Ready to talk data?",
+    "body": "Connect your sources and start asking questions.",
+    "action": {
+      "label": "Download for macOS",
+      "to": "/docs/getting-started"
+    }
+  }
+}
