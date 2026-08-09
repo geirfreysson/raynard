@@ -416,6 +416,64 @@ fn append_agent_turn_log(app: tauri::AppHandle, event: AgentTurnLogEvent) -> Res
         .map_err(|error| format!("Could not write agent turn log: {error}"))
 }
 
+/// Accepts only plain http(s) URLs. The platform opener treats a bare path as a
+/// file and a leading `-` as a flag, so anything else is refused rather than
+/// handed to it. No shell is involved, so there is no quoting to get wrong.
+fn external_url_target(url: &str) -> Option<&str> {
+    let trimmed = url.trim();
+    if trimmed.starts_with('-') {
+        return None;
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("http://") && !lowered.starts_with("https://") {
+        return None;
+    }
+    // Reject a bare scheme with no host.
+    let rest = &trimmed[trimmed.find("//")? + 2..];
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    Some(trimmed)
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let target = external_url_target(&url)
+        .ok_or_else(|| "Refusing to open a link that is not a plain http(s) URL.".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(target);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", target]);
+        command
+    };
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the link in a browser: {error}"))
+}
+
 #[tauri::command]
 fn delete_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<(), String> {
     let safe_chat_id = normalize_chat_id(&chat_id);
@@ -3027,14 +3085,43 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plugin_tools_stub, ensure_shared_plugin_sdk, generated_plugin_source_mtime_millis,
-        load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis,
+        build_plugin_tools_stub, ensure_shared_plugin_sdk, external_url_target,
+        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
+        next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
         read_generated_plugin_manifest, BuilderStreamEvent, GeneratedPluginTool,
         PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn external_url_target_accepts_only_plain_http_urls() {
+        assert_eq!(
+            external_url_target("https://data360api.worldbank.org/data360/data?REF_AREA=GBR"),
+            Some("https://data360api.worldbank.org/data360/data?REF_AREA=GBR")
+        );
+        assert_eq!(
+            external_url_target("  http://example.com/page  "),
+            Some("http://example.com/page")
+        );
+        assert_eq!(external_url_target("HTTPS://example.com"), Some("HTTPS://example.com"));
+
+        for rejected in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>",
+            "/relative/path",
+            "#section",
+            "",
+            "   ",
+            "-flag",
+            "https://example.com --background",
+            "https://",
+            "http:///no-host",
+        ] {
+            assert_eq!(external_url_target(rejected), None, "expected {rejected:?} to be refused");
+        }
+    }
 
     #[test]
     fn plugin_builder_request_accepts_structured_card_edit_metadata() {
@@ -3255,6 +3342,7 @@ pub fn run() {
             execute_generated_plugin_tool,
             get_plugin_scaffold_status,
             load_llm_env_status,
+            open_external_url,
             list_generated_plugins,
             list_chat_history,
             list_model_providers,

@@ -9,6 +9,7 @@ import {
   type IconNode
 } from 'lucide';
 import { getErrorMessage } from './errors';
+import { attachExternalLinkHandler } from './external-links';
 import {
   cancelAgentTurnStream,
   runMainAgentStream,
@@ -473,6 +474,13 @@ extensionDeleteModal?.addEventListener('click', (event) => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && pendingExtensionDelete) {
     resolveExtensionDelete(false);
+  }
+});
+attachExternalLinkHandler(document, async (url) => {
+  try {
+    await invoke('open_external_url', { url });
+  } catch (error) {
+    console.error('Could not open link in the browser:', getErrorMessage(error));
   }
 });
 
@@ -2733,9 +2741,9 @@ function appendInlineMarkdownSafe(container: HTMLElement, text: string) {
       code.textContent = match[1];
       container.appendChild(code);
     } else if (match[2] && match[3]) {
+      // No target="_blank": the delegated handler forwards the click to the OS browser.
       const link = document.createElement('a');
       link.href = match[3];
-      link.target = '_blank';
       link.rel = 'noreferrer noopener';
       link.textContent = match[2];
       container.appendChild(link);
