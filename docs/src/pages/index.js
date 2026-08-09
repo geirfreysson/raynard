@@ -52,6 +52,40 @@ const steps = [
   },
 ];
 
+const promptShowcases = [
+  {
+    title: 'Refunds, broken down and sourced',
+    prompt: 'What was our Stripe refund rate last quarter, by plan?',
+    body: 'With a Stripe plugin installed, Raynard can compare refunds and charges and break the result down by plan.',
+    bullets: [
+      'Returns source references with the supporting transactions',
+      'Queries the API again when you rerun the question',
+    ],
+    mediaLabel: 'Stripe refund analysis screenshot',
+  },
+  {
+    title: 'Find leads that went quiet',
+    prompt: 'Which Salesforce leads went cold after their demo?',
+    body: 'An installed Salesforce plugin can compare demo dates with the latest recorded activity.',
+    bullets: [
+      'Returns the matching records with source links',
+      'Keeps the supporting API response with the result',
+    ],
+    mediaLabel: 'Salesforce lead analysis screenshot',
+    reverse: true,
+  },
+  {
+    title: 'Surface inventory below target',
+    prompt: 'Show me warehouse inventory turns below target this month.',
+    body: 'A generated inventory plugin can compare current records with the target thresholds exposed by its API.',
+    bullets: [
+      'Returns the affected SKUs with supporting references',
+      'Reruns against current data when thresholds change',
+    ],
+    mediaLabel: 'Warehouse inventory analysis screenshot',
+  },
+];
+
 function ExtensionRow({items, reverse = false}) {
   const repeated = [...items, ...items];
   return (
@@ -70,7 +104,7 @@ function Hero() {
     <>
       <header className={styles.hero}>
         <p className={styles.eyebrow}>Desktop app for macOS</p>
-        <Heading as="h1" className={styles.heroTitle}>The open source AI analyst that cites its sources</Heading>
+        <Heading as="h1" className={styles.heroTitle}>The AI analyst that cites its sources</Heading>
         <p className={styles.heroSlogan}>
           Talk <span>data</span> to me.
         </p>
@@ -89,7 +123,10 @@ function Hero() {
             <span className={styles.dotGreen} />
           </div>
           <div className={styles.demoMedia}>
-            <img src="/img/screenshots/raynard-chat.svg" alt="Raynard chatting with live API data" />
+            <div className={styles.playButton} aria-hidden="true">
+              <span className={styles.playIcon} />
+            </div>
+            <span className={styles.demoLabel}>Product demo — cited answers from live API data</span>
           </div>
         </div>
       </header>
@@ -102,6 +139,38 @@ function Hero() {
         </div>
       </section>
     </>
+  );
+}
+
+function PromptShowcases() {
+  return (
+    <section className={styles.showcaseSection} aria-label="Example prompts">
+      {promptShowcases.map((showcase) => (
+        <article
+          className={clsx(styles.showcaseRow, showcase.reverse && styles.showcaseRowReverse)}
+          key={showcase.title}
+        >
+          <div className={styles.showcaseText}>
+            <Heading as="h3">{showcase.title}</Heading>
+            <div className={styles.promptQuote}>
+              <span aria-hidden="true">&gt;</span>
+              <q>{showcase.prompt}</q>
+            </div>
+            <p>{showcase.body}</p>
+            <ul>
+              {showcase.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}
+            </ul>
+          </div>
+          <div
+            className={styles.screenshotPlaceholder}
+            role="img"
+            aria-label={`Placeholder for ${showcase.mediaLabel}`}
+          >
+            <span>Screenshot</span>
+          </div>
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -162,6 +231,7 @@ export default function Home() {
       <main className={styles.page}>
         <Hero />
         <Features />
+        <PromptShowcases />
         <HowItWorks />
         <CTA />
       </main>
