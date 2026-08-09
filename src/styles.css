@@ -723,8 +723,9 @@ textarea:focus {
 }
 
 .message {
+  /* Track the .messages container so the transcript stays as wide as the composer. */
   width: 100%;
-  max-width: min(780px, 100%);
+  max-width: 100%;
   padding: 12px 14px;
   border-left: 4px solid transparent;
 }
