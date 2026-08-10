@@ -12,6 +12,7 @@ const pluginDir = join(scriptsDir, 'fixtures', 'reference-plugin');
 const brokenPluginDir = join(scriptsDir, 'fixtures', 'broken-plugin');
 const compactPluginDir = join(scriptsDir, 'fixtures', 'compact-plugin');
 const cachePluginDir = join(scriptsDir, 'fixtures', 'cache-plugin');
+const credentialPluginDir = join(scriptsDir, 'fixtures', 'credential-plugin');
 
 function runTool(payload, dir = pluginDir) {
   const result = spawnSync('node', [runnerPath], {
@@ -144,5 +145,93 @@ describe('plugin tool runner integration', () => {
       if (server.listening) server.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  describe('credentials', () => {
+    async function withServer(handler, run) {
+      const server = createServer(handler);
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      try {
+        return await run(`http://127.0.0.1:${server.address().port}/records`);
+      } finally {
+        if (server.listening) {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      }
+    }
+
+    it('passes host-supplied credentials through to the tool', async () => {
+      await withServer(
+        (_request, response) => {
+          response.setHeader('content-type', 'application/json');
+          response.end(JSON.stringify({ value: 'authorized' }));
+        },
+        async (url) => {
+          const called = await runToolAsync(
+            {
+              toolName: 'credential_lookup',
+              args: { url },
+              credentials: { FIXTURE_API_KEY: 'fixture-secret-value' }
+            },
+            credentialPluginDir
+          );
+
+          expect(called.status).toBe(0);
+          expect(called.payload.ok).toBe(true);
+          expect(called.payload.result.text).toContain('fixture-secret-value');
+        }
+      );
+    });
+
+    it('reports a structured credential request instead of a bare failure', () => {
+      const called = runTool(
+        { toolName: 'credential_lookup', args: { url: 'http://127.0.0.1:1/records' } },
+        credentialPluginDir
+      );
+
+      expect(called.status).toBe(1);
+      expect(called.payload.ok).toBe(false);
+      expect(called.payload.credentialRequest).toEqual({
+        key: 'FIXTURE_API_KEY',
+        label: 'Fixture API key'
+      });
+      expect(called.payload.error).toMatch(/FIXTURE_API_KEY/);
+    });
+
+    it('discovers tools without credentials so the builder never needs a key', () => {
+      const listed = runTool({ listTools: true }, credentialPluginDir);
+
+      expect(listed.status).toBe(0);
+      expect(listed.payload.ok).toBe(true);
+      expect(listed.payload.result.tools).toEqual([
+        expect.objectContaining({ name: 'credential_lookup', callable: true })
+      ]);
+    });
+
+    it('keeps a query-parameter credential out of the failure it reports', async () => {
+      await withServer(
+        (_request, response) => {
+          response.statusCode = 500;
+          response.setHeader('content-type', 'application/json');
+          response.end(JSON.stringify({ message: 'rejected key fixture-secret-value' }));
+        },
+        async (url) => {
+          const called = await runToolAsync(
+            {
+              toolName: 'credential_lookup',
+              args: { url },
+              credentials: { FIXTURE_API_KEY: 'fixture-secret-value' }
+            },
+            credentialPluginDir
+          );
+
+          expect(called.status).toBe(1);
+          expect(called.payload.ok).toBe(false);
+          // The key is in both the request URL and the upstream error body.
+          expect(JSON.stringify(called.payload)).not.toContain('fixture-secret-value');
+          expect(called.payload.error).toContain('***');
+        }
+      );
+    });
   });
 });

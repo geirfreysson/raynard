@@ -91,7 +91,11 @@ function executePluginTool(toolRequest, signal) {
       try {
         const payload = JSON.parse(lastLine);
         if (!payload.ok) {
-          reject(new Error(payload.error || 'Plugin tool failed.'));
+          const failure = new Error(payload.error || 'Plugin tool failed.');
+          // Carry a missing-credential signal through the rejection so the
+          // tool wrapper can end the turn with a prompt rather than an error.
+          if (payload.credentialRequest) failure.credentialRequest = payload.credentialRequest;
+          reject(failure);
           return;
         }
         resolve(payload.result);
@@ -103,16 +107,23 @@ function executePluginTool(toolRequest, signal) {
       JSON.stringify({
         pluginDir: toolRequest.pluginDir,
         toolName: toolRequest.toolName,
-        args: toolRequest.args
+        args: toolRequest.args,
+        credentials: toolRequest.credentials || {}
       })
     );
   });
 }
 
+let credentialRequest = null;
 const generatedTools = createGeneratedPluginTools({
   Type,
   plugins: request.plugins,
-  executePluginTool
+  executePluginTool,
+  onCredentialRequest: (nextRequest) => {
+    credentialRequest = nextRequest;
+    // Reuses the generic `result` field so no Rust stream change is needed.
+    emit({ type: 'credential_request', result: nextRequest });
+  }
 });
 let buildRequest = null;
 let directAnswer = null;
@@ -217,10 +228,12 @@ const unsubscribe = agent.subscribe((event) => {
 try {
   await agent.prompt(String(currentMessage.content).trim());
   unsubscribe();
-  // A direct answer or a build request is a legitimate terminal outcome even
-  // when the underlying round reports a stop reason.
+  // A direct answer, a build request, or a credential request is a legitimate
+  // terminal outcome even when the underlying round reports a stop reason.
+  // Each of these ends the turn with no assistant text, so without this guard
+  // the host would replace the prompt card with an error bubble.
   const failed = lastStopReason === 'error' || lastStopReason === 'aborted';
-  if (!directAnswer && !buildRequest && (failed || !lastMessageHadText)) {
+  if (!directAnswer && !buildRequest && !credentialRequest && (failed || !lastMessageHadText)) {
     const reason =
       lastErrorMessage ||
       (lastStopReason === 'aborted'
@@ -235,7 +248,13 @@ try {
     emit({ type: 'error', error: detail, stopReason: lastStopReason });
     process.exit(1);
   }
-  emit({ type: 'done', text: directAnswer || finalText, buildRequest, stopReason: lastStopReason });
+  emit({
+    type: 'done',
+    text: directAnswer || finalText,
+    buildRequest,
+    result: credentialRequest || undefined,
+    stopReason: lastStopReason
+  });
 } catch (error) {
   unsubscribe();
   const message = error?.message || String(error);

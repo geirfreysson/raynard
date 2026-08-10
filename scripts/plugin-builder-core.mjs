@@ -166,7 +166,7 @@ Hard constraints:
 - Do not build React components.
 - Do not create pages, routes, CSS, visual explorers, or standalone UI.
 - Do not modify the host app.
-- Do not store API keys or secrets in source.
+- Never hard-code, print, echo, or commit an API key. If the API needs one, declare it and read it from the host at runtime, as described under Authentication below.
 - Work test-first: create or update executable tests that fail for the missing API behavior before writing the fetcher implementation.
 - Use the Node built-in test runner. Test files must end in .test.ts, .test.js, or .test.mjs and run with node --test.
 - Use explicit .ts extensions for local ESM imports so node --test can execute the source directly, for example import { fetchItems } from './client.ts'.
@@ -181,13 +181,24 @@ Hard constraints:
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
 - Query-parameter names must come from the documented API surface, spelled exactly as the API expects, including case. APIs commonly ignore unknown parameters and silently return unfiltered data, which looks like a working tool that quietly answers the wrong question.
 - Because tests mock the network, a misspelled parameter still passes a response-shape assertion. Any tool exposing a filter, range, or pagination parameter MUST have a test asserting the built request URL contains that parameter, not only that the mocked response was parsed.
+- That assertion catches a renamed or misspelled query key and nothing more: a mocked test proves only what the plugin SENT, never that the API honored it. Exercise filters against the live API while building, and write what you observe into the tool and parameter descriptions.
 - Treat provided API documentation as a whole API surface. Do not only build the single narrow call implied by the user's latest question unless the docs truly cover only that call.
 - Build a practical suite of focused tools for important list/search, detail, user/account, metadata/status, and update/history endpoints when available.
 - Prefer multiple focused tools over one broad generic tool.
 - If scope forces a subset, document the broader API in README.md under "Endpoint Inventory". Mark every endpoint Implemented, Planned, or Not applicable.
 - For unimplemented endpoints record path, purpose, required and optional parameters, response shape, pagination/rate limits, and a proposed future tool.
 - Every exported tool must have a routing-quality description and a JSON parameter schema with descriptions, required fields, enum values, and useful optional limits or filters.
+- A tool's description and its parameter descriptions are the ONLY plugin text the Explore agent ever sees at runtime. README.md, code comments, and plugin.json never reach it. Anything a caller must know to use the endpoint correctly belongs in those descriptions, not only in README.md.
+- So record, in the tool description or in the specific parameter's description: parameters that only take effect in combination or are ignored on their own; inputs the API silently drops; defaults applied when a parameter is omitted; result caps, maximum page size, and how to page; the sort order of results; the format and source of IDs and codes; units; and which tool to call before or after this one.
+- Put a per-parameter rule on that parameter's description and whole-endpoint behavior on the tool description. README.md may repeat any of it for human readers, but must never be its only home.
 - Update README.md with implemented tools, the endpoint inventory, future endpoint notes, and source docs.
+- Authentication. If the API requires a key, token, or app id:
+  - Declare every secret in plugin.json under "auth": { "credentials": [ { "key": "PROVIDER_API_KEY", "label": "Provider API key", "description": "short note, e.g. free tier", "signupUrl": "https://the page where a user signs up for the key" } ] }. The key must be UPPER_SNAKE_CASE; the label and signupUrl are required.
+  - signupUrl must be the specific page where a user obtains the key, not the generic API docs root.
+  - Read the value with requireCredential('PROVIDER_API_KEY') from @raynard/plugin-sdk, INSIDE execute(), never at module load. Tool discovery runs before any key is configured and must not throw.
+  - Document each credential in README.md under an "## Authentication" heading, and include its sign-up URL there verbatim. This is how a user finds out where the key came from later.
+  - Do NOT ask the user for the key and do NOT read process.env or a .env file. The host stores it in the OS keychain and supplies it at call time; when it is missing, the host prompts the user for you.
+  - Keep tests fully mocked. The builder never has a real key, so tests must never depend on one.
 - Set plugin.json.samplePrompts to exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>".
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
@@ -208,7 +219,7 @@ import { createApiReference, defineTools } from '@raynard/plugin-sdk';
 export const tools = defineTools({
   // Every API tool declares a fixed card and returns matching \`data\`.
   example_get_thing: {
-    description: 'What question this answers, what API data it fetches, limits, and follow-up tools.',
+    description: 'What question this answers, what API data it fetches, result caps and ordering, any parameter the API ignores on its own, and follow-up tools.',
     parameters: {
       type: 'object',
       required: ['id'],
@@ -321,8 +332,9 @@ How to work:
 - Cards live on tools in tools.ts: a tool's \`card\` property is its result card, and the tool name tells you which card it is (e.g. the "monster card" is the \`card\` on the dnd_get_monster tool). To change a card, edit that tool's \`card\` template.
 - Make the SMALLEST change that satisfies the user's request. Preserve existing tool names, behavior, exports, and passing tests. Do not rewrite the plugin from scratch or delete working code.
 - Reuse helpers and types from @raynard/plugin-sdk. Do not add local SDK, runtime, reference, or testing wrappers.
+- When an edit changes parameters, filters, limits, defaults, result ordering, or any other observable API behavior, update that tool's description and parameter descriptions in the SAME turn. Those descriptions are the only plugin text the Explore agent sees at runtime — README.md and comments never reach it — so a stale description silently teaches the agent to call the tool wrongly.
 - Stay within the plugin. Do not modify the host app. Do not build React, pages, routes, CSS, or any UI — this is TypeScript API tooling only.
-- Keep secrets out of source.
+- Keep secrets out of source. If this edit makes the plugin need an API key, declare it in plugin.json under auth.credentials with a label and a signupUrl (the page where a user gets the key), read it with requireCredential('KEY') inside execute(), and document it in README.md under an "## Authentication" heading including that URL. Never read process.env, and never ask the user for the key yourself — the host prompts for it and supplies it at call time.
 - Tests: use your bash tool to run \`node --test <files>\` when the user asks or after a substantive change, and fix failures. You are not forced to pass whole-plugin validation on every turn — respond to what the user asked.
 
 ${cardFastPath}
@@ -466,11 +478,53 @@ function validateToolCard(tool) {
   }
 }
 
+const CREDENTIAL_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Reads and cleans plugin.json auth.credentials. A declaration without a usable
+ * sign-up page is dropped: the host prompt's only job is to send the user
+ * somewhere to get a key, so a declaration that cannot do that is a dead end.
+ */
+export function normalizePluginAuth(manifest) {
+  const entries = Array.isArray(manifest?.auth?.credentials) ? manifest.auth.credentials : [];
+  const credentials = [];
+  for (const entry of entries) {
+    const key = String(entry?.key || '').trim();
+    const signupUrl = String(entry?.signupUrl || '').trim();
+    const label = String(entry?.label || '').trim();
+    if (!CREDENTIAL_KEY_PATTERN.test(key)) continue;
+    if (!/^https?:\/\//i.test(signupUrl)) continue;
+    if (!label) continue;
+    if (credentials.some((existing) => existing.key === key)) continue;
+    credentials.push({
+      key,
+      label: label.slice(0, 120),
+      description: String(entry?.description || '').trim().slice(0, 240),
+      signupUrl
+    });
+    if (credentials.length === 8) break;
+  }
+  return credentials;
+}
+
+/** Credential names the plugin actually reads at runtime. */
+export function findUsedCredentialKeys(sources) {
+  const text = Array.isArray(sources) ? sources.join('\n') : String(sources || '');
+  const used = new Set();
+  for (const match of text.matchAll(/requireCredential\(\s*['"`]([^'"`]+)['"`]/g)) {
+    const key = match[1].trim();
+    if (key) used.add(key);
+  }
+  return [...used].sort();
+}
+
 export function validatePluginArtifacts({
   files,
   readme,
   tools,
   samplePrompts,
+  auth,
+  sources,
   requireSamplePrompts = false
 }) {
   const testFiles = findPluginTestFiles(files);
@@ -505,7 +559,36 @@ export function validatePluginArtifacts({
       );
     }
   }
+  const credentials = normalizePluginAuth(auth ? { auth } : undefined);
+  const usedCredentialKeys = findUsedCredentialKeys(sources);
+  const undeclared = usedCredentialKeys.filter(
+    (key) => !credentials.some((credential) => credential.key === key)
+  );
+  if (undeclared.length) {
+    // Without a declaration the host cannot name the credential, link a
+    // sign-up page, or detect the gap before the call — the user would just
+    // see a failed tool.
+    throw new Error(
+      `Every credential read with requireCredential must be declared in plugin.json under auth.credentials with a label and signupUrl. Undeclared: ${undeclared.join(', ')}.`
+    );
+  }
+  if (credentials.length) {
+    const readmeText = String(readme || '');
+    if (!/^##?\s+Authentication\b/im.test(readmeText)) {
+      throw new Error(
+        'A plugin that requires credentials must document them in README.md under an "Authentication" section, including the page where the user signs up for a key.'
+      );
+    }
+    const undocumented = credentials
+      .filter((credential) => !readmeText.includes(credential.signupUrl))
+      .map((credential) => credential.key);
+    if (undocumented.length) {
+      throw new Error(
+        `The README Authentication section must include the sign-up URL for: ${undocumented.join(', ')}.`
+      );
+    }
+  }
   for (const tool of tools) validateToolCard(tool);
   const cardCount = tools.filter((tool) => tool && tool.card).length;
-  return { testFiles, toolCount: tools.length, cardCount };
+  return { testFiles, toolCount: tools.length, cardCount, credentials };
 }

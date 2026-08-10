@@ -7,7 +7,63 @@ import { join } from 'node:path';
 
 const CACHE_ENTRY_VERSION = 1;
 const HOUR_MS = 60 * 60 * 1000;
+// Values shorter than this are too likely to collide with ordinary words for
+// blind substring redaction to be safe.
+const REDACTABLE_SECRET_LENGTH = 8;
 let apiCacheConfig = { enabled: false, ttlHours: 24, directory: '' };
+// Supplied by the host at execution time and never written to disk. The
+// runner configures this before importing the plugin module.
+let credentialValues = new Map();
+
+/**
+ * Thrown when a plugin asks for a credential the host has not configured. The
+ * runner recognizes this by name and turns it into a structured request the
+ * app can answer with a prompt, instead of a bare tool failure.
+ */
+export class MissingCredentialError extends Error {
+  constructor(key, label) {
+    super(`Missing credential ${key}. Add it in the plugin's settings to use this tool.`);
+    this.name = 'MissingCredentialError';
+    this.credentialKey = key;
+    this.credentialLabel = label || key;
+  }
+}
+
+export function configureCredentials(values = {}) {
+  const next = new Map();
+  for (const [key, value] of Object.entries(values || {})) {
+    const name = String(key || '').trim();
+    const secret = typeof value === 'string' ? value.trim() : '';
+    if (name && secret) next.set(name, secret);
+  }
+  credentialValues = next;
+}
+
+export function getCredential(key) {
+  return credentialValues.get(String(key || '').trim()) || '';
+}
+
+export function requireCredential(key, label) {
+  const name = String(key || '').trim();
+  const value = credentialValues.get(name);
+  if (!value) throw new MissingCredentialError(name, label);
+  return value;
+}
+
+/**
+ * Replaces every configured credential value with a placeholder. Error text
+ * from a plugin reaches the language model, the provider, and the on-disk turn
+ * log, and APIs that take their key as a query parameter put it straight into
+ * the request URL — so every error path has to pass through here.
+ */
+export function redactSecrets(text) {
+  let output = String(text ?? '');
+  for (const value of credentialValues.values()) {
+    if (value.length < REDACTABLE_SECRET_LENGTH) continue;
+    output = output.split(value).join('***');
+  }
+  return output;
+}
 
 export function configureApiCache(options = {}) {
   const ttlHours = Number(options.ttlHours ?? 24);
@@ -153,8 +209,12 @@ export async function apiGet(url, options = {}) {
   }
   const response = await fetch(target, { headers: options.headers });
   if (!response.ok) {
+    // The target carries the query string, so an API that authenticates with
+    // ?apikey= would otherwise leak the key into the model's context.
     throw new Error(
-      `${label} request failed with HTTP ${response.status} for ${target}${await errorDetail(response)}`
+      redactSecrets(
+        `${label} request failed with HTTP ${response.status} for ${target}${await errorDetail(response)}`
+      )
     );
   }
   const payload = await response.json();
@@ -211,7 +271,7 @@ async function errorDetail(response) {
   try {
     const body = await response.json();
     const message = body && typeof body === 'object' ? body.error ?? body.message : undefined;
-    return typeof message === 'string' && message.trim() ? ` — ${message.trim()}` : '';
+    return typeof message === 'string' && message.trim() ? ` — ${redactSecrets(message.trim())}` : '';
   } catch {
     return '';
   }

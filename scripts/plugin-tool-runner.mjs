@@ -27,6 +27,13 @@ const pluginDir = String(request.pluginDir || '').trim();
 const toolName = String(request.toolName || '').trim();
 const args = request.args && typeof request.args === 'object' && !Array.isArray(request.args) ? request.args : {};
 const listTools = request.listTools === true;
+// Host-resolved secrets for this plugin. They stay in memory: they are never
+// written into the temp module directory and never reach the listTools path,
+// whose output the host caches on disk.
+const credentials =
+  request.credentials && typeof request.credentials === 'object' && !Array.isArray(request.credentials)
+    ? request.credentials
+    : {};
 const runnerDir = dirname(fileURLToPath(import.meta.url));
 const pluginDataDir = join(dirname(pluginDir), '.plugin-data', basename(pluginDir));
 
@@ -106,6 +113,9 @@ async function readCacheSettings() {
   }
 }
 
+// Hoisted so the catch below can redact secrets out of a failure message.
+let sdk = null;
+
 try {
   await writeFile(join(tempDir, 'package.json'), '{"type":"module"}\n', 'utf8');
   await preparePluginModuleDirectory(pluginDir, tempDir);
@@ -113,12 +123,15 @@ try {
   if (!existsSync(join(pluginDir, sourceEntry))) {
     throw new Error('Plugin must export its registry from tools.ts.');
   }
-  const sdk = await import(pathToFileURL(join(tempDir, 'node_modules', '@raynard', 'plugin-sdk', 'index.js')).href);
+  sdk = await import(pathToFileURL(join(tempDir, 'node_modules', '@raynard', 'plugin-sdk', 'index.js')).href);
   const cacheSettings = await readCacheSettings();
   sdk.configureApiCache({
     ...cacheSettings,
     directory: join(pluginDataDir, 'api-cache')
   });
+  // Tool discovery must stay credential-free: its result is cached to
+  // .runtime-tools.json, and the plugin builder runs it while writing code.
+  if (!listTools) sdk.configureCredentials(credentials);
   const loaded = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const plugin = loaded;
   const tools = sdk.assertToolRegistry(plugin.tools);
@@ -153,7 +166,18 @@ try {
     emit({ ok: true, result });
   }
 } catch (error) {
-  emit({ ok: false, error: error && error.message ? error.message : String(error) });
+  const rawMessage = error && error.message ? error.message : String(error);
+  const message = sdk && typeof sdk.redactSecrets === 'function' ? sdk.redactSecrets(rawMessage) : rawMessage;
+  const failure = { ok: false, error: message };
+  // A credential the host has not stored is a request for input, not a bug.
+  // The structured form lets the app prompt for the key by name.
+  if (error && error.name === 'MissingCredentialError') {
+    failure.credentialRequest = {
+      key: String(error.credentialKey || ''),
+      label: String(error.credentialLabel || error.credentialKey || '')
+    };
+  }
+  emit(failure);
   process.exit(1);
 } finally {
   await rm(tempDir, { recursive: true, force: true });

@@ -118,12 +118,22 @@ async function validatePluginWorkspace() {
   const files = await readdir(pluginDir);
   const readme = await readFile(`${pluginDir}/README.md`, 'utf8');
   let samplePrompts;
+  let auth;
   try {
     const manifest = JSON.parse(await readFile(`${pluginDir}/plugin.json`, 'utf8'));
     samplePrompts = manifest.samplePrompts;
+    auth = manifest.auth;
   } catch {
     samplePrompts = undefined;
+    auth = undefined;
   }
+  // Source text so validation can check that every credential the plugin reads
+  // is also declared and documented.
+  const sources = await Promise.all(
+    files
+      .filter((name) => /\.(?:ts|js|mjs)$/i.test(name) && !/\.(?:test|spec)\./i.test(name))
+      .map((name) => readFile(`${pluginDir}/${name}`, 'utf8').catch(() => ''))
+  );
   const runnerPath = String(request.pluginRunnerPath || '').trim();
   if (!runnerPath) throw new Error('Plugin tool runner path is missing.');
   const listed = await runCommand('node', [runnerPath], {
@@ -141,6 +151,8 @@ async function validatePluginWorkspace() {
     readme,
     tools: payload.result?.tools,
     samplePrompts,
+    auth,
+    sources,
     requireSamplePrompts: true
   });
   emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });

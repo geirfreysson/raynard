@@ -848,6 +848,12 @@ textarea:focus {
   margin: 0 0 10px;
 }
 
+/* A chart is a large block; the ordinary 10px paragraph gap leaves the text
+   that follows crowding the axis labels. */
+.message-text [data-chart-root] {
+  margin: 4px 0 20px;
+}
+
 .message-text ul,
 .message-text ol {
   padding-left: 20px;
@@ -962,6 +968,92 @@ textarea:focus {
   border-left: 3px solid var(--accent);
   background: #f5f5f5;
   color: var(--text-primary);
+}
+
+.capability-auth-notice {
+  padding: 8px 10px;
+  border-left: 3px solid rgba(60, 60, 67, 0.2);
+  background: #f5f5f5;
+  color: var(--text-primary);
+}
+
+.capability-auth-notice a,
+.credential-request a {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.plugin-credential-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-credential-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  border-radius: 8px;
+}
+
+.plugin-credential-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-credential-pill {
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #f0f0f0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.plugin-credential-pill.is-configured {
+  background: rgba(52, 143, 80, 0.14);
+  color: #2f6b41;
+}
+
+.plugin-credential-row p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.plugin-credential-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-credential-actions button {
+  min-height: 28px;
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  border-radius: 7px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.plugin-credential-link {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.models-modal-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+a.models-modal-note {
+  color: var(--accent);
+  font-weight: 650;
 }
 
 .capability-actions {

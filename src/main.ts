@@ -30,6 +30,13 @@ import {
   pluginWriteConfirmationCopy
 } from './build-request-flow';
 import {
+  allCredentialsConfigured,
+  credentialPromptCopy,
+  missingCredentialKeys,
+  retryPromptFor,
+  type CredentialRequest
+} from './credential-request-flow';
+import {
   applyBuilderToolEvent,
   planBuilderTimeline,
   type BuilderToolActivity,
@@ -97,6 +104,25 @@ type StoredChatMessage = {
   builderRun?: boolean;
   builderActivities?: BuilderToolActivity[];
   cards?: StoredResultCard[];
+  /**
+   * A tool needed an API key the user has not stored. Persisted so the prompt
+   * survives navigation and restart; it never carries a value, and whether each
+   * key is configured is re-derived from the plugin list on every render.
+   */
+  credentialRequest?: StoredCredentialRequest;
+};
+
+type StoredCredentialRequest = {
+  pluginId: string;
+  pluginName: string;
+  credentials: PluginCredentialRequirement[];
+};
+
+type PluginCredentialRequirement = {
+  key: string;
+  label: string;
+  description?: string;
+  signupUrl?: string;
 };
 
 type ChatHistoryRow = {
@@ -132,7 +158,17 @@ type GeneratedPlugin = {
   createdAt: string;
   status: string;
   samplePrompts: string[];
+  /** Declarations only. The host never sends credential values to the renderer. */
+  credentials: PluginCredential[];
   tools: GeneratedPluginTool[];
+};
+
+type PluginCredential = {
+  key: string;
+  label: string;
+  description: string;
+  signupUrl: string;
+  configured: boolean;
 };
 
 type GeneratedPluginTool = {
@@ -898,6 +934,121 @@ async function selectProvider(provider: ModelProvider, role: ModelRole, model: s
   }
 }
 
+/**
+ * Collects one plugin credential at a time in the existing provider-key modal.
+ * Reusing that shell keeps the secret out of the scrolling transcript and gets
+ * the established password-input, Escape, and focus handling for free.
+ */
+function openPluginCredentialModal(
+  plugin: { id: string; name: string },
+  pending: PluginCredentialRequirement[],
+  onDone: () => void
+) {
+  const remaining = pending.filter((credential) => credential.key);
+  if (!remaining.length) {
+    onDone();
+    return;
+  }
+  openModelsModal();
+  renderPluginCredentialStep(plugin, remaining, 0, onDone);
+}
+
+function renderPluginCredentialStep(
+  plugin: { id: string; name: string },
+  pending: PluginCredentialRequirement[],
+  index: number,
+  onDone: () => void
+) {
+  if (!modelsModalContent) return;
+  const credential = pending[index];
+  if (!credential) {
+    closeModelsModal();
+    onDone();
+    return;
+  }
+
+  if (modelsModalTitle) modelsModalTitle.textContent = credential.label;
+  if (modelsModalHint) {
+    const step = pending.length > 1 ? ` (${index + 1} of ${pending.length})` : '';
+    modelsModalHint.textContent = `Paste the key ${plugin.name} should use${step}.`;
+  }
+  modelsModalContent.innerHTML = '';
+
+  const form = document.createElement('form');
+  form.className = 'models-key-form';
+  form.autocomplete = 'off';
+
+  if (credential.description) {
+    const description = document.createElement('p');
+    description.className = 'models-modal-note';
+    description.textContent = credential.description;
+    form.appendChild(description);
+  }
+
+  if (credential.signupUrl) {
+    const link = document.createElement('a');
+    link.href = credential.signupUrl;
+    link.className = 'models-modal-note';
+    link.textContent = 'Get an API key';
+    form.appendChild(link);
+  }
+
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.className = 'models-key-input';
+  input.placeholder = credential.label;
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  form.appendChild(input);
+
+  const actions = document.createElement('div');
+  actions.className = 'models-modal-actions';
+
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'models-secondary-action';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => {
+    closeModelsModal();
+    onDone();
+  });
+  actions.appendChild(cancel);
+
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'models-primary-action';
+  save.textContent = 'Save';
+  actions.appendChild(save);
+  form.appendChild(actions);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const value = input.value.trim();
+    if (!value) {
+      if (modelsModalHint) modelsModalHint.textContent = 'API key is required.';
+      return;
+    }
+    save.disabled = true;
+    try {
+      await invoke<GeneratedPluginDetail>('save_plugin_credential', {
+        pluginId: plugin.id,
+        key: credential.key,
+        value
+      });
+      input.value = '';
+      renderPluginCredentialStep(plugin, pending, index + 1, onDone);
+    } catch (error) {
+      save.disabled = false;
+      if (modelsModalHint) {
+        modelsModalHint.textContent = getErrorMessage(error, 'Could not save the key.');
+      }
+    }
+  });
+
+  modelsModalContent.appendChild(form);
+  setTimeout(() => input.focus(), 0);
+}
+
 function renderApiKeyStep(provider: ModelProvider, role: ModelRole, model: string) {
   if (!modelsModalContent) return;
   if (modelsModalTitle) modelsModalTitle.textContent = provider.name;
@@ -1376,6 +1527,7 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   }
   pluginDetailView.appendChild(tools);
 
+  renderPluginCredentials(plugin);
   renderPluginCardPreviews(plugin);
 
   if (detail.readme.trim()) {
@@ -1394,6 +1546,101 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
 }
 
 // Preview every plugin tool's result card using synthesized example data.
+function renderPluginCredentials(plugin: GeneratedPlugin) {
+  if (!pluginDetailView) return;
+  const section = document.createElement('section');
+  section.className = 'plugin-detail-section';
+  section.innerHTML = '<h2>Credentials</h2>';
+
+  const declared = plugin.credentials || [];
+  if (!declared.length) {
+    const empty = document.createElement('p');
+    empty.className = 'plugin-detail-empty';
+    empty.textContent = 'This plugin does not require credentials.';
+    section.appendChild(empty);
+    pluginDetailView.appendChild(section);
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'plugin-credential-list';
+  for (const credential of declared) {
+    const row = document.createElement('div');
+    row.className = 'plugin-credential-row';
+
+    const heading = document.createElement('div');
+    heading.className = 'plugin-credential-heading';
+    const label = document.createElement('strong');
+    label.textContent = credential.label;
+    heading.appendChild(label);
+    const pill = document.createElement('span');
+    pill.className = `plugin-credential-pill${credential.configured ? ' is-configured' : ''}`;
+    pill.textContent = credential.configured ? 'Configured' : 'Not configured';
+    heading.appendChild(pill);
+    row.appendChild(heading);
+
+    const detail = document.createElement('p');
+    const code = document.createElement('code');
+    code.textContent = credential.key;
+    detail.appendChild(code);
+    if (credential.description) {
+      detail.appendChild(document.createTextNode(` ${credential.description}`));
+    }
+    row.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'plugin-credential-actions';
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'capability-primary-action';
+    save.textContent = credential.configured ? 'Replace' : 'Add key';
+    save.addEventListener('click', () => {
+      openPluginCredentialModal(plugin, [credential], () => {
+        void openGeneratedPlugin(plugin.id);
+      });
+    });
+    actions.appendChild(save);
+
+    if (credential.configured) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'capability-secondary-action';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        try {
+          await invoke<GeneratedPluginDetail>('delete_plugin_credential', {
+            pluginId: plugin.id,
+            key: credential.key
+          });
+          await openGeneratedPlugin(plugin.id);
+        } catch (error) {
+          remove.disabled = false;
+          detail.textContent = getErrorMessage(error, 'Could not remove the key.');
+        }
+      });
+      actions.appendChild(remove);
+    }
+
+    if (credential.signupUrl) {
+      // Stays visible after the key is stored: this is also where the user goes
+      // to rotate one.
+      const link = document.createElement('a');
+      link.href = credential.signupUrl;
+      link.className = 'plugin-credential-link';
+      link.textContent = 'Get an API key';
+      actions.appendChild(link);
+    }
+
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+
+  section.appendChild(list);
+  pluginDetailView.appendChild(section);
+}
+
 function renderPluginCardPreviews(plugin: GeneratedPlugin) {
   if (!pluginDetailView) return;
   const cardTools = plugin.tools;
@@ -1739,6 +1986,10 @@ function renderStoredMessage(message: StoredChatMessage) {
       renderBuilderRun(body, message, live);
     }
   }
+  if (message.role === 'assistant' && message.credentialRequest) {
+    const body = article.querySelector<HTMLElement>('.message-text');
+    if (body) renderCredentialRequest(body, message);
+  }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
   }
@@ -1820,6 +2071,12 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   }
 
   input.value = '';
+  appendUserTurn(content);
+  await startAgentTurn(content);
+}
+
+/** Adds the user's message to the transcript and history. */
+function appendUserTurn(content: string) {
   showConversation();
   ensureActiveChatMeta(content);
   addMessage('user', content);
@@ -1831,6 +2088,17 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   });
   void persistActiveChatHistory();
   void refreshChatHistory();
+}
+
+/**
+ * Runs one Explore turn for an already-recorded question.
+ *
+ * Split out of submitMessage so the credential card's Continue button can retry
+ * the original question without pushing a duplicate user bubble or a duplicate
+ * entry into the model-visible history.
+ */
+async function startAgentTurn(content: string) {
+  if (!messages || chatRuns.has(activeSessionId)) return;
 
   // Every ordinary user turn starts in Explore. Build is entered only from the
   // explicit plugin-writing confirmation below.
@@ -1898,6 +2166,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
 
   try {
     let requestedBuild: AgentBuildRequest | undefined;
+    let requestedCredential: CredentialRequest | undefined;
     const reply = await runMainAgentStream(turnChatMessages, turnMode, {
       onStreamId: (streamId) => {
         chatRuns.setStreamId(turnSessionId, run.id, streamId);
@@ -1987,11 +2256,36 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
       onBuildRequest: (request) => {
         requestedBuild = request;
         void logAgentTurnEvent('build_request', { request, mode: turnMode }, turnSessionId);
+      },
+      onCredentialRequest: (request) => {
+        requestedCredential = request;
+        void logAgentTurnEvent('credential_request', { request, mode: turnMode }, turnSessionId);
       }
     });
     if (thinkingPreview.parentElement) {
       thinkingPreview.remove();
     }
+
+    if (requestedCredential) {
+      // Unlike the build-request path, the assistant record is kept: the turn
+      // may already have produced result cards from other plugins, and this is
+      // also what persists the prompt across navigation and restart.
+      activeToolName = undefined;
+      const copy = credentialPromptCopy(requestedCredential);
+      assistantRecord.text = copy.title;
+      assistantRecord.thinking = thinking.trim() || undefined;
+      assistantRecord.status = 'completed';
+      assistantRecord.error = undefined;
+      assistantRecord.credentialRequest = requestedCredential;
+      if (turnIsActive() && pendingBody) {
+        pending.classList.remove('pending');
+        renderCredentialRequest(pendingBody, assistantRecord);
+      }
+      snapshotPersister.schedule(true);
+      syncRemountedTurn();
+      return;
+    }
+
     requestedBuild = reply.buildRequest ?? requestedBuild;
     if (requestedBuild) {
       const recordIndex = turnStored.indexOf(assistantRecord);
@@ -2096,7 +2390,7 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   const article = addMessage('assistant', '');
   const body = article.querySelector<HTMLElement>('.message-text');
   if (!body) return;
-  const copy = pluginWriteConfirmationCopy(request.name);
+  const copy = pluginWriteConfirmationCopy(request.name, request.auth);
 
   body.innerHTML = '';
   const panel = document.createElement('section');
@@ -2114,6 +2408,20 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
   summary.className = 'capability-request-summary';
   summary.textContent = request.description;
   panel.appendChild(summary);
+
+  if (copy.authNotice) {
+    const notice = document.createElement('p');
+    notice.className = 'capability-auth-notice';
+    notice.textContent = copy.authNotice;
+    if (copy.signupUrl) {
+      notice.appendChild(document.createTextNode(' '));
+      const link = document.createElement('a');
+      link.href = copy.signupUrl;
+      link.textContent = copy.signupLabel;
+      notice.appendChild(link);
+    }
+    panel.appendChild(notice);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'capability-actions';
@@ -2169,6 +2477,185 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
       conflictStrategy: 'error'
     });
   });
+}
+
+/**
+ * The "this plugin needs an API key" card.
+ *
+ * Rendered both live and when replaying history, so it re-reads which keys are
+ * stored every time rather than trusting anything persisted. That makes it
+ * self-healing when the key was added from the plugin detail screen instead.
+ */
+function renderCredentialRequest(
+  body: HTMLElement,
+  record: StoredChatMessage,
+  options: { allowContinue?: boolean } = {}
+) {
+  const request = record.credentialRequest;
+  if (!request) return;
+  const allowContinue = options.allowContinue !== false;
+  const copy = credentialPromptCopy(request);
+
+  const draw = (plugin: GeneratedPlugin | null) => {
+    const configured = allCredentialsConfigured(request, plugin);
+    const missingKeys = new Set(missingCredentialKeys(request, plugin));
+    body.innerHTML = '';
+
+    const panel = document.createElement('section');
+    panel.className = 'capability-confirmation credential-request';
+
+    const title = document.createElement('h3');
+    title.textContent = configured ? `${request.pluginName} is ready` : copy.title;
+    panel.appendChild(title);
+
+    const description = document.createElement('p');
+    description.textContent = configured
+      ? 'The key is saved. Continue to run your request.'
+      : copy.description;
+    panel.appendChild(description);
+
+    if (!configured) {
+      for (const credential of request.credentials) {
+        if (!missingKeys.has(credential.key)) continue;
+        const row = document.createElement('p');
+        row.className = 'capability-request-summary';
+        const label = document.createElement('strong');
+        label.textContent = credential.label;
+        row.appendChild(label);
+        if (credential.description) {
+          row.appendChild(document.createTextNode(` — ${credential.description}`));
+        }
+        if (credential.signupUrl) {
+          row.appendChild(document.createTextNode(' '));
+          const link = document.createElement('a');
+          link.href = credential.signupUrl;
+          link.textContent = copy.signupLabel;
+          row.appendChild(link);
+        }
+        panel.appendChild(row);
+      }
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'capability-actions';
+
+    if (configured) {
+      if (allowContinue) {
+        const retryPrompt = retryPromptFor(storedMessages, storedMessages.indexOf(record));
+        const proceed = document.createElement('button');
+        proceed.type = 'button';
+        proceed.className = 'capability-primary-action';
+        proceed.textContent = copy.continueLabel;
+        // One run per chat: a run already in flight owns the composer.
+        proceed.disabled = !retryPrompt || chatRuns.has(activeSessionId);
+        proceed.addEventListener('click', () => {
+          if (!retryPrompt || chatRuns.has(activeSessionId)) return;
+          proceed.disabled = true;
+          void startAgentTurn(retryPrompt);
+        });
+        actions.appendChild(proceed);
+      }
+    } else {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'capability-primary-action';
+      add.textContent = copy.addLabel;
+      add.addEventListener('click', () => {
+        const pendingCredentials = request.credentials.filter((credential) =>
+          missingKeys.has(credential.key)
+        );
+        openPluginCredentialModal(
+          { id: request.pluginId, name: request.pluginName },
+          pendingCredentials,
+          () => {
+            void refresh();
+          }
+        );
+      });
+      actions.appendChild(add);
+
+      const dismiss = document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.className = 'capability-secondary-action';
+      dismiss.textContent = copy.dismissLabel;
+      dismiss.addEventListener('click', () => {
+        body.textContent = copy.title;
+      });
+      actions.appendChild(dismiss);
+    }
+
+    if (actions.childElementCount) panel.appendChild(actions);
+    body.appendChild(panel);
+  };
+
+  const refresh = async () => {
+    try {
+      const detail = await invoke<GeneratedPluginDetail>('read_generated_plugin', {
+        pluginId: request.pluginId
+      });
+      draw(detail.plugin);
+    } catch {
+      // An unreadable plugin (uninstalled mid-conversation) still gets the
+      // prompt, just without a configured state.
+      draw(null);
+    }
+  };
+
+  draw(null);
+  void refresh();
+}
+
+/**
+ * Asks for the key as soon as a build finishes, rather than letting the user
+ * discover the gap on their next question. The build itself never needs one —
+ * the builder validates against mocked tests.
+ */
+async function appendPostBuildCredentialPrompt(
+  pluginId: string,
+  context: {
+    turnMeta: ChatMeta;
+    turnStored: StoredChatMessage[];
+    turnIsActive: () => boolean;
+  }
+) {
+  let plugin: GeneratedPlugin;
+  try {
+    const detail = await invoke<GeneratedPluginDetail>('read_generated_plugin', { pluginId });
+    plugin = detail.plugin;
+  } catch {
+    return;
+  }
+
+  const missing = (plugin.credentials || []).filter((credential) => !credential.configured);
+  if (!missing.length) return;
+
+  const request: CredentialRequest = {
+    pluginId: plugin.id,
+    pluginName: plugin.name,
+    credentials: missing.map((credential) => ({
+      key: credential.key,
+      label: credential.label,
+      description: credential.description,
+      signupUrl: credential.signupUrl
+    }))
+  };
+
+  const record: StoredChatMessage = {
+    role: 'assistant',
+    text: credentialPromptCopy(request).title,
+    timestamp: Date.now(),
+    status: 'completed',
+    credentialRequest: request
+  };
+  context.turnStored.push(record);
+
+  if (context.turnIsActive()) {
+    const article = addMessage('assistant', '');
+    renderedMessageArticles.set(record, article);
+    const body = article.querySelector<HTMLElement>('.message-text');
+    // No pending question to retry here, so Continue would have nothing to do.
+    if (body) renderCredentialRequest(body, record, { allowContinue: false });
+  }
 }
 
 async function scaffoldAndRunPluginBuilder(
@@ -2290,6 +2777,11 @@ async function scaffoldAndRunPluginBuilder(
         syncRemountedTurn
       }
     );
+    await appendPostBuildCredentialPrompt(plugin.id, {
+      turnMeta,
+      turnStored,
+      turnIsActive
+    });
     await persistChatSnapshot(turnMeta, turnStored);
     syncRemountedTurn();
   } catch (error) {

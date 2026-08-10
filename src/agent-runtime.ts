@@ -1,4 +1,8 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { decodeCredentialRequest } from './credential-request-flow';
+import type { CredentialRequest as AgentCredentialRequest } from './credential-request-flow';
+
+export type { AgentCredentialRequest };
 
 export type ChatMessage = {
   role: 'user' | 'assistant';
@@ -24,6 +28,7 @@ export type StreamPayload = {
     | 'tool_execution_update'
     | 'tool_execution_end'
     | 'build_request'
+    | 'credential_request'
     | 'done'
     | 'error';
   delta?: string | null;
@@ -45,6 +50,8 @@ export type AgentBuildRequest = {
   description: string;
   sourceUrls: string[];
   reason: string;
+  /** Advance notice that this API needs a key, so the user can register while the build runs. */
+  auth?: { required: boolean; signupUrl?: string; credentialLabel?: string };
   taskKind?: 'card-edit' | 'plugin-edit' | 'plugin-create';
   targetTools?: string[];
 };
@@ -84,6 +91,7 @@ export type AgentStreamHandlers = {
   onToolExecutionUpdate?: (event: AgentToolExecutionUpdateEvent) => void;
   onToolExecutionEnd?: (event: AgentToolExecutionEndEvent) => void;
   onBuildRequest?: (request: AgentBuildRequest) => void;
+  onCredentialRequest?: (request: AgentCredentialRequest) => void;
 };
 
 export type PluginBuilderRequest = {
@@ -242,6 +250,12 @@ export function applyStreamPayload(
   }
   if (payload.event_type === 'build_request' && payload.build_request) {
     handlers.onBuildRequest?.(payload.build_request);
+  }
+  if (payload.event_type === 'credential_request') {
+    // Travels in the generic `result` field, so the Rust forwarder needed no
+    // new named column.
+    const request = decodeCredentialRequest(payload.result);
+    if (request) handlers.onCredentialRequest?.(request);
   }
 
   return nextState;

@@ -264,7 +264,55 @@ export function formatToolResult(result) {
   return formatted || JSON.stringify(result.data ?? result) || '';
 }
 
-export function createGeneratedPluginTools({ Type, plugins, executePluginTool }) {
+function normalizeMissingCredentials(plugin, only) {
+  const declared = Array.isArray(plugin.missingCredentials) ? plugin.missingCredentials : [];
+  const wanted = declared
+    .map((entry) => ({
+      key: String(entry?.key || '').trim(),
+      label: String(entry?.label || entry?.key || '').trim(),
+      description: String(entry?.description || '').trim(),
+      signupUrl: String(entry?.signupUrl || '').trim()
+    }))
+    .filter((entry) => entry.key);
+  if (!only) return wanted;
+  // A runtime miss names one credential; report only that one so the prompt
+  // matches what actually blocked the call.
+  const matched = wanted.find((entry) => entry.key === only.key);
+  return [matched || { key: only.key, label: only.label || only.key, description: '', signupUrl: '' }];
+}
+
+function buildCredentialRequest(plugin, only) {
+  return {
+    pluginId: String(plugin.id || ''),
+    pluginName: String(plugin.name || plugin.id || 'This plugin'),
+    credentials: normalizeMissingCredentials(plugin, only)
+  };
+}
+
+/**
+ * Ends the turn with a structured request for the user rather than letting the
+ * model retry a tool it can never satisfy or answer from memory instead.
+ */
+function credentialRequestResult(credentialRequest) {
+  const names = credentialRequest.credentials.map((entry) => entry.label).join(', ');
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `${credentialRequest.pluginName} needs ${names} before this tool can run. The user has been asked for it. Do not answer from general knowledge and do not retry the tool.`
+      }
+    ],
+    details: { type: 'credential-request', ...credentialRequest },
+    terminate: true
+  };
+}
+
+export function createGeneratedPluginTools({
+  Type,
+  plugins,
+  executePluginTool,
+  onCredentialRequest = () => {}
+}) {
   const seen = new Set();
   const tools = [];
   for (const plugin of Array.isArray(plugins) ? plugins : []) {
@@ -288,15 +336,38 @@ export function createGeneratedPluginTools({ Type, plugins, executePluginTool })
           definition.parameters || { type: 'object', properties: {} }
         ),
         execute: async (_toolCallId, args, signal) => {
-          const result = await executePluginTool(
-            {
-              pluginDir: String(plugin.directory || ''),
-              pluginId: String(plugin.id || ''),
-              toolName: name,
-              args: args && typeof args === 'object' ? args : {}
-            },
-            signal
-          );
+          // Pre-flight: the host already knows which declared credentials are
+          // unset, so a doomed call never spawns a process or hits the network.
+          const missing = normalizeMissingCredentials(plugin);
+          if (missing.length) {
+            const credentialRequest = buildCredentialRequest(plugin);
+            onCredentialRequest(credentialRequest);
+            return credentialRequestResult(credentialRequest);
+          }
+
+          let result;
+          try {
+            result = await executePluginTool(
+              {
+                pluginDir: String(plugin.directory || ''),
+                pluginId: String(plugin.id || ''),
+                toolName: name,
+                args: args && typeof args === 'object' ? args : {},
+                credentials:
+                  plugin.credentialValues && typeof plugin.credentialValues === 'object'
+                    ? plugin.credentialValues
+                    : {}
+              },
+              signal
+            );
+          } catch (error) {
+            // Backstop for a credential the manifest never declared, which
+            // pre-flight cannot see.
+            if (!error || !error.credentialRequest) throw error;
+            const credentialRequest = buildCredentialRequest(plugin, error.credentialRequest);
+            onCredentialRequest(credentialRequest);
+            return credentialRequestResult(credentialRequest);
+          }
           const details =
             result && typeof result === 'object' ? { ...result, card } : result;
           return {
@@ -360,6 +431,21 @@ export function createDirectAnswerTool(Type, onDirectAnswer) {
   };
 }
 
+/**
+ * Advance notice that the plugin about to be built will need a key. It lets the
+ * confirmation card send the user off to register while the build runs, instead
+ * of surprising them with the requirement once it finishes.
+ */
+function normalizeBuildRequestAuth(auth) {
+  if (!auth || typeof auth !== 'object' || auth.required !== true) return undefined;
+  const signupUrl = String(auth.signupUrl || '').trim();
+  return {
+    required: true,
+    signupUrl: /^https?:\/\//i.test(signupUrl) ? signupUrl : '',
+    credentialLabel: String(auth.credentialLabel || '').trim().slice(0, 120)
+  };
+}
+
 export function createBuildRequestTool(Type, onBuildRequest) {
   return {
     name: 'request_plugin_build',
@@ -388,6 +474,30 @@ export function createBuildRequestTool(Type, onBuildRequest) {
       reason: Type.String({
         description: 'Why installed tools are insufficient and code needs to be written.'
       }),
+      auth: Type.Optional(
+        Type.Object(
+          {
+            required: Type.Boolean({
+              description: 'True when this API requires an API key, token, or app id to call.'
+            }),
+            signupUrl: Type.Optional(
+              Type.String({
+                description:
+                  'The page where the user signs up for the key, not the generic API docs root.'
+              })
+            ),
+            credentialLabel: Type.Optional(
+              Type.String({
+                description: 'Human name for the key, such as "OpenWeather API key".'
+              })
+            )
+          },
+          {
+            description:
+              'Whether this API needs credentials. Set it whenever the documentation says a key is required, so the user can register while the plugin is being written.'
+          }
+        )
+      ),
       taskKind: Type.Optional(
         Type.Union(
           [
@@ -415,6 +525,7 @@ export function createBuildRequestTool(Type, onBuildRequest) {
         description: String(args?.description || '').trim(),
         sourceUrls: normalizeSourceUrls(args?.sourceUrls),
         reason: String(args?.reason || '').trim(),
+        auth: normalizeBuildRequestAuth(args?.auth),
         taskKind: ['card-edit', 'plugin-edit', 'plugin-create'].includes(args?.taskKind)
           ? args.taskKind
           : undefined,

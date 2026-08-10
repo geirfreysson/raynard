@@ -5,6 +5,8 @@ import {
   buildSystemPrompt,
   buildUserPrompt,
   findPluginTestFiles,
+  findUsedCredentialKeys,
+  normalizePluginAuth,
   validatePluginArtifacts
 } from './plugin-builder-core.mjs';
 
@@ -46,6 +48,30 @@ describe('plugin builder core', () => {
     expect(prompt).toMatch(/exactly three/i);
   });
 
+  it('makes tool descriptions the home for API operating knowledge', () => {
+    const prompt = buildSystemPrompt({ sourceUrls: [] });
+
+    // The agent only ever sees the description and the parameter schema, so the
+    // prompt must say so rather than pointing API semantics at README.
+    expect(prompt).toMatch(/ONLY plugin text the Explore agent ever sees/i);
+    expect(prompt).toMatch(/README\.md, code comments, and plugin\.json never reach it/i);
+    expect(prompt).toMatch(/must never be its only home/i);
+    // The specific facts that have to be written down.
+    expect(prompt).toMatch(/only take effect in combination or are ignored on their own/i);
+    expect(prompt).toMatch(/inputs the API silently drops/i);
+    expect(prompt).toMatch(/sort order of results/i);
+    expect(prompt).toMatch(/result caps, maximum page size, and how to page/i);
+    // A mocked URL assertion is not proof the API honored the parameter.
+    expect(prompt).toMatch(/proves only what the plugin SENT, never that the API honored it/i);
+  });
+
+  it('keeps tool descriptions truthful when an edit changes behavior', () => {
+    const prompt = buildSystemPrompt({ editMode: true, name: 'world-bank-data360' });
+
+    expect(prompt).toMatch(/update that tool's description and parameter descriptions in the SAME turn/i);
+    expect(prompt).toMatch(/stale description silently teaches the agent to call the tool wrongly/i);
+  });
+
   it('requires three usable splash prompts for fresh plugin builds', () => {
     const valid = {
       files: ['tools.ts', 'tools.test.ts'],
@@ -66,7 +92,7 @@ describe('plugin builder core', () => {
           'What is the newest story on Hacker News?'
         ]
       })
-    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1, credentials: [] });
   });
 
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {
@@ -285,7 +311,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         ...base,
         tools: [{ name: 'hn_list_stories', callable: true, card: requiredCard }]
       })
-    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1, credentials: [] });
   });
 
   it('requires every runtime tool, including list and search tools, to declare a card', () => {
@@ -317,7 +343,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         ...base,
         tools: [{ name: 'get_thing', callable: true, card }]
       })
-    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1, credentials: [] });
   });
 
   it('accepts nested Columns, Grid, and Stack card primitives', () => {
@@ -355,7 +381,7 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         ...base,
         tools: [{ name: 'dnd_get_monster', callable: true, card }]
       })
-    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1 });
+    ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1, credentials: [] });
   });
 
   it('rejects a result card without singular and plural display names', () => {
@@ -428,5 +454,134 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         tools: [{ name: 'get_thing', callable: true, card: { layout: [] } }]
       })
     ).toThrow(/layout/i);
+  });
+
+  describe('plugin credentials', () => {
+    const validCredential = {
+      key: 'OPENWEATHER_API_KEY',
+      label: 'OpenWeather API key',
+      description: 'Free tier.',
+      signupUrl: 'https://openweathermap.org/api'
+    };
+
+    const base = {
+      files: ['tools.ts', 'tools.test.ts', 'README.md'],
+      tools: [{ name: 'weather_current', callable: true, card: requiredCard }]
+    };
+
+    const readmeWithAuth = [
+      '# Plugin',
+      '',
+      '## Endpoint Inventory',
+      '',
+      '- current weather',
+      '',
+      '## Authentication',
+      '',
+      '- OPENWEATHER_API_KEY — get one at https://openweathermap.org/api'
+    ].join('\n');
+
+    const readmeWithoutAuth = '# Plugin\n\n## Endpoint Inventory\n\n- current weather';
+
+    it('normalizes declarations and drops unusable ones', () => {
+      expect(normalizePluginAuth({ auth: { credentials: [validCredential] } })).toEqual([
+        validCredential
+      ]);
+      expect(normalizePluginAuth(undefined)).toEqual([]);
+      // A lowercase key cannot be a keychain account component.
+      expect(
+        normalizePluginAuth({ auth: { credentials: [{ ...validCredential, key: 'lower_case' }] } })
+      ).toEqual([]);
+      // A declaration with no sign-up page cannot tell the user where to go.
+      expect(
+        normalizePluginAuth({ auth: { credentials: [{ ...validCredential, signupUrl: '' }] } })
+      ).toEqual([]);
+      expect(
+        normalizePluginAuth({
+          auth: { credentials: [{ ...validCredential, signupUrl: 'ftp://example.com' }] }
+        })
+      ).toEqual([]);
+      expect(
+        normalizePluginAuth({ auth: { credentials: [{ ...validCredential, label: '' }] } })
+      ).toEqual([]);
+      expect(
+        normalizePluginAuth({ auth: { credentials: [validCredential, validCredential] } })
+      ).toHaveLength(1);
+    });
+
+    it('finds the credential keys a plugin actually reads', () => {
+      expect(
+        findUsedCredentialKeys([
+          "const key = requireCredential('OPENWEATHER_API_KEY');",
+          'const other = requireCredential("SECOND_KEY", "Second");'
+        ])
+      ).toEqual(['OPENWEATHER_API_KEY', 'SECOND_KEY']);
+      expect(findUsedCredentialKeys('no credentials here')).toEqual([]);
+    });
+
+    it('rejects a credential the plugin reads but never declares', () => {
+      expect(() =>
+        validatePluginArtifacts({
+          ...base,
+          readme: readmeWithAuth,
+          sources: ["requireCredential('UNDECLARED_KEY')"]
+        })
+      ).toThrow(/Undeclared: UNDECLARED_KEY/);
+    });
+
+    it('requires the README to document where the key comes from', () => {
+      expect(() =>
+        validatePluginArtifacts({
+          ...base,
+          readme: readmeWithoutAuth,
+          auth: { credentials: [validCredential] },
+          sources: ["requireCredential('OPENWEATHER_API_KEY')"]
+        })
+      ).toThrow(/Authentication/);
+
+      expect(() =>
+        validatePluginArtifacts({
+          ...base,
+          readme: '# Plugin\n\n## Endpoint Inventory\n\n- x\n\n## Authentication\n\nAsk someone.',
+          auth: { credentials: [validCredential] },
+          sources: ["requireCredential('OPENWEATHER_API_KEY')"]
+        })
+      ).toThrow(/sign-up URL for: OPENWEATHER_API_KEY/);
+    });
+
+    it('accepts a plugin whose declaration, usage, and README agree', () => {
+      const result = validatePluginArtifacts({
+        ...base,
+        readme: readmeWithAuth,
+        auth: { credentials: [validCredential] },
+        sources: ["requireCredential('OPENWEATHER_API_KEY')"]
+      });
+
+      expect(result.credentials).toEqual([validCredential]);
+      expect(result.toolCount).toBe(1);
+    });
+
+    it('passes with credentials declared and none configured, so the builder never needs a key', () => {
+      // The builder runs with no keychain access at all; validation must not
+      // depend on a value being present.
+      expect(() =>
+        validatePluginArtifacts({
+          ...base,
+          readme: readmeWithAuth,
+          auth: { credentials: [validCredential] },
+          sources: ["requireCredential('OPENWEATHER_API_KEY')"]
+        })
+      ).not.toThrow();
+    });
+
+    it('leaves plugins without credentials unaffected', () => {
+      expect(() =>
+        validatePluginArtifacts({
+          ...base,
+          readme: readmeWithoutAuth,
+          sources: ['const x = 1;']
+        })
+      ).not.toThrow();
+    });
   });
 });

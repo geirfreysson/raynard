@@ -82,6 +82,10 @@ struct StoredChatMessage {
     /// Each entry is { toolName, template, data }; rendered beneath the message.
     #[serde(default)]
     cards: Option<Value>,
+    /// A tool needed an API key the user has not stored. Opaque passthrough so
+    /// the prompt card survives navigation and restart. Names only, no values.
+    #[serde(rename = "credentialRequest", default)]
+    credential_request: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -209,7 +213,23 @@ struct GeneratedPlugin {
     status: String,
     /// Builder-authored prompts for the empty-chat splash, read from the manifest.
     sample_prompts: Vec<String>,
+    /// Credential declarations from the manifest, annotated with whether the
+    /// user has stored a value. Never carries the value itself: this struct is
+    /// serialized both to the renderer and into the agent sidecar request.
+    credentials: Vec<PluginCredential>,
     tools: Vec<GeneratedPluginTool>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PluginCredential {
+    key: String,
+    label: String,
+    description: String,
+    /// The page where a user signs up for this key. Required, because a prompt
+    /// that cannot tell the user where to get a key is a dead end.
+    signup_url: String,
+    configured: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -556,6 +576,7 @@ fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, 
                     let manifest_path = plugin_dir.join("plugin.json");
                     read_generated_plugin_manifest(plugin_dir, &manifest_path).map(|mut plugin| {
                         enrich_generated_plugin_tools_from_runtime(&mut plugin, plugin_dir);
+                        annotate_plugin_credentials(&mut plugin);
                         plugin
                     })
                 })
@@ -593,6 +614,7 @@ fn read_generated_plugin(
     let mut plugin = read_generated_plugin_manifest(&plugin_dir, &manifest_path)
         .ok_or_else(|| "Could not read generated plugin metadata.".to_string())?;
     enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
+    annotate_plugin_credentials(&mut plugin);
     let code = fs::read_to_string(plugin_dir.join("tools.ts")).unwrap_or_default();
     let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap_or_default();
 
@@ -610,11 +632,48 @@ fn delete_generated_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
     let plugin_root = generated_plugins_dir(&app)?;
     let data_dir = plugin_data_dir(&plugin_root, &plugin_dir)?;
+    // Uninstalling has to take the secrets with it, or the keychain collects
+    // orphaned entries no UI can reach.
+    if let Some(plugin) =
+        read_generated_plugin_manifest(&plugin_dir, &plugin_dir.join("plugin.json"))
+    {
+        for credential in &plugin.credentials {
+            let _ = forget_plugin_credential(&plugin.id, &credential.key);
+        }
+    }
     if data_dir.exists() {
         fs::remove_dir_all(data_dir)
             .map_err(|error| format!("Could not delete plugin cache data: {error}"))?;
     }
     fs::remove_dir_all(plugin_dir).map_err(|error| format!("Could not delete plugin: {error}"))
+}
+
+#[tauri::command]
+fn save_plugin_credential(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    key: String,
+    value: String,
+) -> Result<GeneratedPluginDetail, String> {
+    let cleaned_value = value.trim();
+    if cleaned_value.is_empty() {
+        return Err("API key is required.".to_string());
+    }
+    let account = plugin_credential_account(&plugin_id, &key)?;
+    keyring_entry(&account)?
+        .set_password(cleaned_value)
+        .map_err(|error| format!("Could not store the API key in the OS keychain: {error}"))?;
+    read_generated_plugin(app, plugin_id)
+}
+
+#[tauri::command]
+fn delete_plugin_credential(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    key: String,
+) -> Result<GeneratedPluginDetail, String> {
+    forget_plugin_credential(&plugin_id, &key)?;
+    read_generated_plugin(app, plugin_id)
 }
 
 #[tauri::command]
@@ -772,10 +831,23 @@ async fn execute_generated_plugin_tool(
     };
 
     let runner_path = resolve_plugin_tool_runner_path()?;
+    let credentials = read_generated_plugin_manifest(&plugin_dir, &plugin_dir.join("plugin.json"))
+        .map(|plugin| {
+            let mut values = serde_json::Map::new();
+            for credential in &plugin.credentials {
+                let value = read_plugin_credential(&plugin.id, &credential.key);
+                if !value.is_empty() {
+                    values.insert(credential.key.clone(), Value::String(value));
+                }
+            }
+            Value::Object(values)
+        })
+        .unwrap_or_else(|| json!({}));
     let runner_request = json!({
         "pluginDir": plugin_dir.to_string_lossy().to_string(),
         "toolName": tool_name,
-        "args": request.args
+        "args": request.args,
+        "credentials": credentials
     });
 
     let mut child = Command::new("node")
@@ -1368,10 +1440,12 @@ async fn run_main_agent_stream(
             continue;
         };
         enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
-        plugins.push(
-            serde_json::to_value(plugin)
-                .map_err(|error| format!("Could not serialize generated plugin: {error}"))?,
-        );
+        let mut serialized = serde_json::to_value(&plugin)
+            .map_err(|error| format!("Could not serialize generated plugin: {error}"))?;
+        // Resolved secrets are attached here, never on GeneratedPlugin itself:
+        // that struct is also what list_generated_plugins hands the renderer.
+        attach_plugin_credential_values(&mut serialized, &plugin);
+        plugins.push(serialized);
     }
     let sidecar_request = json!({
         "messages": messages
@@ -2456,6 +2530,85 @@ fn read_plugin_sample_prompts(manifest: &Value) -> Vec<String> {
     normalize_plugin_sample_prompts(manifest_prompts)
 }
 
+/// Credential names double as keychain account components, so they are held to
+/// a strict shape rather than trusted from a generated manifest.
+fn is_valid_credential_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > 64 {
+        return false;
+    }
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|value| value.is_ascii_uppercase() || value.is_ascii_digit() || value == '_')
+}
+
+fn read_plugin_credentials(manifest: &Value) -> Vec<PluginCredential> {
+    let Some(entries) = manifest
+        .get("auth")
+        .and_then(|auth| auth.get("credentials"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut credentials: Vec<PluginCredential> = Vec::new();
+    for entry in entries {
+        let key = entry
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let signup_url = entry
+            .get("signupUrl")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // A malformed declaration is dropped rather than failing the whole
+        // plugin: the remaining tools stay usable.
+        if !is_valid_credential_key(&key) {
+            continue;
+        }
+        if !signup_url.starts_with("https://") && !signup_url.starts_with("http://") {
+            continue;
+        }
+        if credentials.iter().any(|existing| existing.key == key) {
+            continue;
+        }
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&key)
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let description = entry
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(240)
+            .collect::<String>();
+        credentials.push(PluginCredential {
+            key,
+            label,
+            description,
+            signup_url,
+            configured: false,
+        });
+        if credentials.len() == 8 {
+            break;
+        }
+    }
+    credentials
+}
+
 fn read_generated_plugin_manifest(
     plugin_dir: &Path,
     manifest_path: &Path,
@@ -2508,6 +2661,7 @@ fn read_generated_plugin_manifest(
         created_at,
         status,
         sample_prompts: read_plugin_sample_prompts(&parsed),
+        credentials: read_plugin_credentials(&parsed),
         tools: Vec::new(),
     })
 }
@@ -2794,6 +2948,7 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 builder_run: message.builder_run,
                 builder_activities: message.builder_activities,
                 cards: message.cards,
+                credential_request: message.credential_request,
             })
         })
         .collect()
@@ -3027,6 +3182,95 @@ fn read_provider_api_key(provider_id: &str) -> String {
         .to_string()
 }
 
+/// Builds the keychain account for one plugin credential.
+///
+/// The keychain service is shared with the model providers, whose accounts are
+/// bare ids like "openai". Namespacing plus rejecting ':' in either component
+/// makes it impossible for a generated manifest to address — and so overwrite
+/// or delete — the user's model API key.
+fn plugin_credential_account(plugin_id: &str, key: &str) -> Result<String, String> {
+    let plugin_id = plugin_id.trim();
+    let key = key.trim();
+    if plugin_id.is_empty() {
+        return Err("Plugin id is required.".to_string());
+    }
+    if plugin_id.len() > 128 || plugin_id.contains(':') || plugin_id.contains(char::is_whitespace) {
+        return Err(format!("Invalid plugin id for a credential: {plugin_id}"));
+    }
+    if !is_valid_credential_key(key) {
+        return Err(format!(
+            "Invalid credential key: {key}. Use uppercase letters, digits, and underscores."
+        ));
+    }
+    Ok(format!("plugin:{plugin_id}:{key}"))
+}
+
+fn read_plugin_credential(plugin_id: &str, key: &str) -> String {
+    let Ok(account) = plugin_credential_account(plugin_id, key) else {
+        return String::new();
+    };
+    keyring_entry(&account)
+        .and_then(|entry| {
+            entry
+                .get_password()
+                .map_err(|error| format!("Could not read OS keychain entry: {error}"))
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Adds resolved credential values, and the declarations still missing one, to
+/// an already-serialized plugin bound for an agent sidecar.
+///
+/// This deliberately mutates the JSON rather than living on `GeneratedPlugin`:
+/// the same struct is serialized to the webview, so a field there would leak
+/// every secret into the renderer on plugin-sidebar load.
+fn attach_plugin_credential_values(serialized: &mut Value, plugin: &GeneratedPlugin) {
+    let Some(object) = serialized.as_object_mut() else {
+        return;
+    };
+    let mut values = serde_json::Map::new();
+    let mut missing = Vec::new();
+    for credential in &plugin.credentials {
+        let value = read_plugin_credential(&plugin.id, &credential.key);
+        if value.is_empty() {
+            missing.push(json!({
+                "key": credential.key,
+                "label": credential.label,
+                "description": credential.description,
+                "signupUrl": credential.signup_url,
+            }));
+        } else {
+            values.insert(credential.key.clone(), Value::String(value));
+        }
+    }
+    object.insert("credentialValues".to_string(), Value::Object(values));
+    object.insert("missingCredentials".to_string(), Value::Array(missing));
+}
+
+fn forget_plugin_credential(plugin_id: &str, key: &str) -> Result<(), String> {
+    let account = plugin_credential_account(plugin_id, key)?;
+    match keyring_entry(&account)?.delete_credential() {
+        Ok(()) => Ok(()),
+        // Removing a credential that was never stored is the desired end state.
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "Could not remove the API key from the OS keychain: {error}"
+        )),
+    }
+}
+
+/// Fills in which declared credentials the user has actually stored. Reads the
+/// keychain, so it is called on the paths that serve the UI rather than inside
+/// the manifest parser.
+fn annotate_plugin_credentials(plugin: &mut GeneratedPlugin) {
+    let plugin_id = plugin.id.clone();
+    for credential in &mut plugin.credentials {
+        credential.configured = !read_plugin_credential(&plugin_id, &credential.key).is_empty();
+    }
+}
+
 fn read_env_file() -> Result<BTreeMap<String, String>, String> {
     let Some(path) = find_env_file() else {
         return Ok(BTreeMap::new());
@@ -3191,7 +3435,7 @@ mod tests {
         build_plugin_tools_stub, clear_plugin_api_cache, ensure_shared_plugin_sdk,
         external_url_target, generated_plugin_source_mtime_millis,
         load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis,
+        normalize_plugin_slug, normalize_stored_messages, now_millis, plugin_credential_account,
         read_generated_plugin_manifest, read_plugin_cache_settings, save_plugin_cache_settings,
         BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
         RuntimeToolsCache, StoredChatMessage, StreamEvent,
@@ -3209,7 +3453,10 @@ mod tests {
             external_url_target("  http://example.com/page  "),
             Some("http://example.com/page")
         );
-        assert_eq!(external_url_target("HTTPS://example.com"), Some("HTTPS://example.com"));
+        assert_eq!(
+            external_url_target("HTTPS://example.com"),
+            Some("HTTPS://example.com")
+        );
 
         for rejected in [
             "javascript:alert(1)",
@@ -3224,7 +3471,11 @@ mod tests {
             "https://",
             "http:///no-host",
         ] {
-            assert_eq!(external_url_target(rejected), None, "expected {rejected:?} to be refused");
+            assert_eq!(
+                external_url_target(rejected),
+                None,
+                "expected {rejected:?} to be refused"
+            );
         }
     }
 
@@ -3483,10 +3734,159 @@ mod tests {
             builder_run: Some(true),
             builder_activities: Some(activities.clone()),
             cards: None,
+            credential_request: None,
         }]);
 
         assert_eq!(normalized[0].builder_run, Some(true));
         assert_eq!(normalized[0].builder_activities, Some(activities));
+    }
+
+    #[test]
+    fn plugin_credential_account_namespaces_and_rejects_collisions() {
+        assert_eq!(
+            plugin_credential_account("open-weather", "OPENWEATHER_API_KEY"),
+            Ok("plugin:open-weather:OPENWEATHER_API_KEY".to_string())
+        );
+
+        // The keychain service is shared with the model providers, whose
+        // accounts are bare ids. No input may produce one.
+        for (plugin_id, key) in [
+            ("open:weather", "A_KEY"),
+            ("open-weather", "A:KEY"),
+            ("", "A_KEY"),
+            ("open-weather", ""),
+            ("open weather", "A_KEY"),
+            ("open-weather", "lower_case"),
+            ("open-weather", "9LEADING_DIGIT"),
+            ("open-weather", "HAS-DASH"),
+        ] {
+            assert!(
+                plugin_credential_account(plugin_id, key).is_err(),
+                "expected rejection for ({plugin_id}, {key})"
+            );
+        }
+
+        for provider in ["openai", "claude", "moonshot"] {
+            let account = plugin_credential_account("open-weather", "OPENWEATHER_API_KEY").unwrap();
+            assert_ne!(account, provider);
+            assert!(account.starts_with("plugin:"));
+        }
+    }
+
+    #[test]
+    fn manifest_auth_declarations_are_parsed_and_cleaned() {
+        let dir = std::env::temp_dir().join(format!("raynard-auth-manifest-{}", now_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        let manifest_path = dir.join("plugin.json");
+        fs::write(
+            &manifest_path,
+            json!({
+                "id": "raynard.generated.open-weather",
+                "name": "Open Weather",
+                "sdkVersion": 1,
+                "auth": { "credentials": [
+                    {
+                        "key": "OPENWEATHER_API_KEY",
+                        "label": "OpenWeather API key",
+                        "description": "Free tier.",
+                        "signupUrl": "https://openweathermap.org/api"
+                    },
+                    // Dropped: no sign-up page means the prompt cannot send the
+                    // user anywhere.
+                    { "key": "NO_SIGNUP_KEY", "label": "No signup" },
+                    // Dropped: not a valid keychain account component.
+                    { "key": "lower", "label": "Lower", "signupUrl": "https://example.com" },
+                    // Dropped: duplicate.
+                    {
+                        "key": "OPENWEATHER_API_KEY",
+                        "label": "Duplicate",
+                        "signupUrl": "https://example.com"
+                    }
+                ]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let plugin = read_generated_plugin_manifest(&dir, &manifest_path).unwrap();
+        assert_eq!(plugin.credentials.len(), 1);
+        assert_eq!(plugin.credentials[0].key, "OPENWEATHER_API_KEY");
+        assert_eq!(
+            plugin.credentials[0].signup_url,
+            "https://openweathermap.org/api"
+        );
+        // Never assumed configured from the manifest alone.
+        assert!(!plugin.credentials[0].configured);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_without_auth_declares_no_credentials() {
+        let dir = std::env::temp_dir().join(format!("raynard-noauth-manifest-{}", now_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        let manifest_path = dir.join("plugin.json");
+        fs::write(
+            &manifest_path,
+            json!({ "id": "raynard.generated.hacker-news", "sdkVersion": 1 }).to_string(),
+        )
+        .unwrap();
+
+        let plugin = read_generated_plugin_manifest(&dir, &manifest_path).unwrap();
+        assert!(plugin.credentials.is_empty());
+
+        // The sdkVersion gate still applies.
+        fs::write(
+            &manifest_path,
+            json!({ "id": "x", "sdkVersion": 2, "auth": { "credentials": [] } }).to_string(),
+        )
+        .unwrap();
+        assert!(read_generated_plugin_manifest(&dir, &manifest_path).is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stored_credential_request_round_trips_and_empty_text_is_still_dropped() {
+        let request = json!({
+            "pluginId": "open-weather",
+            "pluginName": "Open Weather",
+            "credentials": [{ "key": "OPENWEATHER_API_KEY", "label": "OpenWeather API key" }]
+        });
+
+        let normalized = normalize_stored_messages(vec![
+            StoredChatMessage {
+                role: "assistant".to_string(),
+                text: "Open Weather needs an API key".to_string(),
+                timestamp: 1,
+                thinking: None,
+                provider: None,
+                model: None,
+                status: Some("completed".to_string()),
+                error: None,
+                builder_run: None,
+                builder_activities: None,
+                cards: None,
+                credential_request: Some(request.clone()),
+            },
+            StoredChatMessage {
+                role: "assistant".to_string(),
+                text: "   ".to_string(),
+                timestamp: 2,
+                thinking: None,
+                provider: None,
+                model: None,
+                status: None,
+                error: None,
+                builder_run: None,
+                builder_activities: None,
+                cards: None,
+                credential_request: Some(request.clone()),
+            },
+        ]);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].credential_request, Some(request));
     }
 }
 
@@ -3500,6 +3900,8 @@ pub fn run() {
             clear_generated_plugin_cache,
             delete_chat_history,
             delete_generated_plugin,
+            save_plugin_credential,
+            delete_plugin_credential,
             execute_generated_plugin_tool,
             get_generated_plugin_cache_settings,
             get_plugin_scaffold_status,

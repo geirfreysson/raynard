@@ -247,12 +247,134 @@ describe('main agent core', () => {
         pluginDir: '/plugins/hacker-news',
         pluginId: 'hacker-news',
         toolName: 'getStoryList',
-        args: { type: 'top' }
+        args: { type: 'top' },
+        credentials: {}
       }
     ]);
     expect(result.content[0].text).toContain('Story one');
     expect(result.details.references).toHaveLength(1);
     expect(result.details.card.name.singular).toBe('story list');
+  });
+
+  describe('missing plugin credentials', () => {
+    function weatherPlugin(overrides = {}) {
+      return {
+        id: 'open-weather',
+        name: 'Open Weather',
+        directory: '/plugins/open-weather',
+        tools: [
+          {
+            name: 'weather_current',
+            description: 'Fetch current weather.',
+            parameters: { type: 'object', properties: { city: { type: 'string' } } },
+            card: {
+              name: { singular: 'forecast', plural: 'forecasts' },
+              layout: [{ component: 'KeyValue', pairs: [{ label: 'City', field: 'city' }] }]
+            }
+          }
+        ],
+        ...overrides
+      };
+    }
+
+    const declaredMissing = [
+      {
+        key: 'OPENWEATHER_API_KEY',
+        label: 'OpenWeather API key',
+        description: 'Free tier.',
+        signupUrl: 'https://openweathermap.org/api'
+      }
+    ];
+
+    it('ends the turn without spawning the plugin when a declared key is unset', async () => {
+      const emitted = [];
+      let called = false;
+      const tools = createGeneratedPluginTools({
+        Type,
+        plugins: [weatherPlugin({ missingCredentials: declaredMissing })],
+        executePluginTool: async () => {
+          called = true;
+          return {};
+        },
+        onCredentialRequest: (request) => emitted.push(request)
+      });
+
+      const result = await tools[0].execute('call-1', { city: 'Oslo' });
+
+      expect(called).toBe(false);
+      expect(result.terminate).toBe(true);
+      expect(result.details).toMatchObject({
+        type: 'credential-request',
+        pluginId: 'open-weather',
+        pluginName: 'Open Weather',
+        credentials: declaredMissing
+      });
+      expect(result.content[0].text).toMatch(/Do not answer from general knowledge/);
+      expect(emitted).toHaveLength(1);
+    });
+
+    it('passes resolved credentials through and runs normally', async () => {
+      const executions = [];
+      const tools = createGeneratedPluginTools({
+        Type,
+        plugins: [
+          weatherPlugin({
+            missingCredentials: [],
+            credentialValues: { OPENWEATHER_API_KEY: 'secret-value' }
+          })
+        ],
+        executePluginTool: async (request) => {
+          executions.push(request);
+          return {
+            text: 'Sunny',
+            references: [{ url: 'https://openweathermap.org' }],
+            data: { city: 'Oslo' }
+          };
+        }
+      });
+
+      const result = await tools[0].execute('call-1', { city: 'Oslo' });
+
+      expect(executions[0].credentials).toEqual({ OPENWEATHER_API_KEY: 'secret-value' });
+      expect(result.terminate).toBeUndefined();
+      expect(result.content[0].text).toContain('Sunny');
+    });
+
+    it('handles an undeclared credential surfaced only at runtime', async () => {
+      const emitted = [];
+      const tools = createGeneratedPluginTools({
+        Type,
+        plugins: [weatherPlugin()],
+        executePluginTool: async () => {
+          const error = new Error('Missing credential UNDECLARED_KEY.');
+          error.credentialRequest = { key: 'UNDECLARED_KEY', label: 'Undeclared key' };
+          throw error;
+        },
+        onCredentialRequest: (request) => emitted.push(request)
+      });
+
+      const result = await tools[0].execute('call-1', { city: 'Oslo' });
+
+      expect(result.terminate).toBe(true);
+      expect(result.details.credentials).toEqual([
+        { key: 'UNDECLARED_KEY', label: 'Undeclared key', description: '', signupUrl: '' }
+      ]);
+      expect(emitted).toHaveLength(1);
+    });
+
+    it('lets ordinary tool failures keep propagating', async () => {
+      const tools = createGeneratedPluginTools({
+        Type,
+        plugins: [weatherPlugin()],
+        executePluginTool: async () => {
+          throw new Error('Upstream API is down.');
+        }
+      });
+
+      await expect(tools[0].execute('call-1', { city: 'Oslo' })).rejects.toThrow(
+        'Upstream API is down.'
+      );
+    });
   });
 
   it('turns semantic build intent into a structured terminating tool result', async () => {
@@ -274,12 +396,55 @@ describe('main agent core', () => {
         description: 'Build a complete Hacker News API integration for research.',
         sourceUrls: ['https://github.com/HackerNews/API'],
         reason: 'No installed tool can access Hacker News.',
+        auth: undefined,
         taskKind: 'card-edit',
         targetTools: ['dnd_get_monster', 'dnd_get_spell']
       }
     ]);
     expect(result.terminate).toBe(true);
     expect(result.details.type).toBe('plugin-build-request');
+  });
+
+  it('carries an advance API-key notice so the user can register during the build', async () => {
+    const emitted = [];
+    const tool = createBuildRequestTool(Type, (request) => emitted.push(request));
+    await tool.execute('build-1', {
+      name: 'open-weather',
+      description: 'Current weather and forecasts.',
+      reason: 'No installed tool can reach OpenWeather.',
+      auth: {
+        required: true,
+        signupUrl: 'https://openweathermap.org/api',
+        credentialLabel: 'OpenWeather API key'
+      }
+    });
+
+    expect(emitted[0].auth).toEqual({
+      required: true,
+      signupUrl: 'https://openweathermap.org/api',
+      credentialLabel: 'OpenWeather API key'
+    });
+  });
+
+  it('drops an unusable sign-up link and omits auth when no key is needed', async () => {
+    const emitted = [];
+    const tool = createBuildRequestTool(Type, (request) => emitted.push(request));
+
+    await tool.execute('build-1', {
+      name: 'open-weather',
+      description: 'Weather.',
+      reason: 'Missing capability.',
+      auth: { required: true, signupUrl: 'not-a-url' }
+    });
+    expect(emitted[0].auth).toEqual({ required: true, signupUrl: '', credentialLabel: '' });
+
+    await tool.execute('build-2', {
+      name: 'hacker-news',
+      description: 'Stories.',
+      reason: 'Missing capability.',
+      auth: { required: false }
+    });
+    expect(emitted[1].auth).toBeUndefined();
   });
 });
 

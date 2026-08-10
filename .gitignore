@@ -3,3 +3,6 @@ dist
 target
 .env
 .DS_Store
+
+# Host-owned plugin cache written when the runner tests exercise a fixture.
+scripts/fixtures/.plugin-data

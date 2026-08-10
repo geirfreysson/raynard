@@ -96,3 +96,33 @@ export function configureApiCache(options: ApiCacheOptions): void;
 export function apiGet<T>(url: string, options?: ApiGetOptions): Promise<T>;
 export function requireNonEmpty(value: unknown, label: string): string;
 export function requirePositiveInt(value: unknown, label: string): number;
+
+/**
+ * Thrown by requireCredential when the host has not configured a value. The
+ * runner turns it into a prompt for the user rather than a plain tool failure.
+ */
+export class MissingCredentialError extends Error {
+  name: 'MissingCredentialError';
+  credentialKey: string;
+  credentialLabel: string;
+}
+
+/** Host-only. Plugins never call this. */
+export function configureCredentials(values: Record<string, string>): void;
+
+/** Returns '' when the credential is not configured. */
+export function getCredential(key: string): string;
+
+/**
+ * Reads a credential the plugin declared under auth.credentials in
+ * plugin.json, throwing MissingCredentialError when the user has not added it
+ * yet. Call it inside execute(), never at module load, so tool discovery keeps
+ * working before a key is configured.
+ *
+ *   const key = requireCredential('OPENWEATHER_API_KEY');
+ *   const data = await apiGet(url, { query: { appid: key } });
+ */
+export function requireCredential(key: string, label?: string): string;
+
+/** Replaces every configured credential value in the text with '***'. */
+export function redactSecrets(text: unknown): string;

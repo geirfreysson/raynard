@@ -43,7 +43,42 @@ describe('build request mode flow', () => {
       description:
         'This will switch to Build mode and let the coding agent create or update this plugin.',
       confirmLabel: 'Write plugin',
-      progress: 'Preparing hacker-news for the coding agent...'
+      progress: 'Preparing hacker-news for the coding agent...',
+      authNotice: '',
+      signupUrl: '',
+      signupLabel: 'Get an API key'
     });
+  });
+
+  it('tells the user to sign up for a key while the plugin is being written', () => {
+    const copy = pluginWriteConfirmationCopy('open-weather', {
+      required: true,
+      credentialLabel: 'OpenWeather API key',
+      signupUrl: 'https://openweathermap.org/api'
+    });
+
+    expect(copy.authNotice).toContain('OpenWeather API key');
+    expect(copy.authNotice).toMatch(/sign up/i);
+    expect(copy.signupUrl).toBe('https://openweathermap.org/api');
+  });
+
+  it('still names the requirement when the agent gives no sign-up page', () => {
+    const copy = pluginWriteConfirmationCopy('open-weather', { required: true });
+
+    expect(copy.authNotice).toContain('an API key');
+    expect(copy.signupUrl).toBe('');
+  });
+
+  it('ignores a sign-up value that is not a usable link', () => {
+    const copy = pluginWriteConfirmationCopy('open-weather', {
+      required: true,
+      signupUrl: 'javascript:alert(1)'
+    });
+
+    expect(copy.signupUrl).toBe('');
+  });
+
+  it('says nothing about keys when the API does not need one', () => {
+    expect(pluginWriteConfirmationCopy('hacker-news', { required: false }).authNotice).toBe('');
   });
 });

@@ -144,6 +144,56 @@ description broad enough to describe the whole plugin rather than one endpoint.
 loaded; there is no old-format manifest or entrypoint fallback. Never put API
 keys or other credentials in the manifest or source files.
 
+## Authentication
+
+A plugin that wraps an authenticated API declares the secrets it needs. It never
+stores or asks for a value: the host keeps that in the operating system keychain
+and supplies it at call time.
+
+```json
+"auth": {
+  "credentials": [
+    {
+      "key": "OPENWEATHER_API_KEY",
+      "label": "OpenWeather API key",
+      "description": "Free tier, no card required.",
+      "signupUrl": "https://openweathermap.org/api"
+    }
+  ]
+}
+```
+
+`key` must be `UPPER_SNAKE_CASE`. `label` and `signupUrl` are required, and
+`signupUrl` must be the page where a user actually obtains the key — not the
+API documentation root, which belongs in `sourceUrls`. It is the link the app
+shows whenever it asks for the key, so a declaration without a usable one is
+dropped.
+
+Read the value inside `execute()`, never at module load, so tool discovery keeps
+working before any key is configured:
+
+```ts
+import { apiGet, requireCredential } from '@raynard/plugin-sdk';
+
+async execute(args) {
+  const apiKey = requireCredential('OPENWEATHER_API_KEY');
+  const payload = await apiGet('https://api.openweathermap.org/data/2.5/weather', {
+    query: { q: String(args.city), appid: apiKey }
+  });
+  // ...
+}
+```
+
+`requireCredential` throws when the user has not stored a value. The host turns
+that into a prompt with the sign-up link rather than a failed tool call, so the
+plugin needs no fallback path. `getCredential` returns `''` instead of throwing
+when a credential is genuinely optional.
+
+Every credential read with `requireCredential` must also be declared in the
+manifest and documented in `README.md` under an `## Authentication` heading that
+includes the sign-up URL; validation rejects the build otherwise. Tests stay
+fully mocked — the plugin builder never has a real key.
+
 ## The runtime entry
 
 `tools.ts` is the only required code entry point. Export a registry created by
@@ -216,6 +266,26 @@ Descriptions are routing instructions for the chat agent. State what the tool
 returns and when it should be chosen, and distinguish neighboring operations.
 For example, “List and filter current players by position, team, price, and
 value” routes better than “Gets players.”
+
+They are also the tool's **operating** instructions. A tool's description and its
+parameter descriptions are the only plugin text the chat agent ever sees at
+runtime — the host passes exactly these two fields to the model, and nothing
+else. `README.md`, code comments, and `plugin.json` are written for people and
+never reach it. Anything a caller must know to use the endpoint correctly has to
+live in a description:
+
+- parameters that only take effect in combination, or are ignored on their own;
+- inputs the API silently drops;
+- defaults applied when a parameter is omitted;
+- result caps, maximum page size, and how to page;
+- the sort order of results;
+- the format and source of IDs and codes, and units;
+- which tool to call before or after this one.
+
+Put a per-parameter rule on that parameter's description and whole-endpoint
+behavior on the tool description. `README.md` may repeat any of it for human
+readers, but must never be its only home — a quirk documented only there is a
+quirk the agent will keep tripping over.
 
 Use small validated parameter sets. `requireNonEmpty()` and
 `requirePositiveInt()` are available for common checks. Reject unknown fields
@@ -570,4 +640,7 @@ Before considering a plugin complete, confirm that:
 - all tests and runtime discovery pass;
 - the README includes a complete Endpoint Inventory;
 - `plugin.json.samplePrompts` has exactly three useful questions;
+- every credential is declared in `auth.credentials` with a label and sign-up
+  URL, read with `requireCredential` inside `execute`, and documented under an
+  `Authentication` heading in the README;
 - no secrets, host UI code, or copied SDK/runtime plumbing is included.

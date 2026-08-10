@@ -211,4 +211,77 @@ describe('applyStreamPayload', () => {
       }
     ]);
   });
+
+  it('dispatches a credential request carried in the generic result field', () => {
+    const requests: unknown[] = [];
+
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'credential_request',
+        result: {
+          pluginId: 'open-weather',
+          pluginName: 'Open Weather',
+          credentials: [
+            {
+              key: 'OPENWEATHER_API_KEY',
+              label: 'OpenWeather API key',
+              signupUrl: 'https://openweathermap.org/api'
+            }
+          ]
+        }
+      },
+      'active',
+      { streamed: '' },
+      { onCredentialRequest: (request) => requests.push(request) }
+    );
+
+    expect(requests).toEqual([
+      {
+        pluginId: 'open-weather',
+        pluginName: 'Open Weather',
+        credentials: [
+          {
+            key: 'OPENWEATHER_API_KEY',
+            label: 'OpenWeather API key',
+            description: '',
+            signupUrl: 'https://openweathermap.org/api'
+          }
+        ]
+      }
+    ]);
+  });
+
+  it('ignores a malformed credential request rather than half-rendering a card', () => {
+    const requests: unknown[] = [];
+
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'credential_request', result: { credentials: [] } },
+      'active',
+      { streamed: '' },
+      { onCredentialRequest: (request) => requests.push(request) }
+    );
+
+    expect(requests).toEqual([]);
+  });
+
+  it('ignores a credential request from a superseded stream', () => {
+    const requests: unknown[] = [];
+
+    applyStreamPayload(
+      {
+        stream_id: 'stale',
+        event_type: 'credential_request',
+        result: {
+          pluginId: 'open-weather',
+          credentials: [{ key: 'OPENWEATHER_API_KEY', label: 'Key' }]
+        }
+      },
+      'active',
+      { streamed: '' },
+      { onCredentialRequest: (request) => requests.push(request) }
+    );
+
+    expect(requests).toEqual([]);
+  });
 });
