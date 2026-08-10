@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   createElement as createLucideElement,
+  Database,
+  Ellipsis,
   MessageSquare,
   PanelLeftClose,
   Plug,
@@ -10,6 +12,9 @@ import {
 } from 'lucide';
 import { getErrorMessage } from './errors';
 import { attachExternalLinkHandler } from './external-links';
+import { agentActivityLabel } from './agent-activity';
+import { parseChartSpec } from './chart-spec';
+import { renderChart, unmountChart } from './chart-mount';
 import {
   cancelAgentTurnStream,
   runMainAgentStream,
@@ -150,6 +155,11 @@ type GeneratedPluginDetail = {
   readme: string;
 };
 
+type PluginCacheSettings = {
+  enabled: boolean;
+  ttlHours: number;
+};
+
 type AppMode = 'explore' | 'build';
 type PluginConflictStrategy = 'error' | 'replace' | 'rename' | 'edit';
 type PluginScaffoldStatus = {
@@ -181,6 +191,8 @@ const DEFAULT_SPLASH_PROMPTS = [
   'Say hello and show the conversation view'
 ] as const;
 const appIcons: Record<string, IconNode> = {
+  database: Database,
+  ellipsis: Ellipsis,
   'message-square': MessageSquare,
   plus: Plus,
   'panel-left-close': PanelLeftClose,
@@ -318,6 +330,34 @@ app.innerHTML = `
           </div>
         </div>
       </section>
+
+      <section id="pluginCacheModal" class="plugin-cache-modal-overlay is-hidden" aria-hidden="true">
+        <div class="plugin-cache-modal" role="dialog" aria-modal="true" aria-labelledby="pluginCacheTitle">
+          <header class="plugin-cache-header">
+            <h2 id="pluginCacheTitle">Plugin Cache</h2>
+            <p id="pluginCacheHint">Reuse recent API responses for this plugin.</p>
+          </header>
+          <label class="plugin-cache-toggle">
+            <input id="pluginCacheEnabled" type="checkbox" checked>
+            <span>Enable API response cache</span>
+          </label>
+          <label class="plugin-cache-duration">
+            <span>Cache duration</span>
+            <span class="plugin-cache-duration-input">
+              <input id="pluginCacheTtl" type="number" min="1" max="8760" step="1" value="24" inputmode="numeric">
+              <span>hours</span>
+            </span>
+          </label>
+          <p id="pluginCacheStatus" class="plugin-cache-status" aria-live="polite"></p>
+          <div class="plugin-cache-actions">
+            <button id="pluginCacheClear" class="plugin-cache-clear" type="button">Clear cached results</button>
+            <div>
+              <button id="pluginCacheCancel" class="extension-delete-secondary" type="button">Cancel</button>
+              <button id="pluginCacheSave" class="plugin-cache-save" type="button">Save</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
 `;
@@ -362,6 +402,15 @@ const extensionDeleteModal = document.querySelector<HTMLElement>('#extensionDele
 const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
 const extensionDeleteCancel = document.querySelector<HTMLButtonElement>('#extensionDeleteCancel');
 const extensionDeleteConfirm = document.querySelector<HTMLButtonElement>('#extensionDeleteConfirm');
+const pluginCacheModal = document.querySelector<HTMLElement>('#pluginCacheModal');
+const pluginCacheTitle = document.querySelector<HTMLElement>('#pluginCacheTitle');
+const pluginCacheHint = document.querySelector<HTMLElement>('#pluginCacheHint');
+const pluginCacheEnabled = document.querySelector<HTMLInputElement>('#pluginCacheEnabled');
+const pluginCacheTtl = document.querySelector<HTMLInputElement>('#pluginCacheTtl');
+const pluginCacheStatus = document.querySelector<HTMLElement>('#pluginCacheStatus');
+const pluginCacheClear = document.querySelector<HTMLButtonElement>('#pluginCacheClear');
+const pluginCacheCancel = document.querySelector<HTMLButtonElement>('#pluginCacheCancel');
+const pluginCacheSave = document.querySelector<HTMLButtonElement>('#pluginCacheSave');
 
 let activeSessionId = createSessionId();
 let activeChatMeta = createChatMeta(activeSessionId);
@@ -382,6 +431,7 @@ let pendingExtensionDelete:
       resolve: (confirmed: boolean) => void;
     }
   | null = null;
+let activePluginCache: { pluginId: string; label: string } | null = null;
 
 window.setTimeout(() => {
   shell?.classList.remove('is-booting');
@@ -471,10 +521,24 @@ extensionDeleteModal?.addEventListener('click', (event) => {
     resolveExtensionDelete(false);
   }
 });
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && pendingExtensionDelete) {
-    resolveExtensionDelete(false);
+pluginCacheCancel?.addEventListener('click', closePluginCacheModal);
+pluginCacheSave?.addEventListener('click', () => void saveActivePluginCacheSettings());
+pluginCacheClear?.addEventListener('click', () => void clearActivePluginCache());
+pluginCacheEnabled?.addEventListener('change', syncPluginCacheDurationState);
+pluginCacheModal?.addEventListener('click', (event) => {
+  if (event.target === pluginCacheModal) closePluginCacheModal();
+});
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (target instanceof Element && !target.closest('.plugin-detail-actions')) {
+    closePluginDetailMenu();
   }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  closePluginDetailMenu();
+  if (activePluginCache) closePluginCacheModal();
+  if (pendingExtensionDelete) resolveExtensionDelete(false);
 });
 attachExternalLinkHandler(document, async (url) => {
   try {
@@ -1119,6 +1183,115 @@ function resolveExtensionDelete(confirmed: boolean) {
   pending.resolve(confirmed);
 }
 
+function closePluginDetailMenu() {
+  const menu = pluginDetailView?.querySelector<HTMLElement>('.plugin-detail-menu');
+  const toggle = pluginDetailView?.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
+  menu?.classList.add('is-hidden');
+  toggle?.setAttribute('aria-expanded', 'false');
+}
+
+async function openPluginCacheModal(pluginId: string, label: string) {
+  if (
+    !pluginCacheModal ||
+    !pluginCacheEnabled ||
+    !pluginCacheTtl ||
+    !pluginCacheStatus
+  ) {
+    return;
+  }
+  activePluginCache = { pluginId, label };
+  if (pluginCacheTitle) pluginCacheTitle.textContent = `Cache · ${label}`;
+  if (pluginCacheHint) {
+    pluginCacheHint.textContent = 'Reuse successful API responses until the cache duration expires.';
+  }
+  pluginCacheEnabled.checked = true;
+  pluginCacheTtl.value = '24';
+  pluginCacheStatus.textContent = 'Loading cache settings…';
+  pluginCacheModal.classList.remove('is-hidden');
+  pluginCacheModal.setAttribute('aria-hidden', 'false');
+  setPluginCacheModalBusy(true);
+
+  try {
+    const settings = await invoke<PluginCacheSettings>('get_generated_plugin_cache_settings', {
+      pluginId
+    });
+    if (activePluginCache?.pluginId !== pluginId) return;
+    pluginCacheEnabled.checked = settings.enabled;
+    pluginCacheTtl.value = String(settings.ttlHours);
+    pluginCacheStatus.textContent = '';
+    setPluginCacheModalBusy(false);
+    pluginCacheEnabled.focus();
+  } catch (error) {
+    if (activePluginCache?.pluginId !== pluginId) return;
+    pluginCacheStatus.textContent = getErrorMessage(error, 'Could not load cache settings.');
+    setPluginCacheModalBusy(false);
+  }
+}
+
+function closePluginCacheModal() {
+  activePluginCache = null;
+  pluginCacheModal?.classList.add('is-hidden');
+  pluginCacheModal?.setAttribute('aria-hidden', 'true');
+  if (pluginCacheStatus) pluginCacheStatus.textContent = '';
+  pluginDetailView?.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle')?.focus();
+}
+
+function setPluginCacheModalBusy(busy: boolean) {
+  if (pluginCacheModal) pluginCacheModal.dataset.busy = String(busy);
+  if (pluginCacheEnabled) pluginCacheEnabled.disabled = busy;
+  if (pluginCacheSave) pluginCacheSave.disabled = busy;
+  if (pluginCacheClear) pluginCacheClear.disabled = busy;
+  syncPluginCacheDurationState();
+}
+
+function syncPluginCacheDurationState() {
+  if (!pluginCacheTtl) return;
+  pluginCacheTtl.disabled =
+    pluginCacheModal?.dataset.busy === 'true' || pluginCacheEnabled?.checked === false;
+}
+
+async function saveActivePluginCacheSettings() {
+  if (!activePluginCache || !pluginCacheEnabled || !pluginCacheTtl || !pluginCacheStatus) return;
+  const ttlHours = Number(pluginCacheTtl.value);
+  if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > 8760) {
+    pluginCacheStatus.textContent = 'Cache duration must be a whole number from 1 to 8760 hours.';
+    pluginCacheTtl.focus();
+    return;
+  }
+
+  const { pluginId } = activePluginCache;
+  setPluginCacheModalBusy(true);
+  pluginCacheStatus.textContent = 'Saving…';
+  try {
+    await invoke<PluginCacheSettings>('save_generated_plugin_cache_settings', {
+      pluginId,
+      settings: { enabled: pluginCacheEnabled.checked, ttlHours }
+    });
+    if (activePluginCache?.pluginId === pluginId) closePluginCacheModal();
+  } catch (error) {
+    if (activePluginCache?.pluginId !== pluginId) return;
+    pluginCacheStatus.textContent = getErrorMessage(error, 'Could not save cache settings.');
+    setPluginCacheModalBusy(false);
+  }
+}
+
+async function clearActivePluginCache() {
+  if (!activePluginCache || !pluginCacheStatus) return;
+  const { pluginId } = activePluginCache;
+  setPluginCacheModalBusy(true);
+  pluginCacheStatus.textContent = 'Clearing cached results…';
+  try {
+    await invoke('clear_generated_plugin_cache', { pluginId });
+    if (activePluginCache?.pluginId !== pluginId) return;
+    pluginCacheStatus.textContent = 'Cached API responses cleared.';
+    setPluginCacheModalBusy(false);
+  } catch (error) {
+    if (activePluginCache?.pluginId !== pluginId) return;
+    pluginCacheStatus.textContent = getErrorMessage(error, 'Could not clear cached results.');
+    setPluginCacheModalBusy(false);
+  }
+}
+
 function renderPluginDetail(detail: GeneratedPluginDetail) {
   if (!pluginDetailView) return;
   const { plugin } = detail;
@@ -1132,12 +1305,35 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
       <h1>${escapeHtml(plugin.name)}</h1>
       <p>${escapeHtml(plugin.description || 'No description provided.')}</p>
     </div>
-    <button class="plugin-detail-delete" type="button">
-      ${iconSvg('trash-2')}
-      <span>Delete</span>
-    </button>
+    <div class="plugin-detail-actions">
+      <button class="plugin-detail-menu-toggle" type="button" aria-label="Plugin options" aria-haspopup="menu" aria-expanded="false">
+        ${iconSvg('ellipsis')}
+      </button>
+      <div class="plugin-detail-menu is-hidden" role="menu">
+        <button type="button" role="menuitem" data-plugin-action="cache">
+          ${iconSvg('database')}
+          <span>Cache</span>
+        </button>
+        <button type="button" role="menuitem" class="is-danger" data-plugin-action="delete">
+          ${iconSvg('trash-2')}
+          <span>Delete</span>
+        </button>
+      </div>
+    </div>
   `;
-  header.querySelector<HTMLButtonElement>('.plugin-detail-delete')?.addEventListener('click', () => {
+  const menuToggle = header.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
+  const menu = header.querySelector<HTMLElement>('.plugin-detail-menu');
+  menuToggle?.addEventListener('click', () => {
+    const opening = menu?.classList.contains('is-hidden') ?? false;
+    menu?.classList.toggle('is-hidden', !opening);
+    menuToggle.setAttribute('aria-expanded', String(opening));
+  });
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="cache"]')?.addEventListener('click', () => {
+    closePluginDetailMenu();
+    void openPluginCacheModal(plugin.id, plugin.name);
+  });
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="delete"]')?.addEventListener('click', () => {
+    closePluginDetailMenu();
     void deleteGeneratedPlugin(plugin.id);
   });
   pluginDetailView.appendChild(header);
@@ -1546,6 +1742,39 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
   }
+  // Returning to a chat whose turn is still running: restore the liveness row so
+  // a backgrounded run does not look like it was dropped.
+  if (message.role === 'assistant' && !message.builderRun && message.status === 'running') {
+    const live = chatRuns.get(activeSessionId)?.kind === 'agent';
+    setAgentActivity(article, agentActivityLabel({ running: live, streaming: false }));
+  }
+}
+
+/**
+ * Mirror an Explore turn's liveness line into a message article. Kept as a
+ * sibling of `.message-text` so a body re-render (syncRemountedRun) leaves it
+ * alone, and always moved last so it reads as the trailing "still working" row.
+ */
+function setAgentActivity(article: HTMLElement | null, label: string | null) {
+  if (!article) return;
+  let row = article.querySelector<HTMLElement>(':scope > .agent-activity');
+  if (!label) {
+    row?.remove();
+    return;
+  }
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'agent-activity';
+    const dot = document.createElement('span');
+    dot.className = 'agent-activity-dot';
+    row.appendChild(dot);
+    row.appendChild(document.createElement('span'));
+  }
+  if (row.parentElement !== article || row !== article.lastElementChild) {
+    article.appendChild(row);
+  }
+  const text = row.querySelector('span:last-child');
+  if (text && text.textContent !== label) text.textContent = label;
 }
 
 /** Find or create the card container appended after a message's text body. */
@@ -1611,10 +1840,11 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   const pendingBody = pending.querySelector<HTMLElement>('.message-text');
   const thinkingPreview = document.createElement('div');
   thinkingPreview.className = 'thinking-preview';
-  thinkingPreview.textContent = 'Thinking...';
-  pending.prepend(thinkingPreview);
+  // Inserted on the first reasoning delta; the activity row below carries the
+  // "still working" signal until then.
   let streamed = '';
   let thinking = '';
+  let activeToolName: string | undefined;
   const assistantRecord: StoredChatMessage = {
     role: 'assistant',
     text: 'Thinking...',
@@ -1640,11 +1870,26 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
   const turnIsActive = () =>
     activeSessionId === turnSessionId && mainViewRevision === run.viewRevision;
   const syncRemountedTurn = () => syncRemountedRun(run, assistantRecord);
+  /**
+   * Keep the pulsing "still working" row in step with the turn's state. This
+   * deliberately does NOT check turnIsActive: while the user is off in a plugin
+   * view the article is still mounted, and skipping the update there would strand
+   * a pulsing row on a turn that has already finished.
+   */
+  const refreshActivity = (running = true) => {
+    const article = renderedMessageArticles.get(assistantRecord) ?? pending;
+    if (!article?.isConnected) return;
+    setAgentActivity(
+      article,
+      agentActivityLabel({ running, streaming: Boolean(streamed), toolName: activeToolName })
+    );
+  };
   const snapshotPersister = createTurnSnapshotPersister(() =>
     persistChatSnapshotQuietly(turnMeta, turnStored)
   );
   syncRunControls();
   renderChatHistory();
+  refreshActivity();
   await persistChatSnapshot(turnMeta, turnStored);
   void logAgentTurnEvent('turn_start', {
     mode: turnMode,
@@ -1669,6 +1914,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
           const pinned = isNearBottom(messages);
           if (pendingBody) pendingBody.textContent = streamed;
           if (thinkingPreview.parentElement) thinkingPreview.remove();
+          refreshActivity();
           if (pinned) scrollMessagesToBottom();
         }
         syncRemountedTurn();
@@ -1686,6 +1932,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         if (turnIsActive()) {
           const pinned = isNearBottom(messages);
           thinkingPreview.textContent = formatThinkingPreview(thinking);
+          if (!thinkingPreview.parentElement) pending.prepend(thinkingPreview);
           if (pinned) scrollMessagesToBottom();
         }
         syncRemountedTurn();
@@ -1694,6 +1941,8 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
+        activeToolName = toolCall.toolName;
+        refreshActivity();
         snapshotPersister.schedule(true);
         syncRemountedTurn();
         void logAgentTurnEvent('tool_call', {
@@ -1705,6 +1954,8 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         assistantRecord.text = streamed || `Ran ${toolCall.toolName}.`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
+        activeToolName = undefined;
+        refreshActivity();
         const resultCard = extractResultCard(toolCall);
         if (resultCard) {
           (assistantRecord.cards ??= []).push(resultCard);
@@ -1719,6 +1970,8 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
         }, turnSessionId);
       },
       onToolError: (toolCall) => {
+        activeToolName = undefined;
+        refreshActivity();
         assistantRecord.text = toolCall.error || `Tool failed: ${toolCall.toolName}`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'error';
@@ -1796,6 +2049,8 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
     await refreshChatHistory();
     syncRemountedTurn();
   } finally {
+    activeToolName = undefined;
+    refreshActivity(false);
     snapshotPersister.flush();
     syncRemountedTurn();
     chatRuns.finish(turnSessionId, run.id);
@@ -2550,6 +2805,8 @@ function renderMessageText(container: HTMLElement, text: string, markdown = fals
 }
 
 function renderMarkdown(container: HTMLElement, text: string) {
+  // Charts own a React root; release it before the node is discarded below.
+  container.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
   container.textContent = '';
   const sourceText = String(text || '');
   const sourceLines = sourceText.replace(/\r\n?/g, '\n').split('\n');
@@ -2591,6 +2848,19 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
       }
       if (index < sourceLines.length) {
         index += 1;
+      }
+      // A ```chart fence carries a JSON spec the host draws with Recharts. An
+      // unparseable spec falls through to the ordinary code block below so the
+      // model's output is never swallowed.
+      if (language === 'chart') {
+        const spec = parseChartSpec(block.join('\n'));
+        if (spec) {
+          const chart = document.createElement('div');
+          chart.dataset.chartRoot = 'true';
+          container.appendChild(chart);
+          renderChart(chart, spec);
+          continue;
+        }
       }
       const pre = document.createElement('pre');
       const code = document.createElement('code');

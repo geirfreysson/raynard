@@ -1,6 +1,23 @@
 // Shared runtime for generated API plugins. The host installs this package
 // once above all plugin workspaces; plugin authors import it by package name.
 
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const CACHE_ENTRY_VERSION = 1;
+const HOUR_MS = 60 * 60 * 1000;
+let apiCacheConfig = { enabled: false, ttlHours: 24, directory: '' };
+
+export function configureApiCache(options = {}) {
+  const ttlHours = Number(options.ttlHours ?? 24);
+  apiCacheConfig = {
+    enabled: options.enabled === true,
+    ttlHours: Number.isInteger(ttlHours) && ttlHours >= 1 && ttlHours <= 8760 ? ttlHours : 24,
+    directory: typeof options.directory === 'string' ? options.directory.trim() : ''
+  };
+}
+
 export function createApiReference(input) {
   return {
     referenceId: input.id,
@@ -129,13 +146,65 @@ export function buildQuery(params = {}) {
 export async function apiGet(url, options = {}) {
   const target = url + buildQuery(options.query);
   const label = options.label || safeHost(target);
+  const cachePath = apiCacheEntryPath(target, options.headers);
+  if (cachePath) {
+    const cached = await readApiCacheEntry(cachePath);
+    if (cached.hit) return cached.payload;
+  }
   const response = await fetch(target, { headers: options.headers });
   if (!response.ok) {
     throw new Error(
       `${label} request failed with HTTP ${response.status} for ${target}${await errorDetail(response)}`
     );
   }
-  return await response.json();
+  const payload = await response.json();
+  if (cachePath) await writeApiCacheEntry(cachePath, payload);
+  return payload;
+}
+
+function apiCacheEntryPath(target, headers = {}) {
+  if (!apiCacheConfig.enabled || !apiCacheConfig.directory) return '';
+  const normalizedHeaders = Object.entries(headers || {})
+    .map(([name, value]) => [name.toLowerCase(), String(value)])
+    .sort(([left], [right]) => left.localeCompare(right));
+  const signature = JSON.stringify({ method: 'GET', target, headers: normalizedHeaders });
+  const key = createHash('sha256').update(signature).digest('hex');
+  return join(apiCacheConfig.directory, `${key}.json`);
+}
+
+async function readApiCacheEntry(path) {
+  try {
+    const entry = JSON.parse(await readFile(path, 'utf8'));
+    const valid =
+      entry &&
+      entry.version === CACHE_ENTRY_VERSION &&
+      Number.isFinite(entry.storedAt) &&
+      Object.prototype.hasOwnProperty.call(entry, 'payload');
+    if (!valid || Date.now() - entry.storedAt >= apiCacheConfig.ttlHours * HOUR_MS) {
+      await rm(path, { force: true }).catch(() => {});
+      return { hit: false };
+    }
+    return { hit: true, payload: entry.payload };
+  } catch {
+    await rm(path, { force: true }).catch(() => {});
+    return { hit: false };
+  }
+}
+
+async function writeApiCacheEntry(path, payload) {
+  const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await mkdir(apiCacheConfig.directory, { recursive: true });
+    await writeFile(
+      temporaryPath,
+      JSON.stringify({ version: CACHE_ENTRY_VERSION, storedAt: Date.now(), payload }),
+      'utf8'
+    );
+    await rename(temporaryPath, path);
+  } catch {
+    // Cache failures must never turn a successful API request into a tool failure.
+    await rm(temporaryPath, { force: true }).catch(() => {});
+  }
 }
 
 async function errorDetail(response) {

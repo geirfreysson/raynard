@@ -85,7 +85,14 @@ export type ApiGetOptions = {
   label?: string;
 };
 
+export type ApiCacheOptions = {
+  enabled: boolean;
+  ttlHours?: number;
+  directory?: string;
+};
+
 export function buildQuery(params?: Record<string, QueryValue>): string;
+export function configureApiCache(options: ApiCacheOptions): void;
 export function apiGet<T>(url: string, options?: ApiGetOptions): Promise<T>;
 export function requireNonEmpty(value: unknown, label: string): string;
 export function requirePositiveInt(value: unknown, label: string): number;

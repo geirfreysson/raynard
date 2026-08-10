@@ -1,5 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -8,6 +11,7 @@ const runnerPath = join(scriptsDir, 'plugin-tool-runner.mjs');
 const pluginDir = join(scriptsDir, 'fixtures', 'reference-plugin');
 const brokenPluginDir = join(scriptsDir, 'fixtures', 'broken-plugin');
 const compactPluginDir = join(scriptsDir, 'fixtures', 'compact-plugin');
+const cachePluginDir = join(scriptsDir, 'fixtures', 'cache-plugin');
 
 function runTool(payload, dir = pluginDir) {
   const result = spawnSync('node', [runnerPath], {
@@ -21,6 +25,28 @@ function runTool(payload, dir = pluginDir) {
     .filter(Boolean)
     .at(-1);
   return { status: result.status, payload: JSON.parse(line || '{}') };
+}
+
+function runToolAsync(payload, dir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', [runnerPath], { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.on('error', reject);
+    child.on('close', (status) => {
+      const line = stdout.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).at(-1);
+      try {
+        resolve({ status, payload: JSON.parse(line || '{}'), stderr });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(JSON.stringify({ pluginDir: dir, ...payload }));
+  });
 }
 
 describe('plugin tool runner integration', () => {
@@ -81,5 +107,42 @@ describe('plugin tool runner integration', () => {
     expect(called.status).toBe(1);
     expect(called.payload.ok).toBe(false);
     expect(called.payload.error).toMatch(/singular and plural|card/i);
+  });
+
+  it('reuses an endpoint response across separate runner processes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'raynard-runner-cache-'));
+    const copiedPluginDir = join(root, basename(cachePluginDir));
+    const dataDir = join(root, '.plugin-data', basename(cachePluginDir));
+    await cp(cachePluginDir, copiedPluginDir, { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, 'cache-settings.json'),
+      JSON.stringify({ enabled: true, ttlHours: 24 }),
+      'utf8'
+    );
+
+    let calls = 0;
+    const server = createServer((_request, response) => {
+      calls += 1;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ value: 'cached response' }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const url = `http://127.0.0.1:${address.port}/records?limit=5`;
+
+    try {
+      const first = await runToolAsync({ toolName: 'cached_lookup', args: { url } }, copiedPluginDir);
+      expect(first.status).toBe(0);
+      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+
+      const second = await runToolAsync({ toolName: 'cached_lookup', args: { url } }, copiedPluginDir);
+      expect(second.status).toBe(0);
+      expect(second.payload.result.data).toEqual({ value: 'cached response' });
+      expect(calls).toBe(1);
+    } finally {
+      if (server.listening) server.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

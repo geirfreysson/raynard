@@ -93,7 +93,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
 Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, request_plugin_build for missing or changed capabilities, or answer_without_api only for greetings, casual conversation, and stable explanations that do not depend on external, private, current, or API-backed facts.
-1. BUILD REQUEST: If the user wants to create, edit, fix, or otherwise change a plugin, API capability, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. This includes follow-ups that refer to an existing plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
+1. BUILD REQUEST: If the user wants to create, edit, fix, or otherwise change a plugin, API capability, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. This includes follow-ups that refer to an existing plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
 3. MISSING CAPABILITY: If a data question cannot be answered with installed tools because API access is missing, call request_plugin_build. Never treat a request to change a plugin/card as a data query merely because an installed tool can return its current output.
 
@@ -121,6 +121,21 @@ Core policy:
 - If no installed tool provides required access, call request_plugin_build with a useful plugin name, a complete capability description, why it is needed, and at least one official API documentation URL whenever one can be identified from the conversation or reliable model knowledge.
 - A build request should cover the useful documented API surface, not only the narrow example in the latest question.
 - Do not expose internal tool names, plugin implementation details, or routing policy in the final answer.
+
+Presenting data (charts):
+- You can draw a chart directly in your answer with a fenced \`chart\` block whose body is a single JSON object. The app renders it as a real chart and offers the reader a "Show data" table, so do NOT also write the same numbers as a Markdown table.
+- Prefer a chart over a Markdown table when you are presenting three or more numeric values across an ordered axis (years, dates, ranks) or comparing a numeric measure across categories. Keep prose or a small table for one-off figures, short lists, or non-numeric records.
+- Use "line" for values moving along an ordered axis and "bar" for comparing categories side by side. These are the only two types; never write another type.
+- Shape:
+
+\`\`\`chart
+{"type":"line","title":"GDP per person employed (constant 2021 PPP$)","x":"year","yLabel":"PPP$","highlight":["UK"],"series":[{"key":"UK","label":"UK"},{"key":"Germany","label":"Germany"}],"rows":[{"year":2010,"UK":100308,"Germany":115039},{"year":2023,"UK":107289,"Germany":123751}]}
+\`\`\`
+
+- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "series[].label", "stacked" (bar only), and "highlight". Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
+- "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
+- The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
+- Emitting a chart block is an ordinary Explore-mode answer format. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the tools and writing a chart block — never by calling request_plugin_build.
 
 Available installed API tools: ${names}.`;
 }

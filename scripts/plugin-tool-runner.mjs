@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
@@ -28,6 +28,7 @@ const toolName = String(request.toolName || '').trim();
 const args = request.args && typeof request.args === 'object' && !Array.isArray(request.args) ? request.args : {};
 const listTools = request.listTools === true;
 const runnerDir = dirname(fileURLToPath(import.meta.url));
+const pluginDataDir = join(dirname(pluginDir), '.plugin-data', basename(pluginDir));
 
 if (!pluginDir) {
   emit({ ok: false, error: 'pluginDir is required.' });
@@ -92,6 +93,19 @@ async function installSharedSdk(targetDir) {
   await cp(source, target, { recursive: true });
 }
 
+async function readCacheSettings() {
+  try {
+    const parsed = JSON.parse(await readFile(join(pluginDataDir, 'cache-settings.json'), 'utf8'));
+    const ttlHours = Number(parsed.ttlHours);
+    if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > 8760) {
+      throw new Error('Invalid cache duration.');
+    }
+    return { enabled: parsed.enabled !== false, ttlHours };
+  } catch {
+    return { enabled: true, ttlHours: 24 };
+  }
+}
+
 try {
   await writeFile(join(tempDir, 'package.json'), '{"type":"module"}\n', 'utf8');
   await preparePluginModuleDirectory(pluginDir, tempDir);
@@ -99,8 +113,13 @@ try {
   if (!existsSync(join(pluginDir, sourceEntry))) {
     throw new Error('Plugin must export its registry from tools.ts.');
   }
-  const loaded = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const sdk = await import(pathToFileURL(join(tempDir, 'node_modules', '@raynard', 'plugin-sdk', 'index.js')).href);
+  const cacheSettings = await readCacheSettings();
+  sdk.configureApiCache({
+    ...cacheSettings,
+    directory: join(pluginDataDir, 'api-cache')
+  });
+  const loaded = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
   const plugin = loaded;
   const tools = sdk.assertToolRegistry(plugin.tools);
   if (listTools) {

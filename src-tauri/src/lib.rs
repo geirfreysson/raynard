@@ -179,6 +179,22 @@ struct PluginToolRequest {
     args: Value,
 }
 
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PluginCacheSettings {
+    enabled: bool,
+    ttl_hours: u32,
+}
+
+impl Default for PluginCacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_hours: 24,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeneratedPlugin {
@@ -592,7 +608,43 @@ fn read_generated_plugin(
 #[tauri::command]
 fn delete_generated_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let plugin_root = generated_plugins_dir(&app)?;
+    let data_dir = plugin_data_dir(&plugin_root, &plugin_dir)?;
+    if data_dir.exists() {
+        fs::remove_dir_all(data_dir)
+            .map_err(|error| format!("Could not delete plugin cache data: {error}"))?;
+    }
     fs::remove_dir_all(plugin_dir).map_err(|error| format!("Could not delete plugin: {error}"))
+}
+
+#[tauri::command]
+fn get_generated_plugin_cache_settings(
+    app: tauri::AppHandle,
+    plugin_id: String,
+) -> Result<PluginCacheSettings, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let plugin_root = generated_plugins_dir(&app)?;
+    read_plugin_cache_settings(&plugin_data_dir(&plugin_root, &plugin_dir)?)
+}
+
+#[tauri::command]
+fn save_generated_plugin_cache_settings(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    settings: PluginCacheSettings,
+) -> Result<PluginCacheSettings, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let plugin_root = generated_plugins_dir(&app)?;
+    let data_dir = plugin_data_dir(&plugin_root, &plugin_dir)?;
+    save_plugin_cache_settings(&data_dir, &settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn clear_generated_plugin_cache(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let plugin_root = generated_plugins_dir(&app)?;
+    clear_plugin_api_cache(&plugin_data_dir(&plugin_root, &plugin_dir)?)
 }
 
 #[tauri::command]
@@ -1300,6 +1352,7 @@ async fn run_main_agent_stream(
     let plugin_runner_path = resolve_plugin_tool_runner_path()?;
     let plugin_root = generated_plugins_dir(&app)?;
     ensure_dir(&plugin_root)?;
+    ensure_shared_plugin_sdk(&plugin_root)?;
     let mut plugins = Vec::new();
     for entry in fs::read_dir(&plugin_root)
         .map_err(|error| format!("Could not read generated plugins: {error}"))?
@@ -2098,6 +2151,56 @@ fn generated_plugins_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
     Ok(dir.join("generated-plugins"))
+}
+
+fn plugin_data_dir(plugin_root: &Path, plugin_dir: &Path) -> Result<PathBuf, String> {
+    let plugin_slug = plugin_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| "Could not resolve plugin data directory.".to_string())?;
+    Ok(plugin_root.join(".plugin-data").join(plugin_slug))
+}
+
+fn read_plugin_cache_settings(data_dir: &Path) -> Result<PluginCacheSettings, String> {
+    let settings_path = data_dir.join("cache-settings.json");
+    if !settings_path.is_file() {
+        return Ok(PluginCacheSettings::default());
+    }
+    let raw = fs::read_to_string(&settings_path)
+        .map_err(|error| format!("Could not read plugin cache settings: {error}"))?;
+    let settings: PluginCacheSettings = serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse plugin cache settings: {error}"))?;
+    validate_plugin_cache_settings(&settings)?;
+    Ok(settings)
+}
+
+fn save_plugin_cache_settings(
+    data_dir: &Path,
+    settings: &PluginCacheSettings,
+) -> Result<(), String> {
+    validate_plugin_cache_settings(settings)?;
+    ensure_dir(data_dir)?;
+    let raw = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("Could not serialize plugin cache settings: {error}"))?;
+    fs::write(data_dir.join("cache-settings.json"), format!("{raw}\n"))
+        .map_err(|error| format!("Could not save plugin cache settings: {error}"))
+}
+
+fn validate_plugin_cache_settings(settings: &PluginCacheSettings) -> Result<(), String> {
+    if !(1..=8_760).contains(&settings.ttl_hours) {
+        return Err("Cache duration must be between 1 and 8760 hours.".to_string());
+    }
+    Ok(())
+}
+
+fn clear_plugin_api_cache(data_dir: &Path) -> Result<(), String> {
+    let cache_dir = data_dir.join("api-cache");
+    if cache_dir.exists() {
+        fs::remove_dir_all(cache_dir)
+            .map_err(|error| format!("Could not clear plugin cache: {error}"))?;
+    }
+    Ok(())
 }
 
 fn validate_generated_plugin_dir(
@@ -3085,11 +3188,13 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plugin_tools_stub, ensure_shared_plugin_sdk, external_url_target,
-        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
-        next_available_plugin_slug, normalize_plugin_slug, normalize_stored_messages, now_millis,
-        read_generated_plugin_manifest, BuilderStreamEvent, GeneratedPluginTool,
-        PluginBuilderRequest, RuntimeToolsCache, StoredChatMessage, StreamEvent,
+        build_plugin_tools_stub, clear_plugin_api_cache, ensure_shared_plugin_sdk,
+        external_url_target, generated_plugin_source_mtime_millis,
+        load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
+        normalize_plugin_slug, normalize_stored_messages, now_millis,
+        read_generated_plugin_manifest, read_plugin_cache_settings, save_plugin_cache_settings,
+        BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
+        RuntimeToolsCache, StoredChatMessage, StreamEvent,
     };
     use serde_json::json;
     use std::fs;
@@ -3198,6 +3303,61 @@ mod tests {
         assert!(sdk.join("testing.d.ts").is_file());
 
         fs::remove_dir_all(&root).expect("remove generated plugin root");
+    }
+
+    #[test]
+    fn plugin_cache_settings_default_to_enabled_for_twenty_four_hours() {
+        let data_dir =
+            std::env::temp_dir().join(format!("raynard-plugin-cache-default-{}", now_millis()));
+        let settings = read_plugin_cache_settings(&data_dir).expect("read default settings");
+        assert_eq!(
+            settings,
+            PluginCacheSettings {
+                enabled: true,
+                ttl_hours: 24,
+            }
+        );
+    }
+
+    #[test]
+    fn plugin_cache_settings_round_trip_and_clear_only_cached_responses() {
+        let data_dir =
+            std::env::temp_dir().join(format!("raynard-plugin-cache-roundtrip-{}", now_millis()));
+        let settings = PluginCacheSettings {
+            enabled: false,
+            ttl_hours: 72,
+        };
+        save_plugin_cache_settings(&data_dir, &settings).expect("save settings");
+        assert_eq!(
+            read_plugin_cache_settings(&data_dir).expect("read settings"),
+            settings
+        );
+
+        let cache_dir = data_dir.join("api-cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::write(cache_dir.join("entry.json"), "{}").expect("write cache entry");
+        clear_plugin_api_cache(&data_dir).expect("clear cache");
+
+        assert!(!cache_dir.exists());
+        assert!(data_dir.join("cache-settings.json").is_file());
+        fs::remove_dir_all(&data_dir).expect("remove plugin data dir");
+    }
+
+    #[test]
+    fn plugin_cache_settings_reject_invalid_ttls() {
+        let data_dir =
+            std::env::temp_dir().join(format!("raynard-plugin-cache-invalid-{}", now_millis()));
+        for ttl_hours in [0, 8_761] {
+            let result = save_plugin_cache_settings(
+                &data_dir,
+                &PluginCacheSettings {
+                    enabled: true,
+                    ttl_hours,
+                },
+            );
+            assert!(result.is_err());
+        }
+        assert!(!data_dir.exists());
     }
 
     #[test]
@@ -3337,9 +3497,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
             cancel_model_chat_stream,
+            clear_generated_plugin_cache,
             delete_chat_history,
             delete_generated_plugin,
             execute_generated_plugin_tool,
+            get_generated_plugin_cache_settings,
             get_plugin_scaffold_status,
             load_llm_env_status,
             open_external_url,
@@ -3353,6 +3515,7 @@ pub fn run() {
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,
+            save_generated_plugin_cache_settings,
             save_provider_api_key,
             scaffold_plugin_capability,
             set_active_model_provider,

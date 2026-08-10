@@ -67,6 +67,28 @@ describe('main agent core', () => {
     expect(build).toContain('adding result cards to specific tools');
   });
 
+  it('teaches the chart fence and keeps charting an answer out of the build flow', () => {
+    const explore = buildMainAgentSystemPrompt({ mode: 'explore', toolNames: ['data360_get_data'] });
+
+    // The syntax and its required keys are documented.
+    expect(explore).toContain('```chart');
+    expect(explore).toMatch(/"type"\s*,?.*"x".*"series".*"rows"/s);
+    expect(explore).toContain('"stacked" (bar only)');
+    // The highlight option and when to reach for it.
+    expect(explore).toContain('"highlight"');
+    expect(explore).toMatch(/everything else is drawn muted/i);
+    expect(explore).toMatch(/series label, a series key, or an x-axis value/i);
+    // Only the two types the renderer implements.
+    expect(explore).toMatch(/only two types/i);
+    expect(explore).not.toMatch(/"type"\s*:\s*"(pie|scatter|area)"/);
+    // A chart replaces the table rather than duplicating it.
+    expect(explore).toMatch(/do NOT also write the same numbers as a Markdown table/i);
+    expect(explore).toMatch(/never invent, extrapolate, or round data points/i);
+    // Charting an answer must not be mistaken for a plugin/card change.
+    expect(explore).toMatch(/is not a plugin change/i);
+    expect(explore).toMatch(/Only a request to change how a PLUGIN or its result card renders is a build request/);
+  });
+
   it('requires a tool call in the current turn before making API claims or claiming cards appeared', () => {
     const explore = buildMainAgentSystemPrompt({
       mode: 'explore',

@@ -28,6 +28,14 @@
   --ring: 240 5.9% 10%;
   --radius: 0.65rem;
 
+  /* Chart series colors, cycled by src/components/ui/chart.tsx. Muted enough to
+     sit beside the app's red accent without competing with it. */
+  --chart-1: 12 76% 47%;
+  --chart-2: 210 62% 42%;
+  --chart-3: 168 52% 34%;
+  --chart-4: 43 74% 44%;
+  --chart-5: 274 42% 50%;
+
   box-sizing: border-box;
   color: hsl(var(--card-foreground));
   font-family: var(--font-family-sans, Inter, system-ui, sans-serif);
