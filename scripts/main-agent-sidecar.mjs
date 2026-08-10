@@ -146,7 +146,14 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
     const slug =
       dir.split('/').filter(Boolean).pop() ||
       String(plugin.id || '').replace(/^raynard\.generated\./, '');
-    return { slug, name: String(plugin.name || slug) };
+    return {
+      slug,
+      name: String(plugin.name || slug),
+      // A plugin with no runtime tools is a build that never finished. Keeping
+      // the count lets the prompt say so; without it the agent treats the name
+      // as taken and invents a suffixed one, orphaning the unfinished work.
+      toolCount: Array.isArray(plugin.tools) ? plugin.tools.length : 0
+    };
   })
   .filter((plugin) => plugin.slug);
 

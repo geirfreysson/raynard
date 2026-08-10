@@ -8,7 +8,8 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::ipc::Channel;
@@ -172,6 +173,11 @@ struct PluginBuilderRequest {
     /// for follow-ups like "now tweak that". Each item is { role, content }.
     #[serde(default)]
     messages: Option<Vec<ChatMessage>>,
+    /// The credential the main agent already identified while researching the
+    /// API, so the coding agent does not go looking for a sign-up page the host
+    /// is already holding. Opaque passthrough: names and URLs only, no value.
+    #[serde(default)]
+    auth: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -889,6 +895,28 @@ async fn execute_generated_plugin_tool(
     Ok(payload.get("result").cloned().unwrap_or_else(|| json!({})))
 }
 
+/// Last few lines the builder sidecar wrote to stderr, for appending to an
+/// error the user would otherwise see with no explanation. Bounded because the
+/// whole point is a readable message, not a transcript.
+fn take_builder_stderr_tail(buffer: &Arc<Mutex<String>>) -> Option<String> {
+    let captured = buffer.lock().ok()?;
+    let tail = captured
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ");
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    Some(tail.chars().take(400).collect())
+}
+
 #[tauri::command]
 async fn run_plugin_builder_stream(
     app: tauri::AppHandle,
@@ -921,6 +949,7 @@ async fn run_plugin_builder_stream(
         "targetTools": request.target_tools.unwrap_or_default(),
         "editMode": request.edit_mode,
         "messages": history,
+        "auth": request.auth,
         "provider": config.provider,
         "baseUrl": config.base_url,
         "model": config.model,
@@ -933,10 +962,27 @@ async fn run_plugin_builder_stream(
         .current_dir(&plugin_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Could not start plugin builder sidecar: {error}"))?;
     register_stream_process(&cancel_state, &stream_id, child.id())?;
+
+    // The sidecar writes its final diagnosis to stderr. Discarding it meant a
+    // build that died on a provider error surfaced only whatever generic
+    // failure was checked next. Drain it on a thread so a full pipe can never
+    // block the child, and keep the tail for the error paths below.
+    let builder_stderr = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = Arc::clone(&builder_stderr);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Ok(mut buffer) = sink.lock() {
+                    buffer.push_str(&line);
+                    buffer.push('\n');
+                }
+            }
+        });
+    }
 
     if let Some(mut stdin) = child.stdin.take() {
         let raw = serde_json::to_vec(&sidecar_request)
@@ -1160,7 +1206,13 @@ async fn run_plugin_builder_stream(
         });
     }
     if !status.success() {
-        return Err(format!("Plugin builder exited with {status}."));
+        // A non-zero exit with no error event on stdout means the sidecar died
+        // before it could report; stderr is the only account of why.
+        let detail = take_builder_stderr_tail(&builder_stderr);
+        return Err(match detail {
+            Some(detail) => format!("Plugin builder exited with {status}: {detail}"),
+            None => format!("Plugin builder exited with {status}."),
+        });
     }
 
     let content = if answer.trim().is_empty() {

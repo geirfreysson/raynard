@@ -6,6 +6,7 @@ import {
   buildUserPrompt,
   findPluginTestFiles,
   findUsedCredentialKeys,
+  hasAuthoredPluginWork,
   normalizePluginAuth,
   validatePluginArtifacts
 } from './plugin-builder-core.mjs';
@@ -29,6 +30,127 @@ describe('plugin builder core', () => {
     expect(() =>
       assertBuilderTurnCompleted({ editMode: true, madeFileEdits: true, stopReason: 'stop' })
     ).not.toThrow();
+  });
+
+  it('surfaces the provider failure that ended the turn', () => {
+    // Without this the caller only learns the turn stopped, and the generic
+    // validation failure that follows ("no runtime tool") gets the blame.
+    expect(() =>
+      assertBuilderTurnCompleted({
+        editMode: false,
+        madeFileEdits: true,
+        stopReason: 'error',
+        errorMessage: '402 insufficient balance'
+      })
+    ).toThrow(/402 insufficient balance/);
+    expect(() =>
+      assertBuilderTurnCompleted({
+        editMode: false,
+        madeFileEdits: true,
+        stopReason: 'length',
+        errorMessage: ''
+      })
+    ).toThrow(/output limit/i);
+  });
+
+  it('writes one tool at a time instead of drafting whole files in reasoning', () => {
+    const prompt = buildUserPrompt({ prompt: 'Build it', pluginDir: '/tmp/p' });
+
+    expect(prompt).toMatch(/one tool completely before starting the next/i);
+    expect(prompt).toMatch(/never draft file contents in your reasoning/i);
+  });
+
+  it('tells an untouched scaffold apart from a workspace with authored work', () => {
+    const stub = 'export const tools = defineTools({});';
+    expect(
+      hasAuthoredPluginWork({ files: ['plugin.json', 'tools.ts', 'README.md'], toolsSource: stub })
+    ).toBe(false);
+    // What the failed weather build actually left behind.
+    expect(
+      hasAuthoredPluginWork({
+        files: ['plugin.json', 'tools.ts', 'README.md', 'client.ts', 'client.test.ts'],
+        toolsSource: stub
+      })
+    ).toBe(true);
+    // Only tools.ts written, no supporting files yet.
+    expect(
+      hasAuthoredPluginWork({
+        files: ['plugin.json', 'tools.ts', 'README.md'],
+        toolsSource: 'export const tools = defineTools({ a: {} });'
+      })
+    ).toBe(true);
+    expect(hasAuthoredPluginWork({ files: [], toolsSource: '' })).toBe(false);
+  });
+
+  it('resumes an unfinished build from what is already on disk', () => {
+    // A failed fresh build leaves real work behind (a passing client.ts and its
+    // tests). Restarting blind made the agent rediscover or redo all of it.
+    const prompt = buildUserPrompt({
+      prompt: 'Build the weather plugin',
+      pluginDir: '/data/generated-plugins/openweathermap',
+      pluginSnapshot: 'Files in this plugin: client.ts, client.test.ts, tools.ts',
+      messages: [
+        { role: 'user', content: 'i want to talk to the weather api' },
+        { role: 'assistant', content: 'Switched to Build mode' }
+      ]
+    });
+
+    expect(prompt).toMatch(/resuming an unfinished build/i);
+    expect(prompt).toContain('Files in this plugin: client.ts, client.test.ts, tools.ts');
+    expect(prompt).toContain('i want to talk to the weather api');
+    expect(prompt).toMatch(/do not start over|keep what already works/i);
+  });
+
+  it('leaves a genuinely fresh build prompt alone', () => {
+    const prompt = buildUserPrompt({ prompt: 'Build it', pluginDir: '/tmp/p' });
+
+    expect(prompt).not.toMatch(/resuming an unfinished build/i);
+    expect(prompt).toContain('Implement this Raynard Explore-mode API plugin');
+  });
+
+  it('hands the builder the SDK surface instead of making it go looking', () => {
+    // The first build spent 11 tool calls locating the SDK, reading its .d.ts,
+    // then reading its .js implementation, then cribbing from a sibling plugin.
+    const prompt = buildSystemPrompt({
+      sourceUrls: [],
+      sdkDir: '/data/generated-plugins/node_modules/@raynard/plugin-sdk',
+      sdkTypes: {
+        'index.d.ts': 'export function requireCredential(key: string, label?: string): string;',
+        'testing.d.ts': 'export function mockFetch(handler: unknown): unknown;'
+      }
+    });
+
+    expect(prompt).toContain('/data/generated-plugins/node_modules/@raynard/plugin-sdk');
+    expect(prompt).toContain('export function requireCredential(key: string, label?: string)');
+    expect(prompt).toContain('export function mockFetch');
+    expect(prompt).toMatch(/do not search for it/i);
+    expect(prompt).toMatch(/never read the SDK's `\.js`|never read the SDK's \.js/i);
+    expect(prompt).toMatch(/do not copy from (?:a )?sibling plugin/i);
+  });
+
+  it('names every credential helper it tells the builder to use', () => {
+    const prompt = buildSystemPrompt({ sourceUrls: [] });
+
+    // requireCredential was instructed but absent from the import list, and its
+    // real signature takes a label; configureCredentials was never mentioned at
+    // all, so mocked tests for an authenticated tool had nowhere to start.
+    expect(prompt).toContain('requireCredential');
+    expect(prompt).toContain('configureCredentials');
+    expect(prompt).toMatch(/requireCredential\('[A-Z_]+', '[^']+'\)/);
+  });
+
+  it('states an already-known credential instead of asking the builder to research it', () => {
+    const prompt = buildSystemPrompt({
+      sourceUrls: [],
+      auth: {
+        required: true,
+        credentialLabel: 'OpenWeatherMap API key',
+        signupUrl: 'https://home.openweathermap.org/users/sign_up'
+      }
+    });
+
+    expect(prompt).toContain('OpenWeatherMap API key');
+    expect(prompt).toContain('https://home.openweathermap.org/users/sign_up');
   });
 
   it('requires test-first API tools, broad endpoint coverage, and references', () => {

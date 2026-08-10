@@ -147,6 +147,59 @@ export function buildTargetedPluginSnapshot({ files, taskKind, targetTools }) {
   ].join('\n\n');
 }
 
+/**
+ * The SDK's own type declarations, inlined.
+ *
+ * The package is installed above the plugin workspace, which no prompt ever
+ * said. One observed build spent eleven tool calls and seven minutes locating
+ * it, reading both .d.ts files, then reading the compiled .js to recover
+ * signatures, then grepping a sibling plugin — before writing a single byte.
+ * Handing over the declarations costs a few thousand tokens and removes all of
+ * that.
+ */
+function buildSdkSurfaceBlock(request) {
+  const sdkDir = String(request?.sdkDir || '').trim();
+  const types = request?.sdkTypes && typeof request.sdkTypes === 'object' ? request.sdkTypes : {};
+  const files = Object.entries(types)
+    .map(([name, source]) => [String(name), String(source || '').trim()])
+    .filter(([, source]) => source);
+  if (!sdkDir && !files.length) return '';
+
+  const parts = [];
+  parts.push('The shared SDK is ALREADY INSTALLED — do not search for it.');
+  if (sdkDir) {
+    parts.push(
+      `It lives at ${sdkDir}, one level ABOVE your plugin workspace, and resolves by package name (@raynard/plugin-sdk). There is no node_modules inside the plugin directory.`
+    );
+  }
+  if (files.length) {
+    parts.push(
+      "Its complete public interface is below. This is everything the SDK exports: never read the SDK's `.js` implementation files, and do not copy from a sibling plugin to work out how it is used."
+    );
+    for (const [name, source] of files) {
+      parts.push(`===== @raynard/plugin-sdk/${name} =====\n${source}`);
+    }
+  }
+  return `\n\nSDK (already installed):\n${parts.join('\n\n')}`;
+}
+
+/**
+ * The credential the main agent already identified while researching the API.
+ * Without this the builder re-derives the key name and hunts for a sign-up page
+ * the host has been holding all along.
+ */
+function buildKnownCredentialBlock(auth) {
+  if (!auth || !auth.required) return '';
+  const label = String(auth.credentialLabel || '').trim();
+  const signupUrl = String(auth.signupUrl || '').trim();
+  if (!label && !signupUrl) return '';
+  const lines = ['This API is already known to need a credential — do not research this again.'];
+  if (label) lines.push(`- Label to show the user: ${label}`);
+  if (/^https?:\/\//i.test(signupUrl)) lines.push(`- Sign-up page (use verbatim as signupUrl): ${signupUrl}`);
+  lines.push('- Choose the UPPER_SNAKE_CASE key yourself and declare it as described under Authentication.');
+  return `\n\nKnown credential:\n${lines.join('\n')}`;
+}
+
 export function buildSystemPrompt(request) {
   if (request && request.editMode) {
     return buildEditSystemPrompt(request);
@@ -155,6 +208,8 @@ export function buildSystemPrompt(request) {
     ? request.sourceUrls.map((url) => String(url).trim()).filter(Boolean)
     : [];
   const sourceBlock = sourceUrls.length ? sourceUrls.map((url) => `- ${url}`).join('\n') : '- none provided';
+  const sdkBlock = buildSdkSurfaceBlock(request);
+  const authBlock = buildKnownCredentialBlock(request.auth);
 
   return `You are the Raynard plugin builder running in Build mode.
 
@@ -175,7 +230,7 @@ Hard constraints:
 - Do not rely on skipped network tests or structure-only tests.
 - Run all tests and fix failures before reporting completion.
 - Implement API/client/tool code that fetches data and returns structured, citeable references.
-- The host supplies one shared, versioned @raynard/plugin-sdk. Import defineTools, createApiReference, apiGet, buildQuery, requireNonEmpty, and requirePositiveInt from it. Import mockFetch and expectToolResult from @raynard/plugin-sdk/testing.
+- The host supplies one shared, versioned @raynard/plugin-sdk. Import defineTools, createApiReference, apiGet, buildQuery, requireNonEmpty, requirePositiveInt, requireCredential, and configureCredentials from it. Import mockFetch and expectToolResult from @raynard/plugin-sdk/testing.
 - The author-owned workspace is intentionally small: plugin.json, tools.ts, optional client.ts/supporting modules, behavior tests, and README.md. Do not create index.ts, runtime.ts, testing.ts, contract.test.ts, reference.ts, or another SDK wrapper.
 - You MUST reuse the SDK and MUST NOT re-implement its fetch wrapper, HTTP error handling, query-string builder, references, tool contracts, card types, or test harness.
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
@@ -195,10 +250,10 @@ Hard constraints:
 - Authentication. If the API requires a key, token, or app id:
   - Declare every secret in plugin.json under "auth": { "credentials": [ { "key": "PROVIDER_API_KEY", "label": "Provider API key", "description": "short note, e.g. free tier", "signupUrl": "https://the page where a user signs up for the key" } ] }. The key must be UPPER_SNAKE_CASE; the label and signupUrl are required.
   - signupUrl must be the specific page where a user obtains the key, not the generic API docs root.
-  - Read the value with requireCredential('PROVIDER_API_KEY') from @raynard/plugin-sdk, INSIDE execute(), never at module load. Tool discovery runs before any key is configured and must not throw.
+  - Read the value with requireCredential('PROVIDER_API_KEY', 'Provider API key') from @raynard/plugin-sdk, INSIDE execute(), never at module load. The second argument is the label the host shows when prompting, so pass the same label you declared. Tool discovery runs before any key is configured and must not throw.
   - Document each credential in README.md under an "## Authentication" heading, and include its sign-up URL there verbatim. This is how a user finds out where the key came from later.
   - Do NOT ask the user for the key and do NOT read process.env or a .env file. The host stores it in the OS keychain and supplies it at call time; when it is missing, the host prompts the user for you.
-  - Keep tests fully mocked. The builder never has a real key, so tests must never depend on one.
+  - Keep tests fully mocked. The builder never has a real key, so tests must never depend on one. Inject a fake at the top of the test file with configureCredentials({ PROVIDER_API_KEY: 'TEST_KEY' }) from @raynard/plugin-sdk, and cover the missing-key path by asserting the tool rejects when no value is configured.
 - Set plugin.json.samplePrompts to exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>".
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
@@ -299,7 +354,7 @@ Mandatory tool-interface rules (identical across all plugins):
 ${CARD_RULES}
 
 Source documentation:
-${sourceBlock}`;
+${sourceBlock}${sdkBlock}${authBlock}`;
 }
 
 // Interactive edit mode: Build mode is a live coding session on an EXISTING
@@ -378,7 +433,22 @@ Make the smallest change that satisfies the request. Preserve existing tools and
 
 Important: reading files is not the task — you MUST apply the change by editing the source files this turn. Use at most a brief plan, then make the first required edit. Do not exhaust the response by describing code you intend to write. Do not end your turn after only inspecting the code; keep going until the edits are written to disk and (for code changes) the tests run. Finish with a one or two sentence summary of what you changed.`;
   }
-  return `Implement this Raynard Explore-mode API plugin.
+  // A fresh build that finds work already on disk is a RESUME, not a restart.
+  // The previous attempt may have left passing tests and a finished client; the
+  // agent used to rediscover or redo all of it because nothing told it what was
+  // already there.
+  const snapshot = String(request.pluginSnapshot || '').trim();
+  const resumeBlock = snapshot
+    ? `RESUMING AN UNFINISHED BUILD — a previous attempt on this plugin did not complete.
+
+Its current state on disk is below. Do not start over and do not rewrite files that already work: read this, run the existing tests to see where they stand, and continue from there. Keep what already works.
+
+${snapshot}
+
+`
+    : '';
+
+  return `${buildConversationRecap(request.messages)}${resumeBlock}Implement this Raynard Explore-mode API plugin.
 
 User request:
 ${String(request.prompt || request.description || '').trim()}
@@ -397,19 +467,58 @@ Expected output (the workspace is already scaffolded and the shared SDK is insta
 
 Use only a brief plan (at most five bullets), then immediately create the first failing test with a filesystem tool. Do not exhaust the response by designing every type, endpoint, or card in prose; put that detail directly into the files.
 
+Build ONE tool completely before starting the next: its client helper, then the tool with its card, then its test, then node --test green. Then repeat for the next endpoint. Never draft file contents in your reasoning — write the file first with a filesystem tool and refine it in place. Composing a whole multi-tool file in your head before writing anything spends the response budget on text nobody keeps, and the turn can end before a single line reaches disk.
+
 Run node --test with every test file. Do not report completion until tests pass and the plugin exports at least one runtime tool.`;
 }
 
-export function assertBuilderTurnCompleted({ editMode, madeFileEdits, stopReason }) {
+export function assertBuilderTurnCompleted({
+  editMode,
+  madeFileEdits,
+  stopReason,
+  errorMessage
+}) {
+  // The provider's own words, when the stream carried any. Without them a
+  // caller can only report that the turn stopped, and whatever generic failure
+  // it checks next ("no runtime tool") gets blamed for the real cause.
+  const detail = String(errorMessage || '').trim();
+  const because = detail ? `: ${detail}` : '.';
   if (stopReason === 'length') {
-    throw new Error('Plugin builder reached the model output limit before completing the turn.');
+    throw new Error(
+      `Plugin builder reached the model output limit before completing the turn${because}`
+    );
   }
   if (stopReason === 'aborted' || stopReason === 'error') {
-    throw new Error('Plugin builder was interrupted before completing the turn.');
+    throw new Error(`Plugin builder was interrupted before completing the turn${because}`);
   }
   if (editMode && !madeFileEdits) {
     throw new Error('Plugin builder stopped without writing any changes after its retry.');
   }
+}
+
+/** Files the host writes when it scaffolds an empty plugin. */
+const SCAFFOLD_FILES = new Set(['plugin.json', 'tools.ts', 'README.md']);
+
+/**
+ * True when a workspace holds authored work beyond the host's scaffold.
+ *
+ * Callers use this on the fresh-build path only, where it means "a previous
+ * attempt left something behind, so this is a resume". A build that dies
+ * partway leaves real artifacts — a finished client.ts and passing tests —
+ * while tools.ts is still the stub, and restarting blind threw all of it away.
+ * (A plugin that finished also has authored work, but it routes through the
+ * interactive edit path instead and never reaches this check.)
+ */
+export function hasAuthoredPluginWork({ files, toolsSource }) {
+  const names = (Array.isArray(files) ? files : [])
+    .map(String)
+    .filter((name) => name && !name.startsWith('.'));
+  if (names.some((name) => /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(name))) return true;
+  if (names.some((name) => !SCAFFOLD_FILES.has(name))) return true;
+  const source = String(toolsSource || '').trim();
+  if (!source) return false;
+  // The stub registry is `defineTools({})`; anything else is authored code.
+  return !/defineTools\(\s*\{\s*\}\s*\)/.test(source);
 }
 
 export function findPluginTestFiles(files) {

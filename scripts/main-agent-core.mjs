@@ -1,3 +1,5 @@
+import { getModel } from '@mariozechner/pi-ai';
+
 function modelApi(provider) {
   if (provider === 'claude') return 'anthropic-messages';
   if (provider === 'openai') return 'openai-responses';
@@ -9,16 +11,44 @@ function modelProvider(provider) {
   return provider || 'custom-openai-compatible';
 }
 
+/** Our provider ids, as Pi's bundled model catalog spells them. */
+function catalogProvider(provider) {
+  if (provider === 'claude') return 'anthropic';
+  if (provider === 'moonshot' || provider === 'kimi') return 'moonshotai';
+  return provider;
+}
+
+/**
+ * Context and output ceilings when the catalog has never heard of the model.
+ *
+ * These are floors, not guesses at a specific model: the app ships a default
+ * coding model newer than the pinned catalog, and the previous fallback (128k
+ * context, 8192 output) silently truncated a build turn mid-file. A thinking
+ * model bills its reasoning against the output budget, so 8192 can be gone
+ * before a single line is written.
+ */
+const FALLBACK_LIMITS = {
+  moonshot: { contextWindow: 262144, maxTokens: 32768 },
+  kimi: { contextWindow: 262144, maxTokens: 32768 },
+  claude: { contextWindow: 200000, maxTokens: 32768 },
+  openai: { contextWindow: 128000, maxTokens: 32768 }
+};
+const DEFAULT_LIMITS = { contextWindow: 128000, maxTokens: 16384 };
+
 export function createModel(request) {
   const provider = String(request.provider || '').trim();
   const model = String(request.model || '').trim();
+  // The catalog knows each model's real ceilings, reasoning support, and the
+  // per-provider compat quirks. Prefer it; hand-built numbers are the fallback.
+  const known = getModel(catalogProvider(provider), model);
+  const limits = known || FALLBACK_LIMITS[provider] || DEFAULT_LIMITS;
   return {
     id: model,
     name: `${provider || 'custom'} ${model}`,
     api: modelApi(provider),
     provider: modelProvider(provider),
     baseUrl: String(request.baseUrl || '').trim(),
-    reasoning: false,
+    reasoning: Boolean(known?.reasoning),
     input: ['text'],
     cost: {
       input: 0,
@@ -26,14 +56,15 @@ export function createModel(request) {
       cacheRead: 0,
       cacheWrite: 0
     },
-    contextWindow: 128000,
-    maxTokens: 8192,
+    contextWindow: limits.contextWindow,
+    maxTokens: limits.maxTokens,
     compat:
-      provider === 'moonshot'
+      known?.compat ||
+      (provider === 'moonshot'
         ? {
             supportsDeveloperRole: false
           }
-        : undefined
+        : undefined)
   };
 }
 
@@ -82,7 +113,18 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
   const names = Array.isArray(toolNames) && toolNames.length ? toolNames.join(', ') : '(none)';
   const installedPlugins = Array.isArray(plugins) ? plugins.filter((plugin) => plugin && plugin.slug) : [];
   const pluginList = installedPlugins.length
-    ? installedPlugins.map((plugin) => `${plugin.slug}${plugin.name && plugin.name !== plugin.slug ? ` ("${plugin.name}")` : ''}`).join(', ')
+    ? installedPlugins
+        .map((plugin) => {
+          const label = plugin.name && plugin.name !== plugin.slug ? ` ("${plugin.name}")` : '';
+          // Zero tools means the build never finished. Saying so is what stops
+          // the agent from inventing a suffixed name and abandoning the work.
+          const state =
+            Number(plugin.toolCount) > 0
+              ? ` — ${plugin.toolCount} tool${plugin.toolCount === 1 ? '' : 's'}`
+              : ' — UNFINISHED BUILD, no runtime tools yet';
+          return `${plugin.slug}${label}${state}`;
+        })
+        .join(', ')
     : '(none)';
   const modePolicy =
     mode === 'build'
@@ -110,7 +152,8 @@ Editing an existing plugin (critical):
 - Installed plugins: ${pluginList}.
 - When the user asks to change, extend, add tools to, or add cards to an EXISTING plugin, you MUST pass that plugin's EXACT name from the installed-plugins list as the request_plugin_build "name" (e.g. use "dnd-5e-api", not "dnd" or "Dnd 5e"). The name selects which plugin is edited.
 - Never invent, shorten, or prettify the name of an existing plugin. A name that does not exactly match an installed plugin creates a brand-new EMPTY plugin instead of editing the one the user meant.
-- Only use a new name when the user is genuinely asking to create a new plugin that does not exist yet.
+- A plugin listed as UNFINISHED BUILD is a previous attempt at the SAME capability that did not complete. To continue it, pass its exact slug so the build resumes in place. NEVER pick a new or suffixed name (for example "thing-api" when "thing" is unfinished): that scaffolds an empty directory and abandons the work already on disk, including any passing tests.
+- Only use a new name when the user is genuinely asking to create a new plugin that does not exist yet and no unfinished build already covers it.
 
 Core policy:
 - Inspect the available tools before deciding how to answer.

@@ -6,11 +6,13 @@ import { dirname, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
+import { createModel } from './main-agent-core.mjs';
 import {
   assertBuilderTurnCompleted,
   buildSystemPrompt,
   buildTargetedPluginSnapshot,
   buildUserPrompt,
+  hasAuthoredPluginWork,
   validatePluginArtifacts
 } from './plugin-builder-core.mjs';
 
@@ -34,46 +36,6 @@ function readRequest() {
     });
     input.on('error', reject);
   });
-}
-
-function modelApi(provider) {
-  if (provider === 'claude') return 'anthropic-messages';
-  if (provider === 'openai') return 'openai-responses';
-  return 'openai-completions';
-}
-
-function modelProvider(provider) {
-  if (provider === 'claude') return 'anthropic';
-  return provider || 'custom-openai-compatible';
-}
-
-function createModel(request) {
-  const provider = String(request.provider || '').trim();
-  const model = String(request.model || '').trim();
-  const baseUrl = String(request.baseUrl || '').trim();
-  return {
-    id: model,
-    name: `${provider || 'custom'} ${model}`,
-    api: modelApi(provider),
-    provider: modelProvider(provider),
-    baseUrl,
-    reasoning: false,
-    input: ['text'],
-    cost: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0
-    },
-    contextWindow: 128000,
-    maxTokens: 8192,
-    compat:
-      provider === 'moonshot'
-        ? {
-            supportsDeveloperRole: false
-          }
-        : undefined
-  };
 }
 
 function extractAssistantText(message) {
@@ -180,20 +142,38 @@ if (!apiKey) {
 // Because we always embed the current files, this doubles as cross-turn memory:
 // the state the model sees is authoritative, not something it must reconstruct.
 async function readPluginSnapshot(dir) {
-  const wanted = ['plugin.json', 'tools.ts', 'client.ts', 'README.md'];
+  // Named files first so the important ones survive the budget, then whatever
+  // else the author wrote. A resumed build often turns on a supporting module
+  // or a test file that this list would never have guessed.
+  const preferred = ['plugin.json', 'tools.ts', 'client.ts', 'README.md'];
   const parts = [];
+  let entries = [];
   try {
-    const entries = await readdir(dir);
-    const listing = entries.filter((name) => !name.startsWith('.')).sort().join(', ');
+    entries = (await readdir(dir)).filter((name) => !name.startsWith('.'));
+    const listing = [...entries].sort().join(', ');
     if (listing) parts.push(`Files in this plugin: ${listing}`);
   } catch {
     // A missing dir is handled elsewhere; just skip the listing.
   }
-  for (const name of wanted) {
+  const rest = entries
+    .filter((name) => !preferred.includes(name))
+    .filter((name) => /\.(?:ts|js|mjs|json|md)$/i.test(name))
+    .sort();
+
+  const FILE_CAP = 16000;
+  const TOTAL_CAP = 120000;
+  let used = 0;
+  for (const name of [...preferred, ...rest]) {
+    if (used >= TOTAL_CAP) {
+      parts.push(`… (remaining files omitted for length; read them with a file tool if needed)`);
+      break;
+    }
     try {
       let text = await readFile(`${dir}/${name}`, 'utf8');
-      const CAP = 16000;
-      if (text.length > CAP) text = `${text.slice(0, CAP)}\n… (${name} truncated; read the file for the rest)`;
+      if (text.length > FILE_CAP) {
+        text = `${text.slice(0, FILE_CAP)}\n… (${name} truncated; read the file for the rest)`;
+      }
+      used += text.length;
       parts.push(`===== ${name} =====\n${text}`);
     } catch {
       // Optional file (e.g. no client.ts / README yet) — skip it.
@@ -201,6 +181,48 @@ async function readPluginSnapshot(dir) {
   }
   return parts.join('\n\n');
 }
+
+/** Reads what `hasAuthoredPluginWork` needs to judge the workspace. */
+async function hasAuthoredWork(dir) {
+  try {
+    const files = await readdir(dir);
+    const toolsSource = await readFile(`${dir}/tools.ts`, 'utf8').catch(() => '');
+    return hasAuthoredPluginWork({ files, toolsSource });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The SDK's declarations, so the prompt can hand over the interface instead of
+ * the model going to find it.
+ *
+ * The declarations are read from the host's own copy beside the tool runner —
+ * that one is always present. The path reported to the model is the INSTALLED
+ * package, which the host puts in the generated-plugin root's node_modules,
+ * one level above this workspace. Looking for it inside the plugin directory
+ * is the first thing a builder tries, and it always fails.
+ */
+async function readSdkSurface(runnerPath, dir) {
+  const sourceDir = runnerPath ? join(dirname(runnerPath), 'plugin-sdk') : '';
+  const installedDir = dir ? join(dirname(dir), 'node_modules', '@raynard', 'plugin-sdk') : '';
+  if (!sourceDir) return { sdkDir: installedDir, sdkTypes: {} };
+  const sdkTypes = {};
+  await Promise.all(
+    ['index.d.ts', 'testing.d.ts'].map(async (name) => {
+      try {
+        sdkTypes[name] = await readFile(join(sourceDir, name), 'utf8');
+      } catch {
+        // A missing declaration file just means that part is not described.
+      }
+    })
+  );
+  return { sdkDir: installedDir, sdkTypes };
+}
+
+const sdkSurface = await readSdkSurface(String(request.pluginRunnerPath || '').trim(), pluginDir);
+request.sdkDir = sdkSurface.sdkDir;
+request.sdkTypes = sdkSurface.sdkTypes;
 
 if (request.editMode) {
   let targetedSnapshot = null;
@@ -239,6 +261,11 @@ if (request.editMode) {
     }
   }
   request.pluginSnapshot = targetedSnapshot || await readPluginSnapshot(pluginDir);
+} else if (await hasAuthoredWork(pluginDir)) {
+  // A fresh build over a directory that already holds work is a resume. The
+  // snapshot is the only memory that survives between builder processes.
+  request.pluginSnapshot = await readPluginSnapshot(pluginDir);
+  emit({ type: 'status', status: 'resuming_unfinished_build' });
 }
 
 const agent = new Agent({
@@ -260,6 +287,10 @@ process.once('SIGTERM', () => {
 
 let finalText = '';
 let lastAssistantStopReason = '';
+// Pi ends its loop silently on a failed stream: the reason lives on the
+// assistant message, not in a thrown error. Capture it or the turn dies
+// anonymously.
+let lastAssistantError = '';
 // Track whether the agent actually modified a file this run. A weak/chatty
 // coding model can read everything and then end its turn without editing; in
 // edit mode we detect that and nudge it once to apply the change.
@@ -323,6 +354,15 @@ const unsubscribe = agent.subscribe((event) => {
   if (event.type === 'message_end' && event.message && event.message.role === 'assistant') {
     finalText = extractAssistantText(event.message) || finalText;
     lastAssistantStopReason = String(event.message.stopReason || '');
+    lastAssistantError = String(event.message.errorMessage || '');
+    if (lastAssistantError || (lastAssistantStopReason && lastAssistantStopReason !== 'stop')) {
+      emit({
+        type: 'status',
+        status: `stream_ended:${lastAssistantStopReason || 'unknown'}${
+          lastAssistantError ? `:${lastAssistantError}` : ''
+        }`
+      });
+    }
   }
 });
 
@@ -343,9 +383,20 @@ try {
     assertBuilderTurnCompleted({
       editMode: true,
       madeFileEdits,
-      stopReason: lastAssistantStopReason
+      stopReason: lastAssistantStopReason,
+      errorMessage: lastAssistantError
     });
   } else {
+    // Check HOW the turn ended before checking WHAT it produced. A run that hit
+    // the output limit or lost its stream also fails validation, and validating
+    // first reported that symptom ("no runtime tool") as the cause while the
+    // real reason was discarded.
+    assertBuilderTurnCompleted({
+      editMode: false,
+      madeFileEdits,
+      stopReason: lastAssistantStopReason,
+      errorMessage: lastAssistantError
+    });
     // Fresh builds are gated by a full validate-or-retry pass.
     try {
       await validatePluginWorkspace();
@@ -354,13 +405,14 @@ try {
       await agent.prompt(
         `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
       );
+      assertBuilderTurnCompleted({
+        editMode: false,
+        madeFileEdits,
+        stopReason: lastAssistantStopReason,
+        errorMessage: lastAssistantError
+      });
       await validatePluginWorkspace();
     }
-    assertBuilderTurnCompleted({
-      editMode: false,
-      madeFileEdits,
-      stopReason: lastAssistantStopReason
-    });
   }
   unsubscribe();
   emit({ type: 'done', text: finalText || (request.editMode ? 'Done.' : 'Plugin builder completed.') });

@@ -1,4 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import type { BuildRequestAuth } from './build-request-flow';
 import { decodeCredentialRequest } from './credential-request-flow';
 import type { CredentialRequest as AgentCredentialRequest } from './credential-request-flow';
 
@@ -51,7 +52,7 @@ export type AgentBuildRequest = {
   sourceUrls: string[];
   reason: string;
   /** Advance notice that this API needs a key, so the user can register while the build runs. */
-  auth?: { required: boolean; signupUrl?: string; credentialLabel?: string };
+  auth?: BuildRequestAuth;
   taskKind?: 'card-edit' | 'plugin-edit' | 'plugin-create';
   targetTools?: string[];
 };
@@ -106,6 +107,11 @@ export type PluginBuilderRequest = {
   editMode?: boolean;
   /** Prior build-conversation turns replayed for follow-up continuity. */
   messages?: ChatMessage[];
+  /**
+   * The credential the main agent already identified for this API, forwarded so
+   * the coding agent does not research a sign-up page the host already has.
+   */
+  auth?: BuildRequestAuth;
 };
 
 export async function runMainAgentStream(

@@ -2474,7 +2474,8 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
     const outputBody = output.querySelector<HTMLElement>('.message-text');
     if (!outputBody) return;
     void scaffoldAndRunPluginBuilder(request, outputBody, persistAssistantStatus, {
-      conflictStrategy: 'error'
+      conflictStrategy: 'error',
+      messages: recentBuildConversation()
     });
   });
 }
@@ -2658,6 +2659,17 @@ async function appendPostBuildCredentialPrompt(
   }
 }
 
+/**
+ * The turns the coding agent should see.
+ *
+ * A build request carries only the capability description, so without this the
+ * builder never learns what the user actually asked for or what an earlier
+ * attempt was told. Trimmed here; the sidecar recap trims again.
+ */
+function recentBuildConversation(): ChatMessage[] {
+  return chatMessages.slice(-12);
+}
+
 async function scaffoldAndRunPluginBuilder(
   request: CapabilityRequest,
   body: HTMLElement,
@@ -2764,7 +2776,8 @@ async function scaffoldAndRunPluginBuilder(
         taskKind: request.taskKind,
         targetTools: request.targetTools,
         editMode: options.editMode ?? false,
-        messages: options.messages
+        messages: options.messages,
+        auth: request.auth
       },
       {
         builderRecord,
@@ -3187,7 +3200,8 @@ function renderPluginConflictResolution(
   overwrite.addEventListener('click', () => {
     disableActions();
     void scaffoldAndRunPluginBuilder(request, body, persistAssistantStatus, {
-      conflictStrategy: 'replace'
+      conflictStrategy: 'replace',
+      messages: recentBuildConversation()
     });
   });
 
@@ -3201,14 +3215,16 @@ function renderPluginConflictResolution(
     disableActions();
     void scaffoldAndRunPluginBuilder(request, body, persistAssistantStatus, {
       conflictStrategy: 'error',
-      name
+      name,
+      messages: recentBuildConversation()
     });
   });
 
   autoName.addEventListener('click', () => {
     disableActions();
     void scaffoldAndRunPluginBuilder(request, body, persistAssistantStatus, {
-      conflictStrategy: 'rename'
+      conflictStrategy: 'rename',
+      messages: recentBuildConversation()
     });
   });
 

@@ -43,6 +43,47 @@ describe('main agent core', () => {
     });
   });
 
+  it('takes real context and output limits from the model catalog', () => {
+    // A hardcoded 8192 output cap killed a build mid-file: a thinking model
+    // spends that budget on reasoning before it can write anything large.
+    const known = createModel({
+      provider: 'moonshot',
+      model: 'kimi-k2-thinking',
+      baseUrl: 'https://api.moonshot.ai/v1'
+    });
+    expect(known.contextWindow).toBe(262144);
+    expect(known.maxTokens).toBeGreaterThanOrEqual(32768);
+    expect(known.reasoning).toBe(true);
+
+    // Models newer than the pinned catalog still must not fall back to 8192.
+    const unknown = createModel({
+      provider: 'moonshot',
+      model: 'kimi-k3',
+      baseUrl: 'https://api.moonshot.ai/v1'
+    });
+    expect(unknown.contextWindow).toBeGreaterThanOrEqual(262144);
+    expect(unknown.maxTokens).toBeGreaterThanOrEqual(32768);
+  });
+
+  it('marks an unfinished plugin so the agent resumes it instead of forking a name', () => {
+    // A failed build left "openweathermap" scaffolded with zero tools. The
+    // agent could not tell it apart from a finished plugin, so it asked for
+    // "openweathermap-onecall" and orphaned 22 KB of working code.
+    const prompt = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['hn_top'],
+      plugins: [
+        { slug: 'hacker-news', name: 'Hacker News', toolCount: 5 },
+        { slug: 'openweathermap', name: 'Openweathermap', toolCount: 0 }
+      ]
+    });
+
+    expect(prompt).toContain('hacker-news ("Hacker News") — 5 tools');
+    expect(prompt).toContain('openweathermap ("Openweathermap") — UNFINISHED BUILD');
+    expect(prompt).toMatch(/pass its exact slug so the build resumes in place/i);
+    expect(prompt).toMatch(/never pick a new or suffixed name/i);
+  });
+
   it('sets strict Explore and Build boundaries in the system prompt', () => {
     const explore = buildMainAgentSystemPrompt({ mode: 'explore', toolNames: ['getStoryList'] });
     const build = buildMainAgentSystemPrompt({ mode: 'build', toolNames: [] });
