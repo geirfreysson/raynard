@@ -135,6 +135,10 @@ Presenting data (charts):
 - Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "series[].label", "stacked" (bar only), and "highlight". Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
 - "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
 - The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
+- Charts must be exactly right, so verify the data before you plot it:
+  - Check that the rows you are about to chart actually match what was asked — the right entities and the right time range. A tool can return data that ignores a filter you passed. If the rows do not match the question, do NOT chart them; call the tool again with the correct filter parameters.
+  - If a result says rows were omitted, truncated, or that more pages are available, narrow the query with that tool's filter parameters until the rows you need are all visible. Never chart a partial slice as if it were complete.
+  - Never fill a gap by interpolating, averaging, or recalling a figure from memory. If the data cannot be retrieved, say so plainly and omit the chart rather than plotting something unverified.
 - Emitting a chart block is an ordinary Explore-mode answer format. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the tools and writing a chart block — never by calling request_plugin_build.
 
 Available installed API tools: ${names}.`;
@@ -184,13 +188,80 @@ export function buildPiTypeFromSchema(Type, schemaNode) {
   }
 }
 
-function formatToolResult(result) {
-  if (result && typeof result === 'object') {
-    const text = typeof result.text === 'string' ? result.text : '';
-    const serialized = JSON.stringify(result, null, 2);
-    return text && serialized ? `${text}\n\nStructured result:\n${serialized}` : serialized;
+/** Ceilings for the model-facing view of one tool result. */
+export const MODEL_RESULT_BYTE_LIMIT = 12000;
+const MODEL_RESULT_TEXT_LIMIT = 8000;
+const MODEL_RESULT_MAX_CITATIONS = 20;
+
+/**
+ * Build the model's view of a tool result.
+ *
+ * A result carries three audiences in one object: `text` for the model, `data` +
+ * `card` for the host's result card, and `references[].expandedContent` for the
+ * citation modal. The host already receives all of it through the tool's
+ * `details`, so serializing the whole thing here put the same rows in the model's
+ * context three times — one observed turn spent ~206k tokens on payload of which
+ * ~98% was unreadable to the model, and the turn died on the final round.
+ *
+ * So: `text` verbatim (the summary the model reasons and charts from), compact
+ * citations, and `data` only if it fits what is left of the budget. Anything
+ * dropped is announced, never silently, so the model narrows its query instead
+ * of charting a partial slice.
+ */
+export function formatToolResult(result) {
+  if (!result || typeof result !== 'object') return String(result ?? '');
+
+  const sections = [];
+  const notices = [];
+
+  const rawText = typeof result.text === 'string' ? result.text : '';
+  if (rawText.length > MODEL_RESULT_TEXT_LIMIT) {
+    sections.push(rawText.slice(0, MODEL_RESULT_TEXT_LIMIT));
+    notices.push(
+      `[host] Summary truncated at ${MODEL_RESULT_TEXT_LIMIT} of ${rawText.length} characters. Narrow the query and call again rather than treating this as the complete result.`
+    );
+  } else if (rawText) {
+    sections.push(rawText);
   }
-  return String(result ?? '');
+
+  const references = Array.isArray(result.references) ? result.references : [];
+  const citations = references
+    .slice(0, MODEL_RESULT_MAX_CITATIONS)
+    .map((reference, index) => {
+      const label = String(reference?.referenceLabel || `Reference ${index + 1}`).trim();
+      const url = String(reference?.referenceMeta?.sourceUrl || '').trim();
+      return url ? `[${index + 1}] ${label} — ${url}` : `[${index + 1}] ${label}`;
+    });
+  if (citations.length) {
+    sections.push(`Sources:\n${citations.join('\n')}`);
+    if (references.length > citations.length) {
+      notices.push(`[host] ${references.length - citations.length} further source(s) omitted.`);
+    }
+  }
+
+  // `data` is the card's payload; include it only when it is genuinely small
+  // enough to be a bonus on top of the summary.
+  if (result.data !== undefined && result.data !== null) {
+    let serialized = '';
+    try {
+      serialized = JSON.stringify(result.data);
+    } catch {
+      serialized = '';
+    }
+    const used = sections.join('\n\n').length;
+    const remaining = MODEL_RESULT_BYTE_LIMIT - used;
+    if (serialized && serialized.length <= remaining) {
+      sections.push(`Structured data:\n${serialized}`);
+    } else if (serialized) {
+      notices.push(
+        `[host] Structured data omitted (${serialized.length} characters). The summary above is authoritative. Narrow the query with this tool's filter parameters and call it again if you need rows the summary does not show.`
+      );
+    }
+  }
+
+  if (notices.length) sections.push(notices.join('\n'));
+  const formatted = sections.filter(Boolean).join('\n\n');
+  return formatted || JSON.stringify(result.data ?? result) || '';
 }
 
 export function createGeneratedPluginTools({ Type, plugins, executePluginTool }) {

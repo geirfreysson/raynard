@@ -162,6 +162,16 @@ process.once('SIGTERM', () => {
 });
 
 let finalText = '';
+// The agent loop returns normally when a round comes back errored or aborted, so
+// without tracking this a failed final round is emitted as a successful turn
+// carrying whatever stale text streamed earlier.
+let lastStopReason = '';
+let lastErrorMessage = '';
+// Whether the FINAL assistant message carried text of its own. Without this, a
+// run that ends on an empty completion falls back to text streamed several
+// rounds earlier — which is how a "let me fetch the data…" preamble came to be
+// presented as a finished answer.
+let lastMessageHadText = false;
 const unsubscribe = agent.subscribe((event) => {
   if (event.type === 'message_update') {
     const update = event.assistantMessageEvent;
@@ -174,7 +184,11 @@ const unsubscribe = agent.subscribe((event) => {
     return;
   }
   if (event.type === 'message_end' && event.message?.role === 'assistant') {
-    finalText = extractAssistantText(event.message) || finalText;
+    const text = extractAssistantText(event.message);
+    lastMessageHadText = Boolean(text);
+    finalText = text || finalText;
+    lastStopReason = String(event.message.stopReason || '');
+    lastErrorMessage = String(event.message.errorMessage || '');
     return;
   }
   if (event.type === 'tool_execution_start') {
@@ -203,7 +217,25 @@ const unsubscribe = agent.subscribe((event) => {
 try {
   await agent.prompt(String(currentMessage.content).trim());
   unsubscribe();
-  emit({ type: 'done', text: directAnswer || finalText, buildRequest });
+  // A direct answer or a build request is a legitimate terminal outcome even
+  // when the underlying round reports a stop reason.
+  const failed = lastStopReason === 'error' || lastStopReason === 'aborted';
+  if (!directAnswer && !buildRequest && (failed || !lastMessageHadText)) {
+    const reason =
+      lastErrorMessage ||
+      (lastStopReason === 'aborted'
+        ? 'The model run was aborted.'
+        : failed
+          ? 'The model run failed before it produced an answer.'
+          : 'The model stopped after its tool calls without writing an answer. This usually means the context was exhausted — narrow the query so tools return less data, then try again.');
+    // Host stderr is discarded, so the stop reason has to travel in the error
+    // string itself to reach the turn log.
+    const detail = lastStopReason ? `${reason} (stopReason: ${lastStopReason})` : reason;
+    stderr.write(`[main-agent] stopReason=${lastStopReason || 'none'} ${reason}\n`);
+    emit({ type: 'error', error: detail, stopReason: lastStopReason });
+    process.exit(1);
+  }
+  emit({ type: 'done', text: directAnswer || finalText, buildRequest, stopReason: lastStopReason });
 } catch (error) {
   unsubscribe();
   const message = error?.message || String(error);

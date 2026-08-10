@@ -179,6 +179,8 @@ Hard constraints:
 - The author-owned workspace is intentionally small: plugin.json, tools.ts, optional client.ts/supporting modules, behavior tests, and README.md. Do not create index.ts, runtime.ts, testing.ts, contract.test.ts, reference.ts, or another SDK wrapper.
 - You MUST reuse the SDK and MUST NOT re-implement its fetch wrapper, HTTP error handling, query-string builder, references, tool contracts, card types, or test harness.
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
+- Query-parameter names must come from the documented API surface, spelled exactly as the API expects, including case. APIs commonly ignore unknown parameters and silently return unfiltered data, which looks like a working tool that quietly answers the wrong question.
+- Because tests mock the network, a misspelled parameter still passes a response-shape assertion. Any tool exposing a filter, range, or pagination parameter MUST have a test asserting the built request URL contains that parameter, not only that the mocked response was parsed.
 - Treat provided API documentation as a whole API surface. Do not only build the single narrow call implied by the user's latest question unless the docs truly cover only that call.
 - Build a practical suite of focused tools for important list/search, detail, user/account, metadata/status, and update/history endpoints when available.
 - Prefer multiple focused tools over one broad generic tool.

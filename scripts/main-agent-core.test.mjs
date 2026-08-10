@@ -6,6 +6,8 @@ import {
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
+  formatToolResult,
+  MODEL_RESULT_BYTE_LIMIT,
   toAgentMessages
 } from './main-agent-core.mjs';
 import { Type } from '@mariozechner/pi-ai';
@@ -84,6 +86,11 @@ describe('main agent core', () => {
     // A chart replaces the table rather than duplicating it.
     expect(explore).toMatch(/do NOT also write the same numbers as a Markdown table/i);
     expect(explore).toMatch(/never invent, extrapolate, or round data points/i);
+    // Chart accuracy: verify the rows match the question before plotting.
+    expect(explore).toMatch(/A tool can return data that ignores a filter you passed/i);
+    expect(explore).toMatch(/do NOT chart them; call the tool again/i);
+    expect(explore).toMatch(/Never chart a partial slice as if it were complete/i);
+    expect(explore).toMatch(/omit the chart rather than plotting something unverified/i);
     // Charting an answer must not be mistaken for a plugin/card change.
     expect(explore).toMatch(/is not a plugin change/i);
     expect(explore).toMatch(/Only a request to change how a PLUGIN or its result card renders is a build request/);
@@ -273,5 +280,94 @@ describe('main agent core', () => {
     ]);
     expect(result.terminate).toBe(true);
     expect(result.details.type).toBe('plugin-build-request');
+  });
+});
+
+describe('formatToolResult', () => {
+  // Shaped like the real data360_get_data result that killed a turn: a small
+  // readable summary buried under the card payload and the citation modal's
+  // copy of the same rows.
+  function bigResult() {
+    const rows = Array.from({ length: 1000 }, (_, i) => ({
+      period: String(1980 + (i % 44)),
+      area: 'GBR',
+      value: String(100000 + i),
+      unit: 'PC_A',
+      frequency: 'A',
+      sex: '_T',
+      age: '_T',
+      urbanisation: '_T',
+      latest: 'No'
+    }));
+    return {
+      text: 'Data360 returned 1000 observations (6185 total matches); showing 100:\n1. 2010 | GBR | 100308 PC_A',
+      references: [
+        {
+          referenceId: 'WB_WDI:SL_GDP',
+          referenceLabel: 'GDP per person employed (WB_WDI_SL_GDP_PCAP_EM_KD)',
+          referenceMeta: { sourceUrl: 'https://data360api.worldbank.org/data360/data?DATABASE_ID=WB_WDI' },
+          compactContent: [{ type: 'text', text: 'x'.repeat(200) }],
+          expandedContent: [{ type: 'json', title: 'Raw API payload', text: JSON.stringify(rows, null, 2) }]
+        }
+      ],
+      data: { total: 6185, returned: 1000, rows },
+      card: { name: { singular: 'observation', plural: 'observations' }, layout: [] }
+    };
+  }
+
+  it('collapses a huge result to the summary the model can actually use', () => {
+    const result = bigResult();
+    const wholeResult = JSON.stringify(result, null, 2).length;
+    const formatted = formatToolResult(result);
+
+    expect(wholeResult).toBeGreaterThan(200000);
+    expect(formatted.length).toBeLessThanOrEqual(MODEL_RESULT_BYTE_LIMIT);
+    // The summary and its citation survive intact.
+    expect(formatted).toContain('Data360 returned 1000 observations');
+    expect(formatted).toContain('https://data360api.worldbank.org/data360/data?DATABASE_ID=WB_WDI');
+    // The host-only payloads never reach the model.
+    expect(formatted).not.toContain('Raw API payload');
+    expect(formatted).not.toContain('expandedContent');
+    expect(formatted).not.toContain('singular');
+  });
+
+  it('announces omitted data instead of dropping it silently', () => {
+    const formatted = formatToolResult(bigResult());
+    expect(formatted).toContain('Structured data omitted');
+    expect(formatted).toMatch(/narrow the query/i);
+  });
+
+  it('keeps small structured data, since it costs nothing', () => {
+    const formatted = formatToolResult({
+      text: 'One monster.',
+      references: [],
+      data: { name: 'Aboleth', hit_points: 135 }
+    });
+    expect(formatted).toContain('One monster.');
+    expect(formatted).toContain('"hit_points":135');
+  });
+
+  it('truncates a runaway summary with a notice rather than trusting it', () => {
+    const formatted = formatToolResult({ text: 'y'.repeat(20000), references: [], data: {} });
+    expect(formatted.length).toBeLessThanOrEqual(MODEL_RESULT_BYTE_LIMIT);
+    expect(formatted).toContain('Summary truncated');
+    expect(formatted).toContain('of 20000 characters');
+  });
+
+  it('caps citations and says how many it dropped', () => {
+    const references = Array.from({ length: 25 }, (_, i) => ({
+      referenceLabel: `Source ${i}`,
+      referenceMeta: { sourceUrl: `https://example.com/${i}` }
+    }));
+    const formatted = formatToolResult({ text: 'Many sources.', references, data: {} });
+    expect(formatted).toContain('[20] Source 19');
+    expect(formatted).not.toContain('Source 20');
+    expect(formatted).toContain('5 further source(s) omitted');
+  });
+
+  it('handles non-object and empty results without throwing', () => {
+    expect(formatToolResult('plain text')).toBe('plain text');
+    expect(formatToolResult(null)).toBe('');
+    expect(typeof formatToolResult({ text: '', references: [], data: null })).toBe('string');
   });
 });
