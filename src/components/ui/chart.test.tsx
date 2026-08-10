@@ -203,7 +203,7 @@ describe('ChartBlock', () => {
     act(() => sparse.root.unmount());
   });
 
-  it('mutes every series except the highlighted one', async () => {
+  it('keeps every series colored while emphasizing the highlighted line', async () => {
     const { container, root } = await mount(
       JSON.stringify({
         type: 'line',
@@ -217,13 +217,15 @@ describe('ChartBlock', () => {
       })
     );
 
-    const strokes = [...container.querySelectorAll('.recharts-line-curve')].map((node) =>
-      node.getAttribute('stroke')
-    );
-    expect(strokes).toHaveLength(3);
-    // Exactly one line keeps a palette color; the other two recede to grey.
-    expect(strokes.filter((stroke) => stroke?.includes('--chart-'))).toHaveLength(1);
-    expect(strokes.filter((stroke) => stroke?.includes('--muted-foreground'))).toHaveLength(2);
+    const lines = [...container.querySelectorAll('.recharts-line-curve')];
+    expect(lines).toHaveLength(3);
+    expect(lines.map((line) => line.getAttribute('stroke'))).toEqual([
+      'hsl(var(--chart-1))',
+      'hsl(var(--chart-2))',
+      'hsl(var(--chart-3))'
+    ]);
+    expect(lines.map((line) => line.getAttribute('stroke-width'))).toEqual(['4', '2', '2']);
+    expect(lines.map((line) => line.getAttribute('stroke-opacity'))).toEqual(['1', '0.65', '0.65']);
 
     act(() => root.unmount());
   });

@@ -42,6 +42,9 @@ function seriesColor(index: number): string {
 // subject of the answer is the only thing carrying color.
 const MUTED_COLOR = 'hsl(var(--muted-foreground))';
 const MUTED_OPACITY = 0.45;
+const LINE_STROKE_WIDTH = 2;
+const HIGHLIGHTED_LINE_STROKE_WIDTH = 4;
+const SECONDARY_LINE_OPACITY = 0.65;
 
 /**
  * Paint for one series: full palette color, or muted when a highlight excludes
@@ -54,6 +57,21 @@ function seriesPaint(index: number, key: string, highlight: HighlightResolution)
     color: dimmed ? MUTED_COLOR : seriesColor(index),
     opacity: dimmed ? MUTED_OPACITY : 1,
     dimmed
+  };
+}
+
+/**
+ * A line highlight uses weight instead of removing the other series' colors.
+ * Secondary lines recede slightly but retain the palette needed to distinguish
+ * them from one another.
+ */
+function lineSeriesPaint(index: number, key: string, highlight: HighlightResolution) {
+  const hasSeriesHighlight = highlight.series.size > 0;
+  const highlighted = hasSeriesHighlight && highlight.series.has(key);
+  return {
+    color: seriesColor(index),
+    opacity: hasSeriesHighlight && !highlighted ? SECONDARY_LINE_OPACITY : 1,
+    width: highlighted ? HIGHLIGHTED_LINE_STROKE_WIDTH : LINE_STROKE_WIDTH
   };
 }
 
@@ -250,7 +268,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
           {legend}
           {categoryMarkers}
           {spec.series.map((series, i) => {
-            const paint = seriesPaint(i, series.key, highlight);
+            const paint = lineSeriesPaint(i, series.key, highlight);
             return (
               <Line
                 key={series.key}
@@ -259,7 +277,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
                 name={series.label}
                 stroke={paint.color}
                 strokeOpacity={paint.opacity}
-                strokeWidth={paint.dimmed ? 1.5 : 2}
+                strokeWidth={paint.width}
                 dot={false}
                 connectNulls
                 isAnimationActive={ANIMATE}
