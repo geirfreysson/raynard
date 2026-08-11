@@ -284,4 +284,72 @@ describe('applyStreamPayload', () => {
 
     expect(requests).toEqual([]);
   });
+
+  it('reports a resume attempt so the turn can say it is waiting, not hung', () => {
+    const retries: unknown[] = [];
+
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'retry',
+        error: '429 The engine is currently overloaded',
+        retry: { reason: 'overloaded', attempt: 2, maxAttempts: 3, delayMs: 6000 }
+      },
+      'active',
+      { streamed: 'partial' },
+      { onRetry: (event) => retries.push(event) }
+    );
+
+    expect(retries).toEqual([
+      {
+        reason: 'overloaded',
+        attempt: 2,
+        maxAttempts: 3,
+        delayMs: 6000,
+        error: '429 The engine is currently overloaded'
+      }
+    ]);
+  });
+
+  it('carries provider identity out of the error event, which the command drops', () => {
+    // invoke() rejects with a bare string, so this event is the only place the
+    // renderer can learn whose failure it was.
+    const errors: unknown[] = [];
+
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'error',
+        error: '429 The engine is currently overloaded (stopReason: error)',
+        provider: 'moonshot',
+        model: 'kimi-k2.5',
+        retry: { resumeAttempts: 3 }
+      },
+      'active',
+      { streamed: '' },
+      { onError: (event) => errors.push(event) }
+    );
+
+    expect(errors).toEqual([
+      {
+        error: '429 The engine is currently overloaded (stopReason: error)',
+        provider: 'moonshot',
+        model: 'kimi-k2.5',
+        resumeAttempts: 3
+      }
+    ]);
+  });
+
+  it('reports zero resumes when the sidecar never retried', () => {
+    const errors: { resumeAttempts: number }[] = [];
+
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'error', error: '401 Invalid Authentication' },
+      'active',
+      { streamed: '' },
+      { onError: (event) => errors.push(event) }
+    );
+
+    expect(errors[0].resumeAttempts).toBe(0);
+  });
 });

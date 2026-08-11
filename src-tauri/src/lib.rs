@@ -1115,6 +1115,32 @@ async fn run_plugin_builder_stream(
                     partial_result: payload.get("partialResult").cloned(),
                     result: payload.get("result").cloned(),
                     is_error: payload.get("isError").and_then(Value::as_bool),
+                    retry: None,
+                });
+            }
+            "retry" => {
+                // The builder's own progress line, so the timeline says the model
+                // stalled rather than going quiet for the length of the backoff.
+                let _ = on_event.send(BuilderStreamEvent {
+                    base: StreamEvent {
+                        stream_id: stream_id.clone(),
+                        event_type: "retry".to_string(),
+                        delta: None,
+                        text: None,
+                        error: payload
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        provider: Some(config.provider.clone()),
+                        model: Some(config.model.clone()),
+                    },
+                    tool_call_id: None,
+                    tool_name: None,
+                    args: None,
+                    partial_result: None,
+                    result: None,
+                    is_error: None,
+                    retry: Some(payload.clone()),
                 });
             }
             "status" => {
@@ -1156,9 +1182,8 @@ async fn run_plugin_builder_stream(
                     .and_then(Value::as_str)
                     .unwrap_or("Plugin builder failed.")
                     .to_string();
-                emit_builder_stream_event(
-                    &on_event,
-                    StreamEvent {
+                let _ = on_event.send(BuilderStreamEvent {
+                    base: StreamEvent {
                         stream_id: stream_id.clone(),
                         event_type: "error".to_string(),
                         delta: None,
@@ -1167,7 +1192,16 @@ async fn run_plugin_builder_stream(
                         provider: Some(config.provider.clone()),
                         model: Some(config.model.clone()),
                     },
-                );
+                    tool_call_id: None,
+                    tool_name: None,
+                    args: None,
+                    partial_result: None,
+                    result: None,
+                    is_error: None,
+                    // Carries resumeAttempts, so the host can say the pass was
+                    // retried rather than presenting a one-shot failure.
+                    retry: Some(payload.clone()),
+                });
                 let _ = child.kill();
                 clear_stream_canceled(&cancel_state, &stream_id);
                 return Err(error);
@@ -1351,6 +1385,9 @@ struct BuilderStreamEvent {
     partial_result: Option<Value>,
     result: Option<Value>,
     is_error: Option<bool>,
+    /// Sidecar `retry` payload, passed through untouched so the renderer can say
+    /// which attempt is running and why.
+    retry: Option<Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1366,6 +1403,9 @@ struct MainAgentStreamEvent {
     args: Option<Value>,
     result: Option<Value>,
     build_request: Option<Value>,
+    /// Sidecar `retry` payload, passed through untouched so the renderer can say
+    /// which attempt is running and why.
+    retry: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -1564,6 +1604,7 @@ async fn run_main_agent_stream(
                 args: None,
                 result: None,
                 build_request: None,
+                retry: None,
             });
             return Ok(MainAgentReply {
                 content,
@@ -1615,6 +1656,9 @@ async fn run_main_agent_stream(
                 args: None,
                 result: None,
                 build_request: None,
+                // Carries resumeAttempts, so the host can say the turn was
+                // retried rather than presenting a one-shot failure.
+                retry: Some(payload.clone()),
             });
             let _ = child.kill();
             clear_stream_canceled(&cancel_state, &stream_id);
@@ -1642,6 +1686,13 @@ async fn run_main_agent_stream(
             args: payload.get("args").cloned(),
             result: payload.get("result").cloned(),
             build_request: payload.get("buildRequest").cloned(),
+            // `retry` events reach the channel through this generic relay; the
+            // whole payload rides along so the renderer needs no new columns.
+            retry: if event_type == "retry" {
+                Some(payload.clone())
+            } else {
+                None
+            },
         });
     }
 
@@ -1668,6 +1719,7 @@ async fn run_main_agent_stream(
             args: None,
             result: None,
             build_request: None,
+            retry: None,
         });
         return Ok(MainAgentReply {
             content,
@@ -1905,6 +1957,7 @@ fn emit_builder_stream_event(channel: &Channel<BuilderStreamEvent>, event: Strea
         partial_result: None,
         result: None,
         is_error: None,
+        retry: None,
     });
 }
 
@@ -3755,6 +3808,7 @@ mod tests {
             partial_result: None,
             result: None,
             is_error: None,
+            retry: None,
         })
         .expect("serialize builder stream event");
 

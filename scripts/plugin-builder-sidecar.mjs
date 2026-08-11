@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
 import { completeSimple, streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
-import { createModel } from './main-agent-core.mjs';
+import { createModel, runWithTransientResume } from './main-agent-core.mjs';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   createContextCompactor,
@@ -360,8 +360,10 @@ const agent = new Agent({
     tools: confineCodingTools(createCodingTools(pluginDir), pluginDir)
   },
   getApiKey: async () => apiKey,
+  // maxRetries lets the provider SDK absorb a 429 raised before the stream opens.
+  // Failures raised once the stream is running are handled by promptWithResume.
   streamFn: (streamModel, context, options) =>
-    streamSimple(streamModel, context, { ...options, apiKey }),
+    streamSimple(streamModel, context, { ...options, apiKey, maxRetries: 4, maxRetryDelayMs: 30_000 }),
   transformContext: (messages) => compactContext(messages),
   toolExecution: 'sequential'
 });
@@ -452,9 +454,37 @@ const unsubscribe = agent.subscribe((event) => {
   }
 });
 
+/**
+ * One prompt, resumed in place when the provider fails for a retryable reason.
+ *
+ * A coding pass is expensive to lose — an overloaded provider used to throw away
+ * every file the builder had already written and every test it had already run.
+ * Resuming keeps that work and re-runs only the round that failed.
+ */
+let resumeAttempts = 0;
+async function promptWithResume(text) {
+  const result = await runWithTransientResume({
+    agent,
+    start: () => agent.prompt(text),
+    readFailure: () => ({
+      stopReason: lastAssistantStopReason,
+      errorMessage: lastAssistantError
+    }),
+    onResume: (event) => {
+      stderr.write(`[plugin-builder] resuming after ${event.reason}: attempt ${event.attempt}\n`);
+      emit({ type: 'retry', ...event });
+    },
+    resetRound: () => {
+      lastAssistantStopReason = '';
+      lastAssistantError = '';
+    }
+  });
+  resumeAttempts += result.resumeAttempts;
+}
+
 try {
   emit({ type: 'status', status: 'builder_started' });
-  await agent.prompt(buildUserPrompt(request));
+  await promptWithResume(buildUserPrompt(request));
   if (request.editMode) {
     // An interactive edit turn is one conversational step and is NOT forced
     // through whole-plugin validation. But if the model only inspected files and
@@ -462,7 +492,7 @@ try {
     // models), nudge it once to actually apply the change.
     if (!madeFileEdits) {
       emit({ type: 'status', status: 'edit_no_changes_retrying' });
-      await agent.prompt(
+      await promptWithResume(
         'You inspected or planned without writing edits. Stop planning now. Use a filesystem tool immediately to implement the requested change, then run the relevant `node --test` files. Do not describe code that remains unwritten.'
       );
     }
@@ -488,7 +518,7 @@ try {
       await validatePluginWorkspace();
     } catch (validationError) {
       emit({ type: 'status', status: 'validation_failed_retrying' });
-      await agent.prompt(
+      await promptWithResume(
         `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
       );
       assertBuilderTurnCompleted({
@@ -506,6 +536,6 @@ try {
   unsubscribe();
   const message = error && error.message ? error.message : String(error);
   stderr.write(`[plugin-builder] ${message}\n`);
-  emit({ type: 'error', error: message });
+  emit({ type: 'error', error: message, resumeAttempts });
   process.exit(1);
 }

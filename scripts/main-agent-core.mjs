@@ -231,6 +231,136 @@ export function buildPiTypeFromSchema(Type, schemaNode) {
   }
 }
 
+/**
+ * Failures where another attempt is the right answer.
+ *
+ * These are the provider's own capacity and availability errors, not anything
+ * about the request: an observed turn made 13 successful tool calls and then
+ * died on `429 The engine is currently overloaded`, discarding all of it. The
+ * classifier is deliberately narrow — retrying a bad key or an exhausted
+ * context just spends the user's time to reach the same failure.
+ */
+const TRANSIENT_REASONS = [
+  // Rate limiting is checked before generic overload so a 429 that names a
+  // quota does not get reported as server capacity.
+  ['rate_limited', /\brate[\s_-]?limit|too many requests|quota exceeded/i],
+  ['overloaded', /overloaded|capacity|\bbusy\b|congest/i],
+  ['unavailable', /\b(5\d\d)\b|unavailable|bad gateway|server error/i],
+  ['timeout', /timed?[\s_-]?out|timeout|etimedout|econnreset|socket hang up/i]
+];
+
+/** Failures no retry can fix, checked first so they always win. */
+const PERMANENT_ERROR = /\b(400|401|403|404)\b|invalid[\s_-]?api[\s_-]?key|incorrect api key|invalid authentication|unauthorized|forbidden|context[\s_-]?length|maximum context|too long/i;
+
+/** Longest server-requested wait we will honour before giving up instead. */
+const MAX_SERVER_RETRY_DELAY_MS = 60_000;
+
+/**
+ * The reason slug behind a transient failure, or null when it is not transient.
+ *
+ * A plain `429` with no other signal is capacity — that is what providers mean
+ * by it when no quota is named.
+ */
+export function transientReason(message) {
+  const text = String(message ?? '').trim();
+  if (!text) return null;
+  if (PERMANENT_ERROR.test(text)) return null;
+  for (const [reason, pattern] of TRANSIENT_REASONS) {
+    if (pattern.test(text)) return reason;
+  }
+  return /\b429\b/.test(text) ? 'overloaded' : null;
+}
+
+export function isTransientModelError(message) {
+  return transientReason(message) !== null;
+}
+
+/**
+ * A wait the provider explicitly asked for, in milliseconds.
+ *
+ * Returns null when the message names none, or names one longer than we are
+ * willing to hold the turn open for — the caller then falls back to its own
+ * backoff or gives up.
+ */
+export function retryAfterMs(message) {
+  const text = String(message ?? '');
+  const match =
+    /retry[\s_-]?after["':\s]*([\d.]+)\s*(ms|s|seconds?)?/i.exec(text) ||
+    /try again in\s*([\d.]+)\s*(ms|s|seconds?)/i.exec(text);
+  if (!match) return null;
+  const value = Number.parseFloat(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const ms = /^ms$/i.test(match[2] || '') ? value : value * 1000;
+  return ms > MAX_SERVER_RETRY_DELAY_MS ? null : Math.round(ms);
+}
+
+/** How many times a transient provider failure is resumed before giving up. */
+export const MAX_TRANSIENT_RESUMES = 3;
+const RESUME_BACKOFF_MS = [2_000, 6_000, 15_000];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Drop the empty assistant message a failed round leaves behind.
+ *
+ * Pi records a provider failure as an assistant message carrying
+ * `stopReason: 'error'` and no text. Removing exactly that message puts the last
+ * successful tool result back at the tail, which is what `agent.continue()`
+ * requires — so the resumed round re-runs the failed step with every earlier
+ * tool call intact instead of restarting the turn.
+ *
+ * Returns false when the transcript does not look like that, in which case the
+ * caller must surface the error rather than guess.
+ */
+function dropFailedRound(agent) {
+  const messages = agent?.state?.messages;
+  if (!Array.isArray(messages) || messages.length < 2) return false;
+  const last = messages.at(-1);
+  if (last?.role !== 'assistant' || last.stopReason !== 'error') return false;
+  const previous = messages.at(-2);
+  if (previous?.role !== 'user' && previous?.role !== 'toolResult') return false;
+  messages.pop();
+  return true;
+}
+
+/**
+ * Run a turn, resuming it when the provider fails for a reason a retry can fix.
+ *
+ * `start` runs the turn once. After it settles, `readFailure` reports how the
+ * last round ended; a transient failure is waited out and handed back to
+ * `agent.continue()`. Non-transient failures and a used-up attempt budget fall
+ * through to the caller untouched.
+ */
+export async function runWithTransientResume({
+  agent,
+  start,
+  readFailure,
+  onResume,
+  resetRound,
+  maxAttempts = MAX_TRANSIENT_RESUMES,
+  wait = sleep
+}) {
+  await start();
+
+  let attempts = 0;
+  while (attempts < maxAttempts) {
+    const { stopReason, errorMessage } = readFailure() || {};
+    if (stopReason !== 'error') break;
+    const reason = transientReason(errorMessage);
+    if (!reason) break;
+    if (!dropFailedRound(agent)) break;
+
+    const delayMs = retryAfterMs(errorMessage) ?? RESUME_BACKOFF_MS[attempts] ?? RESUME_BACKOFF_MS.at(-1);
+    attempts += 1;
+    onResume?.({ reason, attempt: attempts, maxAttempts, delayMs, error: String(errorMessage || '') });
+    await wait(delayMs);
+    resetRound?.();
+    await agent.continue();
+  }
+
+  return { resumeAttempts: attempts };
+}
+
 /** Ceilings for the model-facing view of one tool result. */
 export const MODEL_RESULT_BYTE_LIMIT = 12000;
 const MODEL_RESULT_TEXT_LIMIT = 8000;

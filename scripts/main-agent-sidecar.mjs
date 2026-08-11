@@ -10,6 +10,7 @@ import {
   createGeneratedPluginTools,
   createModel,
   extractAssistantText,
+  runWithTransientResume,
   toAgentMessages
 } from './main-agent-core.mjs';
 
@@ -170,7 +171,11 @@ const agent = new Agent({
     messages: toAgentMessages(messages, request)
   },
   getApiKey: async () => apiKey,
-  streamFn: (model, context, options) => streamSimple(model, context, { ...options, apiKey }),
+  // maxRetries lets the provider SDK absorb a 429 raised before the stream opens
+  // without the turn ever noticing. Errors raised once the stream is running are
+  // not retryable at that layer; runWithTransientResume below covers those.
+  streamFn: (model, context, options) =>
+    streamSimple(model, context, { ...options, apiKey, maxRetries: 4, maxRetryDelayMs: 30_000 }),
   toolExecution: 'sequential'
 });
 
@@ -233,7 +238,20 @@ const unsubscribe = agent.subscribe((event) => {
 });
 
 try {
-  await agent.prompt(String(currentMessage.content).trim());
+  const { resumeAttempts } = await runWithTransientResume({
+    agent,
+    start: () => agent.prompt(String(currentMessage.content).trim()),
+    readFailure: () => ({ stopReason: lastStopReason, errorMessage: lastErrorMessage }),
+    onResume: (event) => {
+      stderr.write(`[main-agent] resuming after ${event.reason}: attempt ${event.attempt}\n`);
+      emit({ type: 'retry', ...event });
+    },
+    resetRound: () => {
+      lastStopReason = '';
+      lastErrorMessage = '';
+      lastMessageHadText = false;
+    }
+  });
   unsubscribe();
   // A direct answer, a build request, or a credential request is a legitimate
   // terminal outcome even when the underlying round reports a stop reason.
@@ -252,7 +270,9 @@ try {
     // string itself to reach the turn log.
     const detail = lastStopReason ? `${reason} (stopReason: ${lastStopReason})` : reason;
     stderr.write(`[main-agent] stopReason=${lastStopReason || 'none'} ${reason}\n`);
-    emit({ type: 'error', error: detail, stopReason: lastStopReason });
+    // resumeAttempts lets the host say "retried 3 times" instead of presenting a
+    // one-shot failure the user could reasonably expect us to have retried.
+    emit({ type: 'error', error: detail, stopReason: lastStopReason, resumeAttempts });
     process.exit(1);
   }
   emit({

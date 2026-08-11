@@ -7,8 +7,12 @@ import {
   createGeneratedPluginTools,
   createModel,
   formatToolResult,
+  isTransientModelError,
   MODEL_RESULT_BYTE_LIMIT,
-  toAgentMessages
+  retryAfterMs,
+  runWithTransientResume,
+  toAgentMessages,
+  transientReason
 } from './main-agent-core.mjs';
 import { Type } from '@mariozechner/pi-ai';
 
@@ -575,5 +579,164 @@ describe('formatToolResult', () => {
     expect(formatToolResult('plain text')).toBe('plain text');
     expect(formatToolResult(null)).toBe('');
     expect(typeof formatToolResult({ text: '', references: [], data: null })).toBe('string');
+  });
+});
+
+describe('transient model errors', () => {
+  it('treats provider capacity and availability failures as retryable', () => {
+    // The exact Moonshot string that killed a 13-tool-call turn.
+    expect(
+      isTransientModelError('429 The engine is currently overloaded, please try again later')
+    ).toBe(true);
+    expect(isTransientModelError('503 Service Unavailable')).toBe(true);
+    expect(isTransientModelError('500 Internal Server Error')).toBe(true);
+    expect(isTransientModelError('Rate limit reached for requests')).toBe(true);
+    expect(isTransientModelError('The server is temporarily unavailable')).toBe(true);
+    expect(isTransientModelError('Request timed out')).toBe(true);
+  });
+
+  it('never retries failures that another attempt cannot fix', () => {
+    expect(isTransientModelError('401 Invalid Authentication')).toBe(false);
+    expect(isTransientModelError('403 Forbidden')).toBe(false);
+    expect(isTransientModelError('Incorrect API key provided')).toBe(false);
+    expect(
+      isTransientModelError("400 This model's maximum context length is 262144 tokens")
+    ).toBe(false);
+    expect(isTransientModelError('')).toBe(false);
+    expect(isTransientModelError(undefined)).toBe(false);
+  });
+
+  it('does not mistake a plugin tool failure for a provider failure', () => {
+    // Tool errors arrive on their own channel and must never trigger a resume.
+    expect(isTransientModelError('Tool failed: eia_series_search returned 404')).toBe(false);
+  });
+
+  it('names the reason so the status line can say what is wrong', () => {
+    expect(transientReason('429 The engine is currently overloaded')).toBe('overloaded');
+    expect(transientReason('429 Rate limit reached for requests')).toBe('rate_limited');
+    expect(transientReason('503 Service Unavailable')).toBe('unavailable');
+    expect(transientReason('Request timed out')).toBe('timeout');
+    expect(transientReason('401 Invalid Authentication')).toBe(null);
+  });
+
+  // A stand-in for Pi's Agent: `continue()` replays the next scripted outcome
+  // onto the transcript exactly as the real loop does.
+  function fakeAgent(outcomes, transcript) {
+    const messages = transcript ?? [
+      { role: 'user', content: 'question' },
+      { role: 'assistant', content: [{ type: 'toolCall' }] },
+      { role: 'toolResult', content: 'rows' }
+    ];
+    const agent = {
+      state: { messages },
+      round: { stopReason: '', errorMessage: '' },
+      continues: 0,
+      async continue() {
+        agent.continues += 1;
+        const outcome = outcomes.shift() || { stopReason: 'stop' };
+        agent.round = { stopReason: outcome.stopReason, errorMessage: outcome.errorMessage || '' };
+        messages.push({
+          role: 'assistant',
+          content: [{ type: 'text', text: outcome.text || '' }],
+          stopReason: outcome.stopReason,
+          errorMessage: outcome.errorMessage
+        });
+      }
+    };
+    return agent;
+  }
+
+  function resumeHarness(agent) {
+    const resumes = [];
+    return {
+      resumes,
+      run: () =>
+        runWithTransientResume({
+          agent,
+          start: () => agent.continue(),
+          readFailure: () => agent.round,
+          onResume: (event) => resumes.push(event),
+          wait: async () => {}
+        })
+    };
+  }
+
+  it('resumes an overloaded round without discarding earlier tool work', async () => {
+    const agent = fakeAgent([
+      { stopReason: 'error', errorMessage: '429 The engine is currently overloaded' },
+      { stopReason: 'stop', text: 'Here are the prices.' }
+    ]);
+    const harness = resumeHarness(agent);
+
+    const { resumeAttempts } = await harness.run();
+
+    expect(resumeAttempts).toBe(1);
+    expect(harness.resumes[0]).toMatchObject({ reason: 'overloaded', attempt: 1, maxAttempts: 3 });
+    // The failed round is gone and the tool result it followed is still there.
+    expect(agent.state.messages.filter((message) => message.stopReason === 'error')).toHaveLength(0);
+    expect(agent.state.messages.some((message) => message.role === 'toolResult')).toBe(true);
+    expect(agent.round.stopReason).toBe('stop');
+  });
+
+  it('gives up after the attempt budget and leaves the failure for the caller', async () => {
+    const failure = { stopReason: 'error', errorMessage: '429 overloaded' };
+    const agent = fakeAgent([failure, { ...failure }, { ...failure }, { ...failure }]);
+    const harness = resumeHarness(agent);
+
+    const { resumeAttempts } = await harness.run();
+
+    expect(resumeAttempts).toBe(3);
+    expect(harness.resumes.map((event) => event.attempt)).toEqual([1, 2, 3]);
+    expect(agent.round.stopReason).toBe('error');
+  });
+
+  it('does not resume a failure another attempt cannot fix', async () => {
+    const agent = fakeAgent([
+      { stopReason: 'error', errorMessage: '401 Invalid Authentication' }
+    ]);
+    const harness = resumeHarness(agent);
+
+    expect(await harness.run()).toEqual({ resumeAttempts: 0 });
+    expect(harness.resumes).toHaveLength(0);
+  });
+
+  it('does not resume a cancelled turn', async () => {
+    const agent = fakeAgent([{ stopReason: 'aborted', errorMessage: '' }]);
+    const harness = resumeHarness(agent);
+
+    expect(await harness.run()).toEqual({ resumeAttempts: 0 });
+  });
+
+  it('backs off longer each attempt unless the provider names a delay', async () => {
+    const agent = fakeAgent([
+      { stopReason: 'error', errorMessage: '429 overloaded' },
+      { stopReason: 'error', errorMessage: '429 overloaded, retry-after: 7' },
+      { stopReason: 'stop' }
+    ]);
+    const harness = resumeHarness(agent);
+
+    await harness.run();
+
+    expect(harness.resumes.map((event) => event.delayMs)).toEqual([2_000, 7_000]);
+  });
+
+  it('surfaces the failure when the transcript cannot be resumed from', async () => {
+    // No tool result or user message under the failed round: continuing would
+    // throw, so the error has to reach the user instead.
+    const agent = fakeAgent([{ stopReason: 'error', errorMessage: '429 overloaded' }], [
+      { role: 'assistant', content: [{ type: 'text', text: 'stale' }] }
+    ]);
+    const harness = resumeHarness(agent);
+
+    expect(await harness.run()).toEqual({ resumeAttempts: 0 });
+    expect(agent.continues).toBe(1);
+  });
+
+  it('prefers a server-requested delay over our own backoff', () => {
+    expect(retryAfterMs('429 slow down, retry-after: 12')).toBe(12_000);
+    expect(retryAfterMs('429 please try again in 4.5s')).toBe(4_500);
+    expect(retryAfterMs('429 The engine is currently overloaded')).toBe(null);
+    // A server asking for longer than we are willing to wait is ignored.
+    expect(retryAfterMs('429 retry-after: 600')).toBe(null);
   });
 });

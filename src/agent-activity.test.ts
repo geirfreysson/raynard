@@ -32,4 +32,37 @@ describe('agentActivityLabel', () => {
   it('ignores a blank tool name rather than rendering "Calling …"', () => {
     expect(agentActivityLabel({ running: true, streaming: false, toolName: '   ' })).toBe('Working…');
   });
+
+  it('says the model is overloaded while a retry waits out the backoff', () => {
+    expect(
+      agentActivityLabel({
+        running: true,
+        streaming: false,
+        retry: { reason: 'overloaded', attempt: 1, maxAttempts: 3 }
+      })
+    ).toBe('The model is overloaded — retrying (1/3)…');
+  });
+
+  it('ranks a pending retry above the tool call and the streamed text it interrupted', () => {
+    // Both were true when the provider failed; neither describes what the turn
+    // is actually doing now, which is waiting.
+    expect(
+      agentActivityLabel({
+        running: true,
+        streaming: true,
+        toolName: 'eia_series_data',
+        retry: { reason: 'rate_limited', attempt: 2, maxAttempts: 3 }
+      })
+    ).toBe('The model provider is rate limiting us — retrying (2/3)…');
+  });
+
+  it('still names an unfamiliar retry reason rather than showing a raw slug', () => {
+    expect(
+      agentActivityLabel({
+        running: true,
+        streaming: false,
+        retry: { reason: 'something_new', attempt: 1, maxAttempts: 3 }
+      })
+    ).toBe('The model stopped — retrying (1/3)…');
+  });
 });

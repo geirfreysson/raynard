@@ -31,10 +31,19 @@ export type StreamPayload = {
     | 'build_request'
     | 'credential_request'
     | 'done'
+    | 'retry'
     | 'error';
   delta?: string | null;
   text?: string | null;
   error?: string | null;
+  /** Sidecar retry/resume metadata, relayed verbatim by Rust. */
+  retry?: {
+    reason?: string | null;
+    attempt?: number | null;
+    maxAttempts?: number | null;
+    delayMs?: number | null;
+    resumeAttempts?: number | null;
+  } | null;
   provider?: string | null;
   model?: string | null;
   tool_name?: string | null;
@@ -81,6 +90,30 @@ export type AgentToolExecutionEndEvent = {
   isError: boolean;
 };
 
+/** One resume attempt after the provider failed for a reason a retry can fix. */
+export type AgentRetryEvent = {
+  reason: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error: string;
+};
+
+/**
+ * The turn's final failure.
+ *
+ * `provider`/`model` come from Rust, which stamps them on the stream event
+ * before the command itself rejects with a bare string — without this handler
+ * the renderer cannot tell the user whose failure it was.
+ */
+export type AgentErrorEvent = {
+  error: string;
+  provider?: string;
+  model?: string;
+  /** How many transient resumes the sidecar spent before giving up. */
+  resumeAttempts: number;
+};
+
 export type AgentStreamHandlers = {
   onDelta?: (delta: string) => void;
   onThinkingDelta?: (delta: string) => void;
@@ -93,6 +126,8 @@ export type AgentStreamHandlers = {
   onToolExecutionEnd?: (event: AgentToolExecutionEndEvent) => void;
   onBuildRequest?: (request: AgentBuildRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
+  onRetry?: (event: AgentRetryEvent) => void;
+  onError?: (event: AgentErrorEvent) => void;
 };
 
 export type PluginBuilderRequest = {
@@ -256,6 +291,23 @@ export function applyStreamPayload(
   }
   if (payload.event_type === 'build_request' && payload.build_request) {
     handlers.onBuildRequest?.(payload.build_request);
+  }
+  if (payload.event_type === 'retry') {
+    handlers.onRetry?.({
+      reason: payload.retry?.reason?.trim() || 'unavailable',
+      attempt: Number(payload.retry?.attempt) || 1,
+      maxAttempts: Number(payload.retry?.maxAttempts) || 1,
+      delayMs: Number(payload.retry?.delayMs) || 0,
+      error: payload.error || payload.retry?.reason || ''
+    });
+  }
+  if (payload.event_type === 'error') {
+    handlers.onError?.({
+      error: payload.error || '',
+      provider: payload.provider ?? undefined,
+      model: payload.model ?? undefined,
+      resumeAttempts: Number(payload.retry?.resumeAttempts) || 0
+    });
   }
   if (payload.event_type === 'credential_request') {
     // Travels in the generic `result` field, so the Rust forwarder needed no

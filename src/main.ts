@@ -15,11 +15,14 @@ import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
 import { parseChartSpec } from './chart-spec';
 import { renderChart, unmountChart } from './chart-mount';
+import { describeModelFailure } from './model-error';
 import {
   cancelAgentTurnStream,
   runMainAgentStream,
   runPluginBuilderStream,
   type AgentBuildRequest,
+  type AgentErrorEvent,
+  type AgentRetryEvent,
   type ChatMessage,
   type PluginBuilderRequest
 } from './agent-runtime';
@@ -106,6 +109,12 @@ type StoredChatMessage = {
   model?: string;
   status?: 'running' | 'completed' | 'error';
   error?: string;
+  /**
+   * Set when the model provider — not a tool and not the app — ended the turn.
+   * Persisted so a reloaded chat still says who failed instead of showing the
+   * raw provider string as if it were an answer.
+   */
+  modelFailure?: { title: string; detail: string; raw: string };
   builderRun?: boolean;
   /** Tool calls and reasoning in the order they happened. */
   builderActivities?: BuilderActivity[];
@@ -1996,6 +2005,10 @@ function renderStoredMessage(message: StoredChatMessage) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderCredentialRequest(body, message);
   }
+  if (message.role === 'assistant' && message.modelFailure) {
+    const body = article.querySelector<HTMLElement>('.message-text');
+    if (body) renderModelFailure(body, message.modelFailure);
+  }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
   }
@@ -2005,6 +2018,45 @@ function renderStoredMessage(message: StoredChatMessage) {
     const live = chatRuns.get(activeSessionId)?.kind === 'agent';
     setAgentActivity(article, agentActivityLabel({ running: live, streaming: false }));
   }
+}
+
+/**
+ * Render a provider failure as a notice rather than an assistant answer.
+ *
+ * A raw `429 The engine is currently overloaded` in an ordinary bubble reads as
+ * something the app or the plugin did. The title says who stopped, the detail
+ * says whether it is worth trying again, and the provider's own words stay
+ * available underneath for debugging without dominating the message.
+ */
+function renderModelFailure(
+  container: HTMLElement,
+  failure: { title: string; detail: string; raw: string }
+) {
+  container.innerHTML = '';
+  const notice = document.createElement('section');
+  notice.className = 'message-error';
+
+  const title = document.createElement('h3');
+  title.textContent = failure.title;
+  notice.appendChild(title);
+
+  const detail = document.createElement('p');
+  detail.textContent = failure.detail;
+  notice.appendChild(detail);
+
+  // Only worth showing when it says more than the copy above already does.
+  if (failure.raw && failure.raw !== failure.detail) {
+    const disclosure = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Provider response';
+    disclosure.appendChild(summary);
+    const raw = document.createElement('pre');
+    raw.textContent = failure.raw;
+    disclosure.appendChild(raw);
+    notice.appendChild(disclosure);
+  }
+
+  container.appendChild(notice);
 }
 
 /**
@@ -2119,6 +2171,12 @@ async function startAgentTurn(content: string) {
   let streamed = '';
   let thinking = '';
   let activeToolName: string | undefined;
+  // Set while the sidecar waits out a transient provider failure, and cleared by
+  // the first sign the resumed round is running.
+  let pendingRetry: AgentRetryEvent | undefined;
+  // The stream's own error event, which carries the provider identity that the
+  // rejected command drops.
+  let streamError: AgentErrorEvent | undefined;
   const assistantRecord: StoredChatMessage = {
     role: 'assistant',
     text: 'Thinking...',
@@ -2155,7 +2213,12 @@ async function startAgentTurn(content: string) {
     if (!article?.isConnected) return;
     setAgentActivity(
       article,
-      agentActivityLabel({ running, streaming: Boolean(streamed), toolName: activeToolName })
+      agentActivityLabel({
+        running,
+        streaming: Boolean(streamed),
+        toolName: activeToolName,
+        retry: pendingRetry
+      })
     );
   };
   const snapshotPersister = createTurnSnapshotPersister(() =>
@@ -2180,6 +2243,8 @@ async function startAgentTurn(content: string) {
         void logAgentTurnEvent('stream_id', { streamId }, turnSessionId);
       },
       onDelta: (delta) => {
+        // Output is proof the resumed round is running again.
+        pendingRetry = undefined;
         streamed += delta;
         assistantRecord.text = streamed || 'Thinking...';
         assistantRecord.thinking = thinking.trim() || undefined;
@@ -2195,6 +2260,7 @@ async function startAgentTurn(content: string) {
         syncRemountedTurn();
       },
       onThinkingDelta: (delta) => {
+        pendingRetry = undefined;
         thinking += delta;
         assistantRecord.text = streamed || 'Thinking...';
         assistantRecord.thinking = thinking.trim() || undefined;
@@ -2213,6 +2279,7 @@ async function startAgentTurn(content: string) {
         syncRemountedTurn();
       },
       onToolCall: (toolCall) => {
+        pendingRetry = undefined;
         assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
@@ -2266,6 +2333,18 @@ async function startAgentTurn(content: string) {
       onCredentialRequest: (request) => {
         requestedCredential = request;
         void logAgentTurnEvent('credential_request', { request, mode: turnMode }, turnSessionId);
+      },
+      onRetry: (event) => {
+        // The turn is deliberately idle for the length of the backoff. Saying so
+        // is the difference between a visible wait and an app that looks hung.
+        pendingRetry = event;
+        activeToolName = undefined;
+        refreshActivity();
+        syncRemountedTurn();
+        void logAgentTurnEvent('model_retry', event, turnSessionId);
+      },
+      onError: (event) => {
+        streamError = event;
       }
     });
     if (thinkingPreview.parentElement) {
@@ -2331,18 +2410,34 @@ async function startAgentTurn(content: string) {
     syncRemountedTurn();
   } catch (error) {
     const errorMessage = getErrorMessage(error);
+    // The rejected command carries only a string; the stream's error event is
+    // where the provider identity and the resume count live.
+    const failure = describeModelFailure(streamError?.error || errorMessage, {
+      provider: streamError?.provider,
+      model: streamError?.model,
+      role: 'chat',
+      resumeAttempts: streamError?.resumeAttempts
+    });
     if (turnIsActive()) {
       pending.remove();
-      addMessage('assistant', errorMessage);
+      const article = addMessage('assistant', '');
+      const body = article.querySelector<HTMLElement>('.message-text');
+      if (body) renderModelFailure(body, failure);
     }
-    assistantRecord.text = errorMessage;
+    assistantRecord.text = `${failure.title} — ${failure.detail}`;
     assistantRecord.timestamp = Date.now();
     assistantRecord.thinking = thinking.trim() || undefined;
     assistantRecord.status = 'error';
     assistantRecord.error = errorMessage;
+    assistantRecord.modelFailure = failure;
+    assistantRecord.provider = streamError?.provider;
+    assistantRecord.model = streamError?.model;
     await persistChatSnapshot(turnMeta, turnStored);
     void logAgentTurnEvent('turn_error', {
       error: errorMessage,
+      provider: streamError?.provider,
+      model: streamError?.model,
+      resumeAttempts: streamError?.resumeAttempts ?? 0,
       streamed,
       thinking
     }, turnSessionId);
@@ -2382,6 +2477,10 @@ function syncRemountedRun(
     const body = article.querySelector<HTMLElement>('.message-text, .builder-run');
     if (body && record.builderRun) {
       renderBuilderRun(body, record, record.status === 'running');
+    } else if (body && record.modelFailure) {
+      // Re-rendering as text here would flatten the failure notice back into
+      // something that looks like an assistant answer.
+      renderModelFailure(body, record.modelFailure);
     } else if (body) {
       renderMessageText(body, record.text, record.role === 'assistant');
       if (record.cards?.length) renderMessageCards(article, record.cards);
@@ -2857,6 +2956,9 @@ async function runPluginBuilderTurn(
   } = ctx;
   let streamed = '';
   let thinking = '';
+  // The stream's error event, which carries the provider identity the rejected
+  // command drops.
+  let builderStreamError: AgentErrorEvent | undefined;
   const renderLive = () => {
     if (turnIsActive()) {
       // Measure BEFORE the render: only follow new output when the user is
@@ -2910,7 +3012,38 @@ async function runPluginBuilderTurn(
     onToolExecutionEnd: (event) => {
       applyToolEvent({ type: 'end', ...event });
       void logAgentTurnEvent('builder_tool_end', event, run.chatId);
+    },
+    onRetry: (event) => {
+      // A coding pass has no streaming answer to fall silent, so the wait has to
+      // be said out loud in the timeline or the build looks abandoned.
+      const label = agentActivityLabel({ running: true, streaming: false, retry: event });
+      builderRecord.builderActivities = applyBuilderThinkingDelta(
+        builderRecord.builderActivities || [],
+        `\n${label}\n`
+      );
+      thinking = collectBuilderReasoning(builderRecord.builderActivities);
+      builderRecord.thinking = thinking;
+      snapshotPersister.schedule(true);
+      renderLive();
+      void logAgentTurnEvent('model_retry', event, run.chatId);
+    },
+    onError: (event) => {
+      builderStreamError = event;
     }
+  }).catch((error: unknown) => {
+    // Attribute the failure before it reaches the generic build-failed handler,
+    // which would otherwise report an overloaded provider as a broken plugin.
+    if (!builderStreamError) throw error;
+    const failure = describeModelFailure(builderStreamError.error || getErrorMessage(error), {
+      provider: builderStreamError.provider,
+      model: builderStreamError.model,
+      role: 'builder',
+      resumeAttempts: builderStreamError.resumeAttempts
+    });
+    builderRecord.provider = builderStreamError.provider;
+    builderRecord.model = builderStreamError.model;
+    builderRecord.modelFailure = failure;
+    throw new Error(`${failure.title} — ${failure.detail}`);
   });
   const finalContent = reply.content || streamed || 'Done.';
   builderRecord.text = finalContent;

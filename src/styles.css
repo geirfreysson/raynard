@@ -1247,6 +1247,51 @@ a.models-modal-note {
   border-color: rgba(160, 55, 43, 0.42);
 }
 
+/*
+ * A turn the model provider ended. Shares the error border with .builder-tool
+ * so both failures read as one thing, and stays visually distinct from an
+ * assistant answer — the raw provider string used to arrive in a plain bubble
+ * and was indistinguishable from a reply.
+ */
+.message-error {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(160, 55, 43, 0.42);
+  border-radius: 8px;
+  background: #fdf8f7;
+}
+
+.message-error h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.message-error p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.message-error > details > summary {
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.message-error > details > pre {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f5f5f5;
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
 .builder-tool > summary {
   min-height: 38px;
   display: flex;
