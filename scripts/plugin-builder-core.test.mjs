@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertBuilderTurnCompleted,
+  bashCommandEscapesRoot,
+  resolveInsideRoot,
   buildTargetedPluginSnapshot,
   buildSystemPrompt,
   buildUserPrompt,
@@ -704,6 +706,47 @@ export type UnrelatedRuntimeType = { ignored: true };`;
           sources: ['const x = 1;']
         })
       ).not.toThrow();
+    });
+  });
+
+  describe('workspace containment', () => {
+    const root = '/data/generated-plugins/open-weather';
+
+    it('accepts paths inside the plugin workspace', () => {
+      expect(resolveInsideRoot(root, 'tools.ts')).toBe(`${root}/tools.ts`);
+      expect(resolveInsideRoot(root, './nested/client.ts')).toBe(`${root}/nested/client.ts`);
+      expect(resolveInsideRoot(root, `${root}/README.md`)).toBe(`${root}/README.md`);
+      expect(resolveInsideRoot(root, '.')).toBe(root);
+    });
+
+    it('rejects the sibling-plugin and filesystem escapes pi would otherwise allow', () => {
+      // The exact move that prompted this: reading another plugin to copy from.
+      expect(resolveInsideRoot(root, '../hacker-news/tools.ts')).toBeNull();
+      expect(resolveInsideRoot(root, '../node_modules/@raynard/plugin-sdk/index.js')).toBeNull();
+      expect(resolveInsideRoot(root, '/etc/passwd')).toBeNull();
+      expect(resolveInsideRoot(root, '~/.ssh/id_rsa')).toBeNull();
+      expect(resolveInsideRoot(root, '')).toBeNull();
+      // A sibling directory sharing a name prefix is still outside.
+      expect(resolveInsideRoot(root, '../open-weather-2/tools.ts')).toBeNull();
+    });
+
+    it('blocks bash commands that leave the workspace', () => {
+      expect(bashCommandEscapesRoot('cat ../hacker-news/tools.ts')).toBe(true);
+      expect(bashCommandEscapesRoot('ls ..')).toBe(true);
+      expect(bashCommandEscapesRoot('cat ~/.aws/credentials')).toBe(true);
+      expect(bashCommandEscapesRoot('grep -r defineTools /Users/someone/plugins')).toBe(true);
+      expect(bashCommandEscapesRoot('cat ../node_modules/@raynard/plugin-sdk/index.d.ts')).toBe(
+        true
+      );
+    });
+
+    it('leaves ordinary in-workspace commands alone', () => {
+      expect(bashCommandEscapesRoot('node --test tools.test.ts')).toBe(false);
+      expect(bashCommandEscapesRoot('ls -la')).toBe(false);
+      expect(bashCommandEscapesRoot('grep -n defineTools tools.ts')).toBe(false);
+      expect(bashCommandEscapesRoot('node --test ./client.test.ts')).toBe(false);
+      // Not a path segment: an ellipsis in a string and a version range.
+      expect(bashCommandEscapesRoot('echo "loading..."')).toBe(false);
     });
   });
 });

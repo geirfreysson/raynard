@@ -18,8 +18,46 @@ import {
   buildTargetedPluginSnapshot,
   buildUserPrompt,
   hasAuthoredPluginWork,
-  validatePluginArtifacts
+  bashCommandEscapesRoot,
+  resolveInsideRoot,
+  validatePluginArtifacts,
+  WORKSPACE_ESCAPE_MESSAGE
 } from './plugin-builder-core.mjs';
+
+/**
+ * Hold Pi's coding tools inside one plugin directory.
+ *
+ * `createCodingTools(cwd)` sets a working directory but enforces nothing: its
+ * path resolver accepts absolute and `~` paths, and bash gets a real shell. The
+ * builder used that reach to go read sibling plugins instead of working from
+ * its instructions, which is both wrong and a way for one plugin's build to
+ * touch another's files.
+ */
+function confineCodingTools(tools, root) {
+  return tools.map((tool) => {
+    if (tool.name === 'bash') {
+      return {
+        ...tool,
+        execute: async (toolCallId, params, signal, onUpdate) => {
+          if (bashCommandEscapesRoot(params?.command)) {
+            throw new Error(WORKSPACE_ESCAPE_MESSAGE);
+          }
+          return tool.execute(toolCallId, params, signal, onUpdate);
+        }
+      };
+    }
+    return {
+      ...tool,
+      execute: async (toolCallId, params, signal, onUpdate) => {
+        const requested = params?.path;
+        if (requested !== undefined && !resolveInsideRoot(root, requested)) {
+          throw new Error(WORKSPACE_ESCAPE_MESSAGE);
+        }
+        return tool.execute(toolCallId, params, signal, onUpdate);
+      }
+    };
+  });
+}
 
 function emit(event) {
   output.write(`${JSON.stringify(event)}\n`);
@@ -319,7 +357,7 @@ const agent = new Agent({
     systemPrompt,
     model,
     thinkingLevel: 'off',
-    tools: createCodingTools(pluginDir)
+    tools: confineCodingTools(createCodingTools(pluginDir), pluginDir)
   },
   getApiKey: async () => apiKey,
   streamFn: (streamModel, context, options) =>

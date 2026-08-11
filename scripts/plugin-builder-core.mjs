@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { isAbsolute, resolve as resolvePath, sep } from 'node:path';
 import ts from 'typescript';
 
 // Shared across the fresh-build and interactive-edit prompts so the card
@@ -213,7 +215,9 @@ export function buildSystemPrompt(request) {
 
   return `You are the Raynard plugin builder running in Build mode.
 
-You may write code only inside the current plugin workspace.
+You may read and write ONLY inside the current plugin workspace. Paths outside it are blocked by the host and the tool call will fail.
+
+Work from these instructions alone. Do not open another plugin's directory, the shared SDK's source, or anything else on the machine to work out how something is done: the complete SDK interface, the canonical tool and card shapes, and the test conventions are all given to you below. If something you need genuinely is not specified here, say so in your final message instead of going looking for it.
 
 Your job is to implement TypeScript API tooling for Raynard Explore mode.
 
@@ -701,3 +705,42 @@ export function validatePluginArtifacts({
   const cardCount = tools.filter((tool) => tool && tool.card).length;
   return { testFiles, toolCount: tools.length, cardCount, credentials };
 }
+
+// --- Workspace containment -------------------------------------------------
+//
+// Pi's coding tools take a cwd but do not enforce it: `resolveToCwd` happily
+// resolves an absolute path or `~`, and bash inherits a real shell. Without the
+// guards below, the builder can read and write any file on the machine — which
+// is how it came to "check a sibling plugin" instead of working from its
+// instructions. Everything it legitimately needs (the full SDK surface, the
+// canonical tool shape, the card contract) is already in the system prompt.
+
+/** Absolute path for a tool argument, or null when it escapes the workspace. */
+export function resolveInsideRoot(root, rawPath) {
+  const raw = String(rawPath ?? '').trim();
+  if (!raw) return null;
+  const expanded = raw === '~' || raw.startsWith('~/') ? `${homedir()}${raw.slice(1)}` : raw;
+  const absolute = isAbsolute(expanded) ? resolvePath(expanded) : resolvePath(root, expanded);
+  const normalizedRoot = resolvePath(root);
+  if (absolute === normalizedRoot) return absolute;
+  return absolute.startsWith(`${normalizedRoot}${sep}`) ? absolute : null;
+}
+
+/**
+ * True when a bash command reaches outside the plugin workspace.
+ *
+ * A parent-directory hop or a `~`/absolute path is never needed for plugin
+ * work: tests run in place and the shared SDK is resolved by Node, not read by
+ * hand. Treating those as escapes is what keeps the agent from browsing the
+ * generated-plugins root.
+ */
+export function bashCommandEscapesRoot(command) {
+  const text = String(command ?? '');
+  if (/(^|[\s"'`=(:])~(\/|$)/.test(text)) return true;
+  if (/(^|[\s"'`=(:])\/(?:Users|home|etc|var|tmp|private|opt|usr)\//.test(text)) return true;
+  // A `..` path segment, but not `...` or a range like `a..b` in a version.
+  return /(^|[\s"'`=(:/])\.\.(\/|$|[\s"'`);])/.test(text);
+}
+
+export const WORKSPACE_ESCAPE_MESSAGE =
+  'Blocked: this path is outside your plugin workspace. You may only read and write files in this plugin directory. Do not inspect other plugins, the shared SDK source, or anything else on the machine — the complete SDK interface, the canonical tool shape, and the card contract are already in your instructions. Work from those.';
