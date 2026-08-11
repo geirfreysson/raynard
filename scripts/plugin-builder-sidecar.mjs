@@ -4,9 +4,14 @@ import { spawn } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
-import { streamSimple } from '@mariozechner/pi-ai';
+import { completeSimple, streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
 import { createModel } from './main-agent-core.mjs';
+import {
+  SUMMARIZATION_SYSTEM_PROMPT,
+  createContextCompactor,
+  serializeForSummary
+} from './builder-compaction.mjs';
 import {
   assertBuilderTurnCompleted,
   buildSystemPrompt,
@@ -268,15 +273,58 @@ if (request.editMode) {
   emit({ type: 'status', status: 'resuming_unfinished_build' });
 }
 
+const model = createModel(request);
+const systemPrompt = buildSystemPrompt(request);
+
+/**
+ * Summarize the dropped prefix with the same model that is doing the build.
+ * Returns '' on any failure: losing the summary is survivable, losing the turn
+ * to a compaction error is not.
+ */
+async function summarizeForCompaction(dropped) {
+  try {
+    const reply = await completeSimple(
+      model,
+      {
+        systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: serializeForSummary(dropped) }]
+      },
+      { apiKey, maxTokens: 2048 }
+    );
+    return String(
+      (Array.isArray(reply?.content) ? reply.content : [])
+        .filter((block) => block && block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Keep a long build inside its context window.
+ *
+ * Pi's own coding agent compacts; a bare Agent does not, so a build that ran
+ * long grew its transcript until the provider refused.
+ */
+const compactContext = createContextCompactor({
+  contextWindow: model.contextWindow,
+  summarize: summarizeForCompaction,
+  onStatus: (status) => emit({ type: 'status', status })
+});
+
 const agent = new Agent({
   initialState: {
-    systemPrompt: buildSystemPrompt(request),
-    model: createModel(request),
+    systemPrompt,
+    model,
     thinkingLevel: 'off',
     tools: createCodingTools(pluginDir)
   },
   getApiKey: async () => apiKey,
-  streamFn: (model, context, options) => streamSimple(model, context, { ...options, apiKey }),
+  streamFn: (streamModel, context, options) =>
+    streamSimple(streamModel, context, { ...options, apiKey }),
+  transformContext: (messages) => compactContext(messages),
   toolExecution: 'sequential'
 });
 
