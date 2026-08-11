@@ -669,6 +669,7 @@ fn save_plugin_credential(
     keyring_entry(&account)?
         .set_password(cleaned_value)
         .map_err(|error| format!("Could not store the API key in the OS keychain: {error}"))?;
+    forget_cached_keychain_account(&account);
     read_generated_plugin(app, plugin_id)
 }
 
@@ -1302,6 +1303,7 @@ fn save_provider_api_key(
     keyring_entry(&provider_id)?
         .set_password(cleaned_key)
         .map_err(|error| format!("Could not store API key in the OS keychain: {error}"))?;
+    forget_cached_keychain_account(&provider_id);
 
     save_role_model_config(
         &app,
@@ -3275,8 +3277,31 @@ fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
         .map_err(|error| format!("Could not open OS keychain entry: {error}"))
 }
 
-fn read_provider_api_key(provider_id: &str) -> String {
-    keyring_entry(provider_id)
+/// Keychain values already read this app run, keyed by account.
+///
+/// macOS authorizes per keychain item, per reading process. Nothing here used
+/// to be remembered, so every read was a fresh prompt — and the reads are not
+/// rare: `annotate_plugin_credentials` opens one entry per plugin per declared
+/// credential, and it runs on boot, on every plugin-sidebar render, and after
+/// every builder turn. Ten plugins with a key each meant ten prompts, again on
+/// every refresh.
+///
+/// Caching the value (not just whether one exists) is what makes the steady
+/// state zero prompts: the per-turn `resolve_model_config` read needs the
+/// secret itself. The entry is dropped on write and delete, so the cache can
+/// never serve a key the user has since changed through the app. A key rotated
+/// outside the app — directly in Keychain Access — is picked up on next launch.
+static KEYCHAIN_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Read one keychain account, going to the OS only the first time.
+fn read_keychain_account(account: &str) -> String {
+    if let Ok(cache) = KEYCHAIN_CACHE.lock() {
+        if let Some(hit) = cache.as_ref().and_then(|entries| entries.get(account)) {
+            return hit.clone();
+        }
+    }
+
+    let value = keyring_entry(account)
         .and_then(|entry| {
             entry
                 .get_password()
@@ -3284,7 +3309,29 @@ fn read_provider_api_key(provider_id: &str) -> String {
         })
         .unwrap_or_default()
         .trim()
-        .to_string()
+        .to_string();
+
+    // A missing credential is cached too: the "not configured" badges re-read
+    // exactly those accounts on every render, and each miss is its own prompt.
+    if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
+        cache
+            .get_or_insert_with(HashMap::new)
+            .insert(account.to_string(), value.clone());
+    }
+    value
+}
+
+/// Drop one cached account after the stored value changed.
+fn forget_cached_keychain_account(account: &str) {
+    if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
+        if let Some(entries) = cache.as_mut() {
+            entries.remove(account);
+        }
+    }
+}
+
+fn read_provider_api_key(provider_id: &str) -> String {
+    read_keychain_account(provider_id)
 }
 
 /// Builds the keychain account for one plugin credential.
@@ -3314,15 +3361,7 @@ fn read_plugin_credential(plugin_id: &str, key: &str) -> String {
     let Ok(account) = plugin_credential_account(plugin_id, key) else {
         return String::new();
     };
-    keyring_entry(&account)
-        .and_then(|entry| {
-            entry
-                .get_password()
-                .map_err(|error| format!("Could not read OS keychain entry: {error}"))
-        })
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    read_keychain_account(&account)
 }
 
 /// Adds resolved credential values, and the declarations still missing one, to
@@ -3356,6 +3395,7 @@ fn attach_plugin_credential_values(serialized: &mut Value, plugin: &GeneratedPlu
 
 fn forget_plugin_credential(plugin_id: &str, key: &str) -> Result<(), String> {
     let account = plugin_credential_account(plugin_id, key)?;
+    forget_cached_keychain_account(&account);
     match keyring_entry(&account)?.delete_credential() {
         Ok(()) => Ok(()),
         // Removing a credential that was never stored is the desired end state.
@@ -3538,12 +3578,12 @@ fn resolve_model_config_for_role(
 mod tests {
     use super::{
         build_plugin_tools_stub, clear_plugin_api_cache, ensure_shared_plugin_sdk,
-        external_url_target, generated_plugin_source_mtime_millis,
+        external_url_target, forget_cached_keychain_account, generated_plugin_source_mtime_millis,
         load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
         normalize_plugin_slug, normalize_stored_messages, now_millis, plugin_credential_account,
         read_generated_plugin_manifest, read_plugin_cache_settings, save_plugin_cache_settings,
         BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
-        RuntimeToolsCache, StoredChatMessage, StreamEvent,
+        RuntimeToolsCache, StoredChatMessage, StreamEvent, KEYCHAIN_CACHE,
     };
     use serde_json::json;
     use std::fs;
@@ -3722,6 +3762,44 @@ mod tests {
         assert!(tools.contains("@raynard/plugin-sdk"));
         assert!(tools.contains("defineTools"));
         assert!(!tools.contains("./runtime.ts"));
+    }
+
+    /// The cache exists to stop repeated OS keychain prompts, so the thing that
+    /// must never break is invalidation: serving a stale secret after the user
+    /// changed it would look like the new key was ignored. Seeded directly
+    /// rather than through the keyring, which would prompt in CI.
+    #[test]
+    fn changing_a_stored_key_drops_it_from_the_keychain_cache() {
+        let account = format!("test-provider-{}", now_millis());
+        KEYCHAIN_CACHE
+            .lock()
+            .expect("lock keychain cache")
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(account.clone(), "old-secret".to_string());
+
+        assert_eq!(
+            KEYCHAIN_CACHE
+                .lock()
+                .expect("lock keychain cache")
+                .as_ref()
+                .and_then(|entries| entries.get(&account))
+                .map(String::as_str),
+            Some("old-secret")
+        );
+
+        forget_cached_keychain_account(&account);
+
+        assert!(
+            KEYCHAIN_CACHE
+                .lock()
+                .expect("lock keychain cache")
+                .as_ref()
+                .and_then(|entries| entries.get(&account))
+                .is_none(),
+            "a rewritten key must be re-read from the OS, not served from cache"
+        );
+        // Forgetting an account that was never cached is the desired end state.
+        forget_cached_keychain_account(&account);
     }
 
     #[test]
