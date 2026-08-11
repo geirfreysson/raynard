@@ -11,7 +11,11 @@
     "test": "vitest run",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "build:desktop": "npm run build && npm run runtime:prepare:macos-arm64",
+    "runtime:prepare:macos-arm64": "node scripts/standalone-runtime.mjs",
+    "test:runtime": "vitest run scripts/standalone-runtime.test.mjs",
+    "verify:macos:bundle": "node scripts/verify-standalone-macos.mjs src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Raynard.app"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.73.1",

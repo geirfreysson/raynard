@@ -57,7 +57,7 @@ function executePluginTool(toolRequest, signal) {
       reject(new Error('Plugin tool runner path is missing.'));
       return;
     }
-    const child = spawn('node', [runnerPath], {
+    const child = spawn(process.execPath, [runnerPath], {
       cwd: toolRequest.pluginDir,
       stdio: ['pipe', 'pipe', 'pipe']
     });

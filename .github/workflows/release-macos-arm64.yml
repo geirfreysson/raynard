@@ -1,0 +1,156 @@
+name: Release macOS Apple Silicon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos-arm64:
+    name: Build signed Apple Silicon DMG
+    runs-on: macos-15
+    env:
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install application dependencies
+        run: npm ci
+
+      - name: Run deterministic tests
+        run: |
+          npm test -- --run
+          npm run test:runtime
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Validate Apple release secrets
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          : "${CSC_LINK:?Missing CSC_LINK secret}"
+          : "${CSC_KEY_PASSWORD:?Missing CSC_KEY_PASSWORD secret}"
+          : "${APPLE_API_KEY_BASE64:?Missing APPLE_API_KEY_BASE64 secret}"
+          : "${APPLE_API_KEY:?Missing APPLE_API_KEY_ID secret}"
+          : "${APPLE_API_ISSUER:?Missing APPLE_API_ISSUER secret}"
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/raynard-build.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$CSC_LINK" | sed -E 's#^data:[^,]+,##' | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" login.keychain-db
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -nE 's/.*"(Developer ID Application:[^"]+)".*/\1/p' | head -1)"
+          test -n "$signing_identity"
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+
+      - name: Write App Store Connect API key
+        shell: bash
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$api_key_path"
+          chmod 600 "$api_key_path"
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize, and staple DMG
+        run: npm run tauri:build -- --target aarch64-apple-darwin --bundles dmg --ci
+
+      - name: Verify standalone runtime and Apple trust
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_path="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg_path"
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
+          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true' EXIT
+          app_path="$mount_dir/Raynard.app"
+          node scripts/verify-standalone-macos.mjs "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          xcrun stapler validate "$dmg_path"
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+
+      - name: Stage release download
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          source_dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          release_dir="$RUNNER_TEMP/release"
+          artifact_name="Raynard-${version}-mac-arm64.dmg"
+          mkdir -p "$release_dir"
+          cp "$source_dmg" "$release_dir/$artifact_name"
+          shasum -a 256 "$release_dir/$artifact_name" > "$release_dir/$artifact_name.sha256"
+          echo "release_dir=$release_dir" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: ${{ steps.artifact.outputs.release_dir }}/*
+          if-no-files-found: error
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --title "Raynard $GITHUB_REF_NAME" --notes "Apple Silicon macOS release."
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${{ steps.artifact.outputs.release_dir }}"/* --clobber

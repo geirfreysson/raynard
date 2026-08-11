@@ -141,7 +141,7 @@ async function validatePluginWorkspace() {
   );
   const runnerPath = String(request.pluginRunnerPath || '').trim();
   if (!runnerPath) throw new Error('Plugin tool runner path is missing.');
-  const listed = await runCommand('node', [runnerPath], {
+  const listed = await runCommand(process.execPath, [runnerPath], {
     stdin: JSON.stringify({ pluginDir, listTools: true })
   });
   const lastLine = listed.stdout
@@ -161,7 +161,7 @@ async function validatePluginWorkspace() {
     requireSamplePrompts: true
   });
   emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });
-  await runCommand('node', ['--test', ...validation.testFiles]);
+  await runCommand(process.execPath, ['--test', ...validation.testFiles]);
   emit({
     type: 'status',
     status: `validation_passed:${validation.testFiles.length}_tests:${validation.toolCount}_tools`
