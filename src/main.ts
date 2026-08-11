@@ -37,8 +37,13 @@ import {
   type CredentialRequest
 } from './credential-request-flow';
 import {
+  applyBuilderThinkingDelta,
   applyBuilderToolEvent,
+  collectBuilderReasoning,
+  isReasoningActivity,
   planBuilderTimeline,
+  type BuilderActivity,
+  type BuilderReasoningActivity,
   type BuilderToolActivity,
   type BuilderToolEvent
 } from './builder-activity';
@@ -102,7 +107,8 @@ type StoredChatMessage = {
   status?: 'running' | 'completed' | 'error';
   error?: string;
   builderRun?: boolean;
-  builderActivities?: BuilderToolActivity[];
+  /** Tool calls and reasoning in the order they happened. */
+  builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
   /**
    * A tool needed an API key the user has not stored. Persisted so the prompt
@@ -2853,8 +2859,12 @@ async function runPluginBuilderTurn(
   let thinking = '';
   const renderLive = () => {
     if (turnIsActive()) {
+      // Measure BEFORE the render: only follow new output when the user is
+      // already at the bottom. Scrolling unconditionally made it impossible to
+      // read back through a build while it was still running.
+      const pinned = isNearBottom(messages);
       renderBuilderRun(builderRun, builderRecord, true);
-      scrollMessagesToBottom();
+      if (pinned) scrollMessagesToBottom();
     } else {
       syncRemountedTurn();
     }
@@ -2879,7 +2889,13 @@ async function runPluginBuilderTurn(
       renderLive();
     },
     onThinkingDelta: (delta) => {
-      thinking += delta;
+      // Reasoning goes into the same timeline as the tool calls, so the run
+      // reads in the order it happened rather than as one block up top.
+      builderRecord.builderActivities = applyBuilderThinkingDelta(
+        builderRecord.builderActivities || [],
+        delta
+      );
+      thinking = collectBuilderReasoning(builderRecord.builderActivities);
       builderRecord.thinking = thinking;
       snapshotPersister.schedule();
       renderLive();
@@ -2925,9 +2941,15 @@ function renderBuilderRun(
   // nodes once and patch only what changed, keyed by the stable tool call id.
   if (container.className !== 'builder-run') container.className = 'builder-run';
 
-  // Thinking block.
+  const activitiesForThinking = message.builderActivities || [];
+  // Reasoning now lives inline in the timeline. The collected block is kept
+  // only for chats recorded before that, which have thinking but no reasoning
+  // entries to interleave.
+  const hasInlineReasoning = activitiesForThinking.some(isReasoningActivity);
+
+  // Thinking block (legacy chats only).
   let thinking = container.querySelector<HTMLDetailsElement>(':scope > .builder-thinking');
-  if (message.thinking) {
+  if (message.thinking && !hasInlineReasoning) {
     if (!thinking) {
       thinking = document.createElement('details');
       thinking.className = 'builder-thinking';
@@ -3029,13 +3051,26 @@ function renderBuilderRun(
 // Reconcile timeline cards against activities. applyBuilderToolEvent keeps
 // activities append-only and updates entries in place, so card index i always
 // maps to activity i: either patch the existing card or append a new one.
-function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderToolActivity[]) {
+function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderActivity[]) {
   const existingIds = Array.from(timeline.children).map(
     (child) => (child as HTMLElement).dataset.toolCallId || ''
   );
   const { ops, length } = planBuilderTimeline(existingIds, activities);
   for (const op of ops) {
     const activity = activities[op.index];
+    const existing = timeline.children[op.index] as HTMLElement | undefined;
+    if (isReasoningActivity(activity)) {
+      // A slot can change kind only by insertion, since ids never collide.
+      if (op.action === 'reuse' && existing) {
+        updateBuilderReasoningCard(existing, activity);
+      } else {
+        timeline.insertBefore(
+          renderBuilderReasoningCard(activity),
+          timeline.children[op.index] ?? null
+        );
+      }
+      continue;
+    }
     if (op.action === 'reuse') {
       updateBuilderToolCard(timeline.children[op.index] as HTMLDetailsElement, activity);
     } else {
@@ -3046,6 +3081,32 @@ function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderTool
   while (timeline.children.length > length) {
     timeline.lastElementChild?.remove();
   }
+}
+
+function renderBuilderReasoningCard(activity: BuilderReasoningActivity) {
+  const card = document.createElement('div');
+  card.className = 'builder-reasoning';
+  card.dataset.toolCallId = activity.toolCallId;
+  const text = document.createElement('div');
+  text.className = 'builder-reasoning-text';
+  card.appendChild(text);
+  updateBuilderReasoningCard(card, activity);
+  return card;
+}
+
+function updateBuilderReasoningCard(card: HTMLElement, activity: BuilderReasoningActivity) {
+  if (card.className !== 'builder-reasoning') card.className = 'builder-reasoning';
+  if (card.dataset.toolCallId !== activity.toolCallId) {
+    card.dataset.toolCallId = activity.toolCallId;
+  }
+  let text = card.querySelector<HTMLElement>('.builder-reasoning-text');
+  if (!text) {
+    text = document.createElement('div');
+    text.className = 'builder-reasoning-text';
+    card.appendChild(text);
+  }
+  const value = activity.text.trim();
+  if (text.textContent !== value) text.textContent = value;
 }
 
 function renderBuilderToolCard(activity: BuilderToolActivity) {
@@ -3096,6 +3157,10 @@ function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToo
   const preview = details.querySelector('.builder-tool-preview');
   const previewText = formatBuilderToolArgsPreview(activity.args);
   if (preview && preview.textContent !== previewText) preview.textContent = previewText;
+  // Hovering reveals the full path/command that the preview truncates.
+  const summary = details.querySelector<HTMLElement>(':scope > summary');
+  const subject = `${activity.toolName} — ${builderToolArgsSubject(activity.args)}`;
+  if (summary && summary.title !== subject) summary.title = subject;
   const status = details.querySelector('.builder-tool-status');
   if (status && status.textContent !== activity.status) status.textContent = activity.status;
 
@@ -3111,9 +3176,18 @@ function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToo
 }
 
 function formatBuilderToolArgsPreview(args: Record<string, unknown>) {
-  for (const key of ['path', 'command', 'query', 'pattern']) {
+  return builderToolArgsSubject(args).slice(0, 90);
+}
+
+/**
+ * The full, untruncated subject of a tool call — the file it writes, the
+ * command it runs, the pattern it searches. Shown as the hover title so a
+ * truncated preview never hides which file a write touched.
+ */
+function builderToolArgsSubject(args: Record<string, unknown>) {
+  for (const key of ['path', 'file_path', 'filePath', 'command', 'query', 'pattern']) {
     const value = args[key];
-    if (typeof value === 'string' && value.trim()) return value.trim().replace(/\s+/g, ' ').slice(0, 90);
+    if (typeof value === 'string' && value.trim()) return value.trim().replace(/\s+/g, ' ');
   }
   const keys = Object.keys(args);
   return keys.length ? keys.slice(0, 3).join(', ') : 'No arguments';

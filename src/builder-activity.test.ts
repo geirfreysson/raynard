@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyBuilderThinkingDelta,
   applyBuilderToolEvent,
+  collectBuilderReasoning,
   formatBuilderToolOutput,
+  isReasoningActivity,
   planBuilderTimeline,
+  type BuilderActivity,
   type BuilderToolActivity
 } from './builder-activity';
 
@@ -17,6 +21,7 @@ describe('applyBuilderToolEvent', () => {
 
     expect(started).toEqual([
       {
+        kind: 'tool',
         toolCallId: 'call-1',
         toolName: 'write',
         args: { path: 'src/index.ts', content: 'export const value = 1;' },
@@ -125,5 +130,93 @@ describe('formatBuilderToolOutput', () => {
       })
     ).toBe('first\nsecond');
     expect(formatBuilderToolOutput({ changed: true })).toBe('{\n  "changed": true\n}');
+  });
+});
+
+describe('interleaved builder reasoning', () => {
+  const start = (id: string, toolName: string) =>
+    ({ type: 'start', toolCallId: id, toolName, args: {} }) as const;
+
+  it('extends the trailing reasoning block while deltas keep arriving', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'I need ');
+    activities = applyBuilderThinkingDelta(activities, 'the schema.');
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]).toMatchObject({ kind: 'reasoning', text: 'I need the schema.' });
+  });
+
+  it('reads in the order it happened: reasoning, call, reasoning, call', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'First I will look.');
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderThinkingDelta(activities, 'Now I will write.');
+    activities = applyBuilderToolEvent(activities, start('call-2', 'write'));
+
+    expect(
+      activities.map((activity) =>
+        isReasoningActivity(activity) ? `reasoning:${activity.text}` : `tool:${activity.toolName}`
+      )
+    ).toEqual([
+      'reasoning:First I will look.',
+      'tool:read',
+      'reasoning:Now I will write.',
+      'tool:write'
+    ]);
+  });
+
+  it('starts a new block after a tool call rather than reopening the last one', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'Before.');
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderThinkingDelta(activities, 'After.');
+
+    const reasoning = activities.filter(isReasoningActivity);
+    expect(reasoning.map((entry) => entry.text)).toEqual(['Before.', 'After.']);
+    expect(new Set(reasoning.map((entry) => entry.toolCallId)).size).toBe(2);
+  });
+
+  it('updates a tool entry in place without disturbing reasoning around it', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'Running tests.');
+    activities = applyBuilderToolEvent(activities, start('call-1', 'bash'));
+    activities = applyBuilderToolEvent(activities, {
+      type: 'end',
+      toolCallId: 'call-1',
+      toolName: 'bash',
+      result: { content: [{ type: 'text', text: '# pass 2' }] },
+      isError: false
+    });
+
+    expect(activities).toHaveLength(2);
+    expect(activities[0]).toMatchObject({ kind: 'reasoning' });
+    expect(activities[1]).toMatchObject({ status: 'complete', output: '# pass 2' });
+  });
+
+  it('ignores empty deltas so no blank block appears', () => {
+    expect(applyBuilderThinkingDelta([], '')).toEqual([]);
+  });
+
+  it('collects reasoning text for the persisted thinking field', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'One.');
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderThinkingDelta(activities, 'Two.');
+
+    expect(collectBuilderReasoning(activities)).toBe('One.\n\nTwo.');
+  });
+
+  it('gives every entry a distinct timeline id so cards are never confused', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderThinkingDelta(activities, 'a');
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderThinkingDelta(activities, 'b');
+    activities = applyBuilderToolEvent(activities, start('call-2', 'write'));
+
+    const ids = activities.map((activity) => activity.toolCallId);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    const { ops } = planBuilderTimeline(ids, activities as BuilderToolActivity[]);
+    expect(ops.every((op) => op.action === 'reuse')).toBe(true);
   });
 });

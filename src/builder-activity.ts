@@ -7,7 +7,63 @@ export type BuilderToolActivity = {
   status: BuilderToolStatus;
   output: string;
   isError: boolean;
+  /** Absent on tool entries written before reasoning joined the timeline. */
+  kind?: 'tool';
 };
+
+/**
+ * A stretch of model reasoning, held in the same list as the tool calls so the
+ * timeline reads in the order things actually happened: reasoning, the call it
+ * led to, its output, the reasoning about that output. One collected block at
+ * the top could not show which thought produced which call.
+ */
+export type BuilderReasoningActivity = {
+  kind: 'reasoning';
+  toolCallId: string;
+  text: string;
+};
+
+export type BuilderActivity = BuilderToolActivity | BuilderReasoningActivity;
+
+export function isReasoningActivity(
+  activity: BuilderActivity
+): activity is BuilderReasoningActivity {
+  return (activity as BuilderReasoningActivity).kind === 'reasoning';
+}
+
+/**
+ * Append reasoning text to the timeline.
+ *
+ * Deltas extend the trailing reasoning entry; anything else in between (a tool
+ * call) closes it, so the next thought starts its own block.
+ */
+export function applyBuilderThinkingDelta(
+  activities: BuilderActivity[],
+  delta: string
+): BuilderActivity[] {
+  if (!delta) return activities;
+  const last = activities[activities.length - 1];
+  if (last && isReasoningActivity(last)) {
+    return activities.map((activity, index) =>
+      index === activities.length - 1
+        ? { ...last, text: last.text + delta }
+        : activity
+    );
+  }
+  return [
+    ...activities,
+    { kind: 'reasoning', toolCallId: `reasoning-${activities.length}`, text: delta }
+  ];
+}
+
+/** The reasoning text, in order — used to keep the persisted `thinking` field. */
+export function collectBuilderReasoning(activities: BuilderActivity[]): string {
+  return activities
+    .filter(isReasoningActivity)
+    .map((activity) => activity.text)
+    .join('\n\n')
+    .trim();
+}
 
 export type BuilderToolEvent =
   | {
@@ -86,15 +142,19 @@ export function planBuilderTimeline(
 }
 
 export function applyBuilderToolEvent(
-  activities: BuilderToolActivity[],
+  activities: BuilderActivity[],
   event: BuilderToolEvent
-): BuilderToolActivity[] {
-  const existingIndex = activities.findIndex((activity) => activity.toolCallId === event.toolCallId);
-  const existing = existingIndex >= 0 ? activities[existingIndex] : undefined;
+): BuilderActivity[] {
+  const existingIndex = activities.findIndex(
+    (activity) => !isReasoningActivity(activity) && activity.toolCallId === event.toolCallId
+  );
+  const existing =
+    existingIndex >= 0 ? (activities[existingIndex] as BuilderToolActivity) : undefined;
   let next: BuilderToolActivity;
 
   if (event.type === 'start') {
     next = {
+      kind: 'tool',
       toolCallId: event.toolCallId,
       toolName: event.toolName,
       args: event.args,
@@ -104,6 +164,7 @@ export function applyBuilderToolEvent(
     };
   } else if (event.type === 'update') {
     next = {
+      kind: 'tool',
       toolCallId: event.toolCallId,
       toolName: event.toolName || existing?.toolName || 'tool',
       args: event.args,
@@ -113,6 +174,7 @@ export function applyBuilderToolEvent(
     };
   } else {
     next = {
+      kind: 'tool',
       toolCallId: event.toolCallId,
       toolName: event.toolName || existing?.toolName || 'tool',
       args: existing?.args || {},
