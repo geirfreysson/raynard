@@ -268,13 +268,26 @@ async function writeApiCacheEntry(path, payload) {
 }
 
 async function errorDetail(response) {
+  // Read the body once as text: plenty of APIs explain a 4xx in plain text
+  // ("Unknown query parameter 'x' allowed parameters [...]"), and dropping that
+  // leaves an agent with a bare status code to guess against.
+  let raw = '';
   try {
-    const body = await response.json();
-    const message = body && typeof body === 'object' ? body.error ?? body.message : undefined;
-    return typeof message === 'string' && message.trim() ? ` — ${redactSecrets(message.trim())}` : '';
+    raw = await response.text();
   } catch {
     return '';
   }
+  if (!raw.trim()) return '';
+  let message = raw;
+  try {
+    const body = JSON.parse(raw);
+    const structured = body && typeof body === 'object' ? body.error ?? body.message ?? body.detail : undefined;
+    if (typeof structured === 'string' && structured.trim()) message = structured;
+  } catch {
+    // Not JSON; the raw text is the explanation.
+  }
+  const trimmed = message.trim().replace(/\s+/g, ' ').slice(0, 400);
+  return trimmed ? ` — ${redactSecrets(trimmed)}` : '';
 }
 
 function safeHost(url) {

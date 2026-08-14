@@ -129,6 +129,29 @@ describe('shared generated-plugin SDK', () => {
     }
   });
 
+  it('surfaces plain-text error bodies, not only JSON ones', async () => {
+    // OECD answers a bad SDMX query with text, so dropping non-JSON bodies left
+    // an agent guessing at a bare status code.
+    const mocked = mockFetch(() => ({
+      status: 422,
+      body: "Unknown query parameter  'dimension_at_observation' allowed parameters [startPeriod, dimensionAtObservation]"
+    }));
+    try {
+      await expect(apiGet('https://sdmx.example.org/data')).rejects.toThrow(/dimensionAtObservation/);
+    } finally {
+      mocked.restore();
+    }
+  });
+
+  it('prefers a structured message when the error body is JSON', async () => {
+    const mocked = mockFetch(() => ({ status: 400, body: { error: 'Bad dimension key' } }));
+    try {
+      await expect(apiGet('https://api.example.com/thing')).rejects.toThrow(/HTTP 400.*Bad dimension key/s);
+    } finally {
+      mocked.restore();
+    }
+  });
+
   it('does not cache failed API responses', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'raynard-sdk-cache-'));
     const mocked = mockFetch(() => ({ status: 503, body: { message: 'Unavailable' } }));
