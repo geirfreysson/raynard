@@ -37,9 +37,12 @@ generated API plugins.
   suggestions are drawn round-robin across plugins before any plugin repeats.
   If fewer than three usable plugin prompts exist, the three built-in prompts
   are shown. Clicking a suggestion fills the composer without submitting it.
-- Explore and Build are automatic, host-owned states. The mode controls are
-  visible but disabled, the composer identifies the selected model/role, and a
-  persisted status line is inserted when the host actually changes mode.
+- Explore and Build are automatic, host-owned states. There are no mode
+  buttons: the composer carries one muted line naming the active
+  `provider/model` and its role (`explorer` or `builder`), and a persisted
+  status line is inserted when the host actually changes mode. That line never
+  mentions `.env` — where a credential came from is a setup detail owned by
+  onboarding and `/models`.
 - User messages use a muted gray block across the message width. Assistant
   output uses the app sans-serif font and supports bounded Markdown, reasoning
   details, citations, tables, and persisted result cards.
@@ -54,8 +57,15 @@ generated API plugins.
   reasoning, heartbeat, and final summary. Runs belong to chats: multiple chats
   can work concurrently, navigation does not cancel them, and returning to a
   busy chat reconnects its live state and Stop control.
-- `/models` opens provider configuration. Chat/Explore and Coding/Build models
-  are selected independently, and API keys are stored through the OS keychain.
+- On a first run with nothing connected anywhere — no keychain credential and
+  no key in `.env` — a full-screen gate asks for a provider before the app can
+  be used: one "Sign in with ChatGPT" button and an "Other" link that reveals
+  the key-based providers, each with a link to the console that issues keys.
+- `/models` opens provider configuration and lists ChatGPT, Claude, and Kimi.
+  One provider serves both roles, at that provider's default model; the model
+  is not editable in the UI. The key-based `api.openai.com` account is not a
+  fourth row — it sits behind a secondary link, and is promoted to a row only
+  while it is the active provider. API keys are stored through the OS keychain.
 
 ## Agent Architecture
 
@@ -97,8 +107,10 @@ active chat path.
 
 Every ordinary user message switches to Explore and uses the selected
 Chat/Explore model. The Pi coding agent uses the separately selected
-Coding/Build model only after the plugin-writing confirmation. `/models`
-configures these roles independently.
+Coding/Build model only after the plugin-writing confirmation. The two roles
+still have separate config fields (`active_provider`/`active_model` and
+`active_coding_provider`/`active_coding_model`), but `/models` writes both at
+once with `role: "both"`, so one provider and model serve the whole app.
 
 The Stop button calls `cancel_model_chat_stream`. Rust records cancellation and
 terminates the selected chat's main-agent or builder sidecar process; Pi also
@@ -250,6 +262,19 @@ Pull requests should describe the user-facing change, list verification commands
 ## Security & Configuration Tips
 
 Do not commit `.env` or API keys. `.env.example` documents expected variables. API keys entered through `/models` are stored in the operating system keychain via Rust `keyring`; app config should store preferences only, not secrets.
+
+All secrets — provider credentials and plugin API keys — live in a single
+keychain item (service `ai.raynard`, account `secrets`) holding a JSON map from
+the old per-secret account name to its value. macOS authorizes per item, so one
+item is one password prompt per app run however many secrets are stored. A
+secret still under its own legacy item is folded into the map on first read and
+the legacy item is deleted. Reads and writes go through `read_keychain_account`,
+`write_keychain_account`, and `delete_keychain_account`; nothing else should
+open a keyring `Entry`.
+
+Prompts cannot be eliminated in `tauri dev`: cargo ad-hoc-signs the binary, so
+its keychain ACL is pinned to a code hash that changes on every rebuild and
+"Always Allow" never applies to the next build. Signed release builds keep it.
 
 Never print API keys while debugging sidecars. Pass credentials through the
 normal Rust/keychain path. Generated plugin directories are constrained and

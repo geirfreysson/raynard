@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import {
   createElement as createLucideElement,
   Database,
@@ -107,9 +107,34 @@ type ModelProvider = {
   chatActive: boolean;
   codingActive: boolean;
   connected: boolean;
+  authMethod: ProviderAuthMethod;
+  /** Console page that issues keys for this provider; empty for sign-in. */
+  apiKeyUrl: string;
 };
 
-type ModelRole = 'chat' | 'coding';
+/**
+ * One surface that can run the connect-a-provider steps.
+ *
+ * Both the `/models` modal and the first-run splash walk the same three screens
+ * (pick a provider, sign in, paste a key). They differ only in where the DOM
+ * goes and what "back" and "done" mean, so the steps take this instead of
+ * reaching for the modal's elements directly.
+ */
+type ProviderFlowHost = {
+  content: HTMLElement;
+  setTitle: (text: string) => void;
+  setHint: (text: string) => void;
+  onBack: () => void;
+  onConnected: () => void;
+};
+
+type OAuthLoginEvent = {
+  streamId: string;
+  eventType: 'auth_url' | 'progress' | 'error';
+  url?: string | null;
+  message?: string | null;
+  error?: string | null;
+};
 
 type ModelProviderList = {
   providers: ModelProvider[];
@@ -337,11 +362,7 @@ app.innerHTML = `
         <form id="introForm" class="intro-composer" autocomplete="off">
           <textarea id="introInput" placeholder="Ask anything ..." rows="2"></textarea>
           <div class="composer-meta-row">
-            <span id="introEnvLabel" class="composer-model-label">checking .env</span>
-            <div class="mode-toggle" role="group" aria-label="Agent mode">
-              <button type="button" data-mode-option="explore" aria-pressed="true">Explore</button>
-              <button type="button" data-mode-option="build" aria-pressed="false">Build</button>
-            </div>
+            <span id="introEnvLabel" class="composer-model-label"></span>
           </div>
         </form>
       </section>
@@ -352,12 +373,8 @@ app.innerHTML = `
       <form id="chatForm" class="composer" autocomplete="off">
         <textarea id="chatInput" rows="1"></textarea>
         <div class="composer-meta-row">
-          <span id="chatEnvLabel" class="composer-model-label">hello-world runtime</span>
+          <span id="chatEnvLabel" class="composer-model-label"></span>
           <div class="composer-controls">
-            <div class="mode-toggle" role="group" aria-label="Agent mode">
-              <button type="button" data-mode-option="explore" aria-pressed="true">Explore</button>
-              <button type="button" data-mode-option="build" aria-pressed="false">Build</button>
-            </div>
             <button id="stopStreamButton" class="stop-stream-button is-hidden" type="button" aria-label="Stop response">Stop</button>
           </div>
         </div>
@@ -371,6 +388,15 @@ app.innerHTML = `
       </div>
 
       <div id="mentionMenu" class="mention-menu is-hidden" aria-hidden="true"></div>
+
+      <section id="onboardingOverlay" class="onboarding-overlay is-hidden" aria-hidden="true">
+        <div class="onboarding-panel" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
+          <div class="brand-mark" aria-hidden="true">${foxLogoMarkup}</div>
+          <h1 id="onboardingTitle">Please select your AI frontier model</h1>
+          <p id="onboardingHint">Sign in with ChatGPT and start straight away.</p>
+          <div id="onboardingContent" class="onboarding-content"></div>
+        </div>
+      </section>
 
       <section id="modelsModal" class="models-modal-overlay is-hidden" aria-hidden="true">
         <div class="models-modal" role="dialog" aria-modal="true" aria-labelledby="modelsModalTitle">
@@ -448,7 +474,6 @@ const chatForm = document.querySelector<HTMLFormElement>('#chatForm');
 const chatInput = document.querySelector<HTMLTextAreaElement>('#chatInput');
 const chatEnvLabel = document.querySelector<HTMLElement>('#chatEnvLabel');
 const stopStreamButton = document.querySelector<HTMLButtonElement>('#stopStreamButton');
-const modeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mode-option]'));
 const suggestionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-suggestion]'));
 const slashMenu = document.querySelector<HTMLElement>('#slashMenu');
 const slashMenuItem = document.querySelector<HTMLButtonElement>('[data-command="/models"]');
@@ -464,6 +489,10 @@ const modelsModal = document.querySelector<HTMLElement>('#modelsModal');
 const modelsModalTitle = document.querySelector<HTMLElement>('#modelsModalTitle');
 const modelsModalHint = document.querySelector<HTMLElement>('#modelsModalHint');
 const modelsModalContent = document.querySelector<HTMLElement>('#modelsModalContent');
+const onboardingOverlay = document.querySelector<HTMLElement>('#onboardingOverlay');
+const onboardingTitle = document.querySelector<HTMLElement>('#onboardingTitle');
+const onboardingHint = document.querySelector<HTMLElement>('#onboardingHint');
+const onboardingContent = document.querySelector<HTMLElement>('#onboardingContent');
 const modelsModalClose = document.querySelector<HTMLButtonElement>('#modelsModalClose');
 const extensionDeleteModal = document.querySelector<HTMLElement>('#extensionDeleteModal');
 const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
@@ -506,7 +535,11 @@ window.setTimeout(() => {
 }, 650);
 
 loadEnvStatus().catch(() => {
-  setEnvLabel('no .env loaded');
+  setEnvLabel('');
+});
+initProviderOnboarding().catch(() => {
+  // A host that cannot answer is a broken install, not a fresh one. Blocking
+  // the app behind onboarding here would hide a working setup.
 });
 void refreshChatHistory();
 void refreshGeneratedPlugins();
@@ -643,10 +676,6 @@ newChatRail?.addEventListener('click', () => {
   setSidebarView('chats');
   void startNewConversation({ showPreChat: true });
 });
-for (const button of modeButtons) {
-  button.disabled = true;
-  button.title = 'Mode switches automatically';
-}
 stopStreamButton?.addEventListener('click', () => {
   const streamId = chatRuns.get(activeSessionId)?.streamId;
   if (!streamId) return;
@@ -661,29 +690,32 @@ async function loadEnvStatus() {
   renderComposerModelLabel();
 }
 
+/**
+ * The composer meta row names the model and the role it is playing. Where the
+ * credential came from is a setup detail, so an unresolved provider leaves the
+ * model half blank rather than explaining `.env` in the chat furniture.
+ */
 function setEnvLabel(label: string) {
   const modeSuffix = appMode === 'build' ? 'builder' : 'explorer';
-  if (introEnvLabel) introEnvLabel.textContent = `${label} · ${modeSuffix}`;
-  if (chatEnvLabel) chatEnvLabel.textContent = `${label} · ${modeSuffix}`;
+  const text = label ? `${label} · ${modeSuffix}` : modeSuffix;
+  if (introEnvLabel) introEnvLabel.textContent = text;
+  if (chatEnvLabel) chatEnvLabel.textContent = text;
 }
 
 function renderComposerModelLabel() {
   if (!llmEnvStatus) {
-    setEnvLabel('no .env loaded');
+    setEnvLabel('');
     return;
   }
 
   const isBuild = appMode === 'build';
   const provider = isBuild ? llmEnvStatus.codingProvider : llmEnvStatus.provider;
   const model = isBuild ? llmEnvStatus.codingModel : llmEnvStatus.model;
-  const configured = isBuild ? llmEnvStatus.codingConfigured : llmEnvStatus.configured;
 
-  if (!llmEnvStatus.found) {
-    setEnvLabel(`no .env loaded - ${provider}/${model}`);
-    return;
-  }
-
-  setEnvLabel(configured ? `${provider}/${model}` : `.env found - missing ${provider} key`);
+  // An OAuth provider carries no stored key, so "configured" cannot stand in
+  // for "usable" here. A genuinely unconnected app is stopped by the
+  // onboarding gate before it can reach this row.
+  setEnvLabel(`${provider}/${model}`);
 }
 
 function loadAppMode(): AppMode {
@@ -702,7 +734,7 @@ function setAppMode(mode: AppMode) {
   syncModeControls();
   renderComposerModelLabel();
   void loadEnvStatus().catch(() => {
-    setEnvLabel('no .env loaded');
+    setEnvLabel('');
   });
 }
 
@@ -723,11 +755,6 @@ async function switchAppModeWithStatus(mode: AppMode) {
 }
 
 function syncModeControls() {
-  for (const button of modeButtons) {
-    const selected = button.dataset.modeOption === appMode;
-    button.classList.toggle('is-active', selected);
-    button.setAttribute('aria-pressed', String(selected));
-  }
   if (shell) {
     shell.dataset.mode = appMode;
   }
@@ -899,70 +926,230 @@ function renderModelsError(message: string) {
   }
 }
 
-function renderProviderList() {
-  if (!modelsModalContent) return;
-  if (modelsModalTitle) modelsModalTitle.textContent = 'Model Providers';
-  if (modelsModalHint) modelsModalHint.textContent = 'Select separate models for chat/explore and coding/build.';
-  modelsModalContent.innerHTML = '';
+/**
+ * Blocks the app until a provider exists, on the very first run only.
+ *
+ * The gate is "nothing is connected anywhere", and `connected` already counts a
+ * key resolved from `.env`, so an existing install or a developer machine goes
+ * straight to the chat. A failure to reach the host is not treated as an empty
+ * setup — showing the splash then would hide a working app behind onboarding.
+ */
+async function initProviderOnboarding() {
+  const result = await invoke<ModelProviderList>('list_model_providers');
+  modelProviders = result.providers;
+  if (needsProviderOnboarding(modelProviders)) openOnboarding();
+}
 
-  for (const provider of modelProviders) {
-    const row = document.createElement('section');
-    row.className = `models-provider-row${provider.chatActive || provider.codingActive ? ' is-active' : ''}`;
-    row.innerHTML = `
+/** The first-run splash as a provider-flow surface. */
+function onboardingHost(): ProviderFlowHost | null {
+  if (!onboardingContent) return null;
+  return {
+    content: onboardingContent,
+    setTitle: (text) => {
+      if (onboardingTitle) onboardingTitle.textContent = text;
+    },
+    setHint: (text) => {
+      if (onboardingHint) onboardingHint.textContent = text;
+    },
+    onBack: () => renderOnboardingChoice(),
+    onConnected: () => closeOnboarding()
+  };
+}
+
+function openOnboarding() {
+  onboardingOverlay?.classList.remove('is-hidden');
+  onboardingOverlay?.setAttribute('aria-hidden', 'false');
+  renderOnboardingChoice();
+}
+
+function closeOnboarding() {
+  onboardingOverlay?.classList.add('is-hidden');
+  onboardingOverlay?.setAttribute('aria-hidden', 'true');
+  introInput?.focus();
+}
+
+/**
+ * The first screen: one sign-in, everything else behind "Other".
+ *
+ * ChatGPT is not one option among equals here. It is the only provider that
+ * connects without leaving for a billing console, so it gets the whole width
+ * and the others get a link.
+ */
+function renderOnboardingChoice() {
+  const host = onboardingHost();
+  if (!host) return;
+  host.setTitle('Please select your AI frontier model');
+  host.setHint('Sign in with ChatGPT and start straight away.');
+  host.content.innerHTML = '';
+
+  const chatgpt = modelProviders.find((provider) => provider.authMethod === 'oauth');
+  if (chatgpt) {
+    const signIn = document.createElement('button');
+    signIn.type = 'button';
+    signIn.className = 'onboarding-primary';
+    signIn.textContent = `Sign in with ${chatgpt.name}`;
+    signIn.addEventListener('click', () => void selectProvider(chatgpt, host));
+    host.content.appendChild(signIn);
+  }
+
+  const other = document.createElement('button');
+  other.type = 'button';
+  other.className = 'onboarding-secondary';
+  other.textContent = 'Other';
+  other.addEventListener('click', () => renderOnboardingOther());
+  host.content.appendChild(other);
+}
+
+/** The rest of the providers, each of which needs a pasted key. */
+function renderOnboardingOther() {
+  const host = onboardingHost();
+  if (!host) return;
+  host.setTitle('Connect a provider');
+  host.setHint('These need an API key. Each one links to the page that issues it.');
+  host.content.innerHTML = '';
+
+  const { primary, advanced } = partitionProviders(modelProviders);
+  const keyProviders = [...primary, ...advanced].filter(
+    (provider) => provider.authMethod === 'api_key'
+  );
+  for (const provider of keyProviders) {
+    const choice = document.createElement('button');
+    choice.type = 'button';
+    choice.className = 'onboarding-choice';
+    choice.innerHTML = `
       <span class="models-provider-icon" aria-hidden="true">${providerIcon(provider.id)}</span>
       <span class="models-provider-main">
         <strong>${escapeHtml(provider.name)}</strong>
-        <span>${escapeHtml(provider.baseUrl.replace(/^https?:\/\//, ''))}</span>
+        <span>${escapeHtml(providerSubtitle(provider))}</span>
       </span>
-      <div class="models-provider-controls">
-        <label class="models-role-field">
-          <span>Chat</span>
-          <input class="models-role-input" data-role="chat" value="${escapeHtml(provider.chatModel || provider.defaultChatModel)}" spellcheck="false" />
-        </label>
-        <button type="button" class="models-role-action${provider.chatActive ? ' is-active' : ''}" data-role="chat">
-          ${provider.connected ? (provider.chatActive ? 'Chat active' : 'Use for chat') : 'Add key'}
-        </button>
-        <label class="models-role-field">
-          <span>Coding</span>
-          <input class="models-role-input" data-role="coding" value="${escapeHtml(provider.codingModel || provider.defaultCodingModel)}" spellcheck="false" />
-        </label>
-        <button type="button" class="models-role-action${provider.codingActive ? ' is-active' : ''}" data-role="coding">
-          ${provider.connected ? (provider.codingActive ? 'Coding active' : 'Use for coding') : 'Add key'}
-        </button>
-      </div>
     `;
-    row.querySelectorAll<HTMLButtonElement>('.models-role-action').forEach((button) => {
-      button.addEventListener('click', () => {
-        const role = button.dataset.role === 'coding' ? 'coding' : 'chat';
-        const input = row.querySelector<HTMLInputElement>(`.models-role-input[data-role="${role}"]`);
-        const model =
-          input?.value.trim() ||
-          (role === 'coding' ? provider.defaultCodingModel : provider.defaultChatModel);
-        void selectProvider(provider, role, model);
-      });
-    });
-    modelsModalContent.appendChild(row);
+    choice.addEventListener('click', () => void selectProvider(provider, host));
+    host.content.appendChild(choice);
+  }
+
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'onboarding-secondary';
+  back.textContent = 'Back';
+  back.addEventListener('click', () => renderOnboardingChoice());
+  host.content.appendChild(back);
+}
+
+/** The `/models` modal as a provider-flow surface. */
+function modelsModalHost(): ProviderFlowHost | null {
+  if (!modelsModalContent) return null;
+  return {
+    content: modelsModalContent,
+    setTitle: (text) => {
+      if (modelsModalTitle) modelsModalTitle.textContent = text;
+    },
+    setHint: (text) => {
+      if (modelsModalHint) modelsModalHint.textContent = text;
+    },
+    onBack: () => renderProviderList(),
+    onConnected: () => closeModelsModal()
+  };
+}
+
+function renderProviderList() {
+  const host = modelsModalHost();
+  if (!host) return;
+  host.setTitle('Model Providers');
+  host.setHint('One provider powers both Explore and Build.');
+  host.content.innerHTML = '';
+
+  const { primary, advanced } = partitionProviders(modelProviders);
+  for (const provider of primary) {
+    host.content.appendChild(providerRow(provider, host));
+  }
+
+  // api.openai.com still works and some people only have a key, but a ChatGPT
+  // subscription is the path onboarding pushes, so the key account is a link
+  // rather than a fourth row competing with it.
+  for (const provider of advanced) {
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'models-modal-note models-advanced-link';
+    link.textContent = provider.connected
+      ? `Use an ${provider.name} key instead`
+      : `Have an ${provider.name} key instead?`;
+    link.addEventListener('click', () => void selectProvider(provider, host));
+    host.content.appendChild(link);
   }
 }
 
-async function selectProvider(provider: ModelProvider, role: ModelRole, model: string) {
-  if (!provider.connected) {
-    renderApiKeyStep(provider, role, model);
+function providerRow(provider: ModelProvider, host: ProviderFlowHost) {
+  const row = document.createElement('section');
+  row.className = `models-provider-row${providerIsActive(provider) ? ' is-active' : ''}`;
+  row.innerHTML = `
+    <span class="models-provider-icon" aria-hidden="true">${providerIcon(provider.id)}</span>
+    <span class="models-provider-main">
+      <strong>${escapeHtml(provider.name)}</strong>
+      <span>${escapeHtml(providerSubtitle(provider))}</span>
+      ${
+        providerCanSignOut(provider)
+          ? '<button type="button" class="models-provider-signout">Sign out</button>'
+          : ''
+      }
+    </span>
+    <div class="models-provider-controls">
+      <button type="button" class="models-role-action${providerIsActive(provider) ? ' is-active' : ''}">
+        ${providerActionLabel(provider)}
+      </button>
+    </div>
+  `;
+  row
+    .querySelector<HTMLButtonElement>('.models-role-action')
+    ?.addEventListener('click', () => void selectProvider(provider, host));
+  row
+    .querySelector<HTMLButtonElement>('.models-provider-signout')
+    ?.addEventListener('click', () => void signOutProvider(provider));
+  return row;
+}
+
+/**
+ * The line under a provider name.
+ *
+ * The model is no longer editable, so the row says which one it will use rather
+ * than which host it talks to — that was never the interesting part.
+ */
+function providerSubtitle(provider: ModelProvider) {
+  return provider.chatModel || provider.defaultChatModel;
+}
+
+/**
+ * Connects a provider, or starts the flow that can.
+ *
+ * The model is not asked for: each provider ships one default that serves both
+ * roles, and `role: 'both'` is what keeps Explore and Build on it together.
+ */
+async function selectProvider(provider: ModelProvider, host: ProviderFlowHost) {
+  if (providerNeedsAuth(provider)) {
+    if (provider.authMethod === 'oauth') {
+      renderOAuthSignInStep(provider, host);
+    } else {
+      renderApiKeyStep(provider, host);
+    }
     return;
   }
 
   try {
     const result = await invoke<ModelProviderList>('set_active_model_provider', {
       providerId: provider.id,
-      role,
-      model
+      role: 'both',
+      model: provider.defaultChatModel
     });
-    modelProviders = result.providers;
-    setEnvLabel(labelFromProvidersForMode(modelProviders) || `${provider.id}/${model}`);
-    closeModelsModal();
+    applyConnectedProviders(result.providers);
+    host.onConnected();
   } catch (error) {
-    if (modelsModalHint) modelsModalHint.textContent = getErrorMessage(error, `Could not select ${provider.name}.`);
+    host.setHint(getErrorMessage(error, `Could not select ${provider.name}.`));
   }
+}
+
+/** Records a provider list that may have just changed which model is in use. */
+function applyConnectedProviders(providers: ModelProvider[]) {
+  modelProviders = providers;
+  setEnvLabel(labelFromProvidersForMode(modelProviders));
 }
 
 /**
@@ -1080,15 +1267,27 @@ function renderPluginCredentialStep(
   setTimeout(() => input.focus(), 0);
 }
 
-function renderApiKeyStep(provider: ModelProvider, role: ModelRole, model: string) {
-  if (!modelsModalContent) return;
-  if (modelsModalTitle) modelsModalTitle.textContent = provider.name;
-  if (modelsModalHint) modelsModalHint.textContent = `Paste your API key to use ${model} for ${role}.`;
-  modelsModalContent.innerHTML = '';
+function renderApiKeyStep(provider: ModelProvider, host: ProviderFlowHost) {
+  host.setTitle(provider.name);
+  host.setHint(`Paste your API key to use ${provider.defaultChatModel}.`);
+  host.content.innerHTML = '';
 
   const form = document.createElement('form');
   form.className = 'models-key-form';
   form.autocomplete = 'off';
+
+  if (provider.apiKeyUrl) {
+    // Opened through the host rather than as an <a href>: a navigation inside
+    // the webview would replace the app with the provider's console.
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'models-modal-note models-advanced-link';
+    link.textContent = 'Get an API key';
+    link.addEventListener('click', () => {
+      void invoke('open_external_url', { url: provider.apiKeyUrl });
+    });
+    form.appendChild(link);
+  }
 
   const input = document.createElement('input');
   input.type = 'password';
@@ -1105,7 +1304,7 @@ function renderApiKeyStep(provider: ModelProvider, role: ModelRole, model: strin
   back.type = 'button';
   back.className = 'models-secondary-action';
   back.textContent = 'Back';
-  back.addEventListener('click', () => renderProviderList());
+  back.addEventListener('click', () => host.onBack());
   actions.appendChild(back);
 
   const save = document.createElement('button');
@@ -1119,27 +1318,164 @@ function renderApiKeyStep(provider: ModelProvider, role: ModelRole, model: strin
     event.preventDefault();
     const apiKey = input.value.trim();
     if (!apiKey) {
-      if (modelsModalHint) modelsModalHint.textContent = 'API key is required.';
+      host.setHint('API key is required.');
       return;
     }
     try {
       const result = await invoke<ModelProviderList>('save_provider_api_key', {
         providerId: provider.id,
         apiKey,
-        role,
-        model
+        role: 'both',
+        model: provider.defaultChatModel
       });
       input.value = '';
-      modelProviders = result.providers;
-      setEnvLabel(labelFromProvidersForMode(modelProviders) || `${provider.id}/${model}`);
-      closeModelsModal();
+      applyConnectedProviders(result.providers);
+      host.onConnected();
     } catch (error) {
-      if (modelsModalHint) modelsModalHint.textContent = getErrorMessage(error, `Could not save ${provider.name} key.`);
+      host.setHint(getErrorMessage(error, `Could not save ${provider.name} key.`));
     }
   });
 
-  modelsModalContent.appendChild(form);
+  host.content.appendChild(form);
   setTimeout(() => input.focus(), 0);
+}
+
+/**
+ * Signs in to a provider that authenticates in the browser.
+ *
+ * The host opens the page and waits for the redirect, so the usual outcome is
+ * that this screen just resolves. The paste field is the fallback for the one
+ * failure that cannot be detected up front: pi's callback server needs a fixed
+ * local port, and something else — usually the Codex CLI — may already hold it,
+ * in which case the redirect never reaches us and the code has to come by hand.
+ */
+function renderOAuthSignInStep(provider: ModelProvider, host: ProviderFlowHost) {
+  host.setTitle(provider.name);
+  host.setHint(`Opening your browser to sign in, then using ${provider.defaultChatModel}.`);
+  host.content.innerHTML = '';
+
+  const streamId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `oauth-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let authUrl = '';
+  let settled = false;
+
+  const status = document.createElement('p');
+  status.className = 'models-oauth-status';
+  status.textContent = 'Waiting for you to finish signing in...';
+  host.content.appendChild(status);
+
+  const reopen = document.createElement('button');
+  reopen.type = 'button';
+  reopen.className = 'models-oauth-reopen';
+  reopen.textContent = 'Open the sign-in page again';
+  reopen.hidden = true;
+  reopen.addEventListener('click', () => {
+    if (authUrl) void invoke('open_external_url', { url: authUrl });
+  });
+  host.content.appendChild(reopen);
+
+  const form = document.createElement('form');
+  form.className = 'models-oauth-form';
+  form.autocomplete = 'off';
+
+  const label = document.createElement('label');
+  label.className = 'models-oauth-label';
+  label.textContent = "Browser didn't redirect? Paste the code or the redirect URL:";
+  form.appendChild(label);
+
+  const codeInput = document.createElement('input');
+  codeInput.type = 'text';
+  codeInput.className = 'models-key-input';
+  codeInput.placeholder = 'Authorization code';
+  codeInput.spellcheck = false;
+  codeInput.autocomplete = 'off';
+  form.appendChild(codeInput);
+
+  const actions = document.createElement('div');
+  actions.className = 'models-modal-actions';
+
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'models-secondary-action';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => {
+    settled = true;
+    void invoke('cancel_model_chat_stream', { streamId });
+    host.onBack();
+  });
+  actions.appendChild(cancel);
+
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'models-primary-action';
+  submit.textContent = 'Submit code';
+  actions.appendChild(submit);
+  form.appendChild(actions);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const code = codeInput.value.trim();
+    if (!code) return;
+    try {
+      await invoke('submit_provider_oauth_code', { streamId, code });
+      codeInput.value = '';
+      status.textContent = 'Finishing sign-in...';
+    } catch (error) {
+      host.setHint(getErrorMessage(error, 'Could not submit the code.'));
+    }
+  });
+
+  host.content.appendChild(form);
+
+  const onEvent = new Channel<OAuthLoginEvent>((payload) => {
+    if (payload.streamId !== streamId) return;
+    if (payload.eventType === 'auth_url' && payload.url) {
+      authUrl = payload.url;
+      reopen.hidden = false;
+    } else if (payload.eventType === 'progress' && payload.message) {
+      status.textContent = payload.message;
+    } else if (payload.eventType === 'error' && payload.error) {
+      status.textContent = payload.error;
+    }
+  });
+
+  void (async () => {
+    try {
+      const result = await invoke<ModelProviderList>('run_provider_oauth_login', {
+        streamId,
+        onEvent,
+        providerId: provider.id,
+        role: 'both',
+        model: provider.defaultChatModel
+      });
+      if (settled) return;
+      settled = true;
+      applyConnectedProviders(result.providers);
+      host.onConnected();
+    } catch (error) {
+      if (settled) return;
+      settled = true;
+      // Back first: returning to the picker rewrites the hint, so the failure
+      // has to be written after it or it never gets read.
+      host.onBack();
+      host.setHint(getErrorMessage(error, `Could not sign in to ${provider.name}.`));
+    }
+  })();
+}
+
+async function signOutProvider(provider: ModelProvider) {
+  try {
+    const result = await invoke<ModelProviderList>('sign_out_provider', { providerId: provider.id });
+    modelProviders = result.providers;
+    setEnvLabel(labelFromProvidersForMode(modelProviders));
+    renderProviderList();
+  } catch (error) {
+    if (modelsModalHint) {
+      modelsModalHint.textContent = getErrorMessage(error, `Could not sign out of ${provider.name}.`);
+    }
+  }
 }
 
 function labelFromProvidersForMode(providers: ModelProvider[]) {
@@ -1149,7 +1485,7 @@ function labelFromProvidersForMode(providers: ModelProvider[]) {
 }
 
 function providerIcon(providerId: string) {
-  if (providerId === 'openai') return 'O';
+  if (providerId === 'openai' || providerId === 'openai-codex') return 'O';
   if (providerId === 'claude') return 'C';
   return 'K';
 }

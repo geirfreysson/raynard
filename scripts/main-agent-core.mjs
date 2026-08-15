@@ -3,6 +3,9 @@ import { getModel } from '@mariozechner/pi-ai';
 function modelApi(provider) {
   if (provider === 'claude') return 'anthropic-messages';
   if (provider === 'openai') return 'openai-responses';
+  // A ChatGPT subscription token only authenticates against
+  // chatgpt.com/backend-api, which speaks its own Responses dialect.
+  if (provider === 'openai-codex') return 'openai-codex-responses';
   return 'openai-completions';
 }
 
@@ -31,9 +34,53 @@ const FALLBACK_LIMITS = {
   moonshot: { contextWindow: 262144, maxTokens: 32768 },
   kimi: { contextWindow: 262144, maxTokens: 32768 },
   claude: { contextWindow: 200000, maxTokens: 32768 },
-  openai: { contextWindow: 128000, maxTokens: 32768 }
+  openai: { contextWindow: 128000, maxTokens: 32768 },
+  'openai-codex': { contextWindow: 272000, maxTokens: 128000 }
 };
 const DEFAULT_LIMITS = { contextWindow: 128000, maxTokens: 16384 };
+
+/**
+ * Whether a model reasons, when the pinned catalog has never heard of it.
+ *
+ * Without this an unrecognized id gets `reasoning: false`, which makes Pi clamp
+ * every thinking level to "off" and silently drop reasoning for the model — the
+ * same staleness problem FALLBACK_LIMITS exists to solve. Only id families that
+ * are unambiguously reasoning models return true: a false positive sends a
+ * `reasoning` parameter to an endpoint that may reject the request outright, so
+ * the conservative direction is deliberate.
+ */
+export function inferReasoningSupport(provider, model) {
+  const id = String(model || '').trim().toLowerCase();
+  if (!id) return false;
+  switch (String(provider || '').trim()) {
+    case 'openai':
+    case 'openai-codex':
+      // o-series and gpt-5 and later. gpt-4o is NOT a reasoning model, and its
+      // name would match a naive /o/ test — hence the anchored patterns.
+      return /^o\d/.test(id) || /^gpt-[5-9]/.test(id) || /^gpt-\d{2}/.test(id);
+    case 'claude':
+      return /^claude-(?:opus|sonnet|haiku)-[4-9]/.test(id) || /^claude-[3-9].*-(?:sonnet|opus)/.test(id);
+    case 'moonshot':
+    case 'kimi':
+      return /^kimi-k[2-9]/.test(id) || id.includes('thinking');
+    default:
+      return false;
+  }
+}
+
+/**
+ * How hard each role thinks.
+ *
+ * Left at "off", Pi sends OpenAI `reasoning: { effort: "none" }` with no summary
+ * — so a GPT model neither reasons nor streams anything the timeline can show.
+ * Kimi appeared to work only because Moonshot returns `reasoning_content`
+ * unasked. Build gets the higher level because a coding pass is long and
+ * multi-step; reasoning bills against the output budget, so this is the first
+ * knob to lower if long builds start truncating (see FALLBACK_LIMITS above).
+ */
+export function defaultThinkingLevel(role) {
+  return role === 'build' ? 'medium' : 'low';
+}
 
 export function createModel(request) {
   const provider = String(request.provider || '').trim();
@@ -48,7 +95,7 @@ export function createModel(request) {
     api: modelApi(provider),
     provider: modelProvider(provider),
     baseUrl: String(request.baseUrl || '').trim(),
-    reasoning: Boolean(known?.reasoning),
+    reasoning: known ? Boolean(known.reasoning) : inferReasoningSupport(provider, model),
     input: ['text'],
     cost: {
       input: 0,

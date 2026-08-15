@@ -8,6 +8,9 @@
   --text-primary: #1f1f1f;
   --text-muted: #5e5e5e;
   --accent: #a0372b;
+  /* The docs-site CTA terracotta, for solid primary actions. */
+  --accent-solid: #a8412f;
+  --accent-solid-hover: #832f21;
   --assistant-line: #2f8f4e;
   --mac-panel: rgba(247, 247, 248, 0.84);
   --mac-panel-strong: rgba(255, 255, 255, 0.92);
@@ -474,33 +477,6 @@ textarea:focus {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-}
-
-.mode-toggle {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(68px, 1fr));
-  min-width: 140px;
-  height: 28px;
-  padding: 2px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.mode-toggle button {
-  min-width: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 650;
-  cursor: default;
-}
-
-.mode-toggle button.is-active {
-  background: var(--text-primary);
-  color: #ffffff;
 }
 
 .stop-stream-button {
@@ -1056,6 +1032,25 @@ a.models-modal-note {
   font-weight: 650;
 }
 
+/* The demoted paths: an API-key OpenAI account, a "get a key" console link. */
+button.models-advanced-link {
+  justify-self: start;
+  border: 0;
+  padding: 4px 4px 4px 0;
+  background: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.models-advanced-link:hover,
+button.models-advanced-link:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+
 .capability-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1545,6 +1540,148 @@ a.models-modal-note {
   white-space: nowrap;
 }
 
+/*
+ * First-run provider gate.
+ *
+ * Sits above the models modal so the two can never argue about who is on top,
+ * and covers the whole window because there is nothing usable underneath it
+ * until a provider is connected.
+ */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  animation: modal-fade-in 150ms ease;
+}
+
+.onboarding-overlay.is-hidden {
+  display: none;
+}
+
+.onboarding-panel {
+  width: min(420px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  border: 1px solid var(--mac-border);
+  border-radius: 16px;
+  background: var(--mac-panel);
+  backdrop-filter: blur(34px) saturate(1.45);
+  -webkit-backdrop-filter: blur(34px) saturate(1.45);
+  box-shadow: var(--mac-shadow);
+  padding: 28px 24px 22px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+  animation: modal-sheet-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.onboarding-panel h1 {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.onboarding-panel p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.onboarding-content {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  text-align: left;
+}
+
+/*
+ * Solid, not a tinted wash: a red-on-red-tint button is how destructive and
+ * error states are drawn, and this is the one welcoming action in the app.
+ */
+.onboarding-primary {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--accent-solid);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.onboarding-primary:hover,
+.onboarding-primary:focus-visible {
+  background: var(--accent-solid-hover);
+  outline: none;
+}
+
+.onboarding-primary:focus-visible {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 2px var(--accent-solid);
+}
+
+.onboarding-secondary {
+  justify-self: center;
+  border: 0;
+  padding: 4px 8px;
+  background: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.onboarding-secondary:hover,
+.onboarding-secondary:focus-visible {
+  color: var(--text-primary);
+  text-decoration: underline;
+  outline: none;
+}
+
+.onboarding-choice {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--mac-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.onboarding-choice:hover,
+.onboarding-choice:focus-visible {
+  background: var(--mac-row-hover);
+  outline: none;
+}
+
+/* The key form and its console link are shared with the models modal. */
+.onboarding-content .models-key-form {
+  padding: 0;
+}
+
 .models-modal-overlay {
   position: fixed;
   inset: 0;
@@ -1643,7 +1780,7 @@ a.models-modal-note {
   background: transparent;
   color: var(--text-primary);
   display: grid;
-  grid-template-columns: 34px minmax(130px, 0.7fr) minmax(240px, 1.3fr);
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 9px 10px;
@@ -1703,43 +1840,8 @@ a.models-modal-note {
 
 .models-provider-controls {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(112px, 1fr) auto;
-  gap: 7px;
+  display: flex;
   align-items: center;
-}
-
-.models-role-field {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.models-role-field span {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0;
-}
-
-.models-role-input {
-  width: 100%;
-  min-width: 0;
-  height: 28px;
-  border: 1px solid rgba(60, 60, 67, 0.14);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.68);
-  color: var(--text-primary);
-  font-family: var(--font-family-mono);
-  font-size: 11px;
-  padding: 0 8px;
-}
-
-.models-role-input:focus {
-  border-color: rgba(160, 55, 43, 0.35);
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(160, 55, 43, 0.09);
 }
 
 .models-role-action {
@@ -1850,6 +1952,55 @@ a.models-modal-note {
 
 .models-modal-actions .models-secondary-action {
   color: rgba(60, 60, 67, 0.8);
+}
+
+.models-provider-signout {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.models-provider-signout:hover,
+.models-provider-signout:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
+.models-oauth-status {
+  padding: 8px 8px 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.models-oauth-reopen {
+  justify-self: start;
+  margin: 0 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.models-oauth-form {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+}
+
+/* The paste fallback is the exception, not the path: keep it quiet until the
+   browser redirect fails to arrive. */
+.models-oauth-label {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .extension-delete-modal-overlay {

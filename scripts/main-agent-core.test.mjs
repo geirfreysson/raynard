@@ -6,6 +6,8 @@ import {
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
+  defaultThinkingLevel,
+  inferReasoningSupport,
   formatToolResult,
   isTransientModelError,
   MODEL_RESULT_BYTE_LIMIT,
@@ -67,6 +69,36 @@ describe('main agent core', () => {
     });
     expect(unknown.contextWindow).toBeGreaterThanOrEqual(262144);
     expect(unknown.maxTokens).toBeGreaterThanOrEqual(32768);
+  });
+
+  it('routes the ChatGPT subscription provider to the Codex responses API', () => {
+    // OAuth access tokens only work against chatgpt.com/backend-api, which
+    // speaks a different wire format than the api.openai.com Responses API.
+    const model = createModel({
+      provider: 'openai-codex',
+      model: 'gpt-5.5',
+      baseUrl: 'https://chatgpt.com/backend-api'
+    });
+
+    expect(model).toMatchObject({
+      id: 'gpt-5.5',
+      api: 'openai-codex-responses',
+      provider: 'openai-codex',
+      baseUrl: 'https://chatgpt.com/backend-api'
+    });
+    expect(model.contextWindow).toBe(272000);
+    expect(model.reasoning).toBe(true);
+
+    // A Codex model newer than the pinned catalog must not drop to the
+    // 128k/16k default: these are all large-context reasoning models.
+    const unknownCodex = createModel({
+      provider: 'openai-codex',
+      model: 'gpt-6-codex',
+      baseUrl: 'https://chatgpt.com/backend-api'
+    });
+    expect(unknownCodex.api).toBe('openai-codex-responses');
+    expect(unknownCodex.contextWindow).toBeGreaterThanOrEqual(272000);
+    expect(unknownCodex.maxTokens).toBeGreaterThanOrEqual(128000);
   });
 
   it('marks an unfinished plugin so the agent resumes it instead of forking a name', () => {
@@ -738,5 +770,50 @@ describe('transient model errors', () => {
     expect(retryAfterMs('429 The engine is currently overloaded')).toBe(null);
     // A server asking for longer than we are willing to wait is ignored.
     expect(retryAfterMs('429 retry-after: 600')).toBe(null);
+  });
+});
+
+describe('reasoning support', () => {
+  it('recognizes the reasoning families the catalog may not know yet', () => {
+    expect(inferReasoningSupport('openai', 'gpt-5.2')).toBe(true);
+    expect(inferReasoningSupport('openai', 'o3-mini')).toBe(true);
+    expect(inferReasoningSupport('openai-codex', 'gpt-5-codex')).toBe(true);
+    expect(inferReasoningSupport('moonshot', 'kimi-k2.5')).toBe(true);
+    expect(inferReasoningSupport('claude', 'claude-opus-5')).toBe(true);
+  });
+
+  it('does not claim reasoning for models that lack it', () => {
+    // gpt-4o would match a naive /o/ test and must not.
+    expect(inferReasoningSupport('openai', 'gpt-4o')).toBe(false);
+    expect(inferReasoningSupport('openai', 'gpt-3.5-turbo')).toBe(false);
+    expect(inferReasoningSupport('moonshot', 'moonshot-v1-8k')).toBe(false);
+    expect(inferReasoningSupport('someone-else', 'mystery-model')).toBe(false);
+    expect(inferReasoningSupport('openai', '')).toBe(false);
+  });
+
+  it('prefers the catalog and only infers when it misses', () => {
+    // A known non-reasoning model must stay false even though inference would
+    // never be consulted for it.
+    const unknown = createModel({
+      provider: 'openai',
+      model: 'gpt-5.9-imaginary',
+      baseUrl: 'https://api.openai.com/v1'
+    });
+    expect(unknown.reasoning).toBe(true);
+
+    const unknownPlain = createModel({
+      provider: 'openai',
+      model: 'gpt-4o-imaginary',
+      baseUrl: 'https://api.openai.com/v1'
+    });
+    expect(unknownPlain.reasoning).toBe(false);
+  });
+
+  it('asks the builder to think harder than an ordinary chat turn', () => {
+    // "off" is what made GPT send effort:"none" and stream no summaries.
+    expect(defaultThinkingLevel('explore')).not.toBe('off');
+    expect(defaultThinkingLevel('build')).not.toBe('off');
+    expect(defaultThinkingLevel('build')).toBe('medium');
+    expect(defaultThinkingLevel('explore')).toBe('low');
   });
 });

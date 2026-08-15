@@ -50,6 +50,11 @@ struct ModelProvider {
     chat_active: bool,
     coding_active: bool,
     connected: bool,
+    /// "api_key" or "oauth" — decides whether the row asks for a pasted key or
+    /// starts a browser sign-in.
+    auth_method: String,
+    /// Console page that issues keys for this provider; empty for sign-in.
+    api_key_url: String,
 }
 
 #[derive(Serialize)]
@@ -483,7 +488,11 @@ fn external_url_target(url: &str) -> Option<&str> {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    let target = external_url_target(&url)
+    open_url_in_browser(&url)
+}
+
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let target = external_url_target(url)
         .ok_or_else(|| "Refusing to open a link that is not a plain http(s) URL.".to_string())?;
 
     #[cfg(target_os = "macos")]
@@ -666,10 +675,8 @@ fn save_plugin_credential(
         return Err("API key is required.".to_string());
     }
     let account = plugin_credential_account(&plugin_id, &key)?;
-    keyring_entry(&account)?
-        .set_password(cleaned_value)
+    write_keychain_account(&account, cleaned_value)
         .map_err(|error| format!("Could not store the API key in the OS keychain: {error}"))?;
-    forget_cached_keychain_account(&account);
     read_generated_plugin(app, plugin_id)
 }
 
@@ -926,8 +933,10 @@ async fn run_plugin_builder_stream(
     on_event: Channel<BuilderStreamEvent>,
     request: PluginBuilderRequest,
 ) -> Result<ChatReply, String> {
-    let config = resolve_coding_model_config(Some(&app))?;
-    if config.api_key.is_empty() {
+    let mut config = resolve_coding_model_config(Some(&app))?;
+    if config.auth_method == AuthMethod::OAuth {
+        config.api_key = resolve_provider_access_token(&config.provider).await?;
+    } else if config.api_key.is_empty() {
         return Err("Save a model API key before running Build mode.".to_string());
     }
 
@@ -1154,17 +1163,23 @@ async fn run_plugin_builder_stream(
                     .and_then(Value::as_str)
                     .unwrap_or(event_type);
                 let message = if tool_name.is_empty() {
-                    format!("{status}\n")
+                    status.to_string()
                 } else {
-                    format!("{status}: {tool_name}\n")
+                    format!("{status}: {tool_name}")
                 };
+                // Forwarded as its own event type rather than disguised as a
+                // thinking_delta: these are host milestones, not model
+                // reasoning, and folding them together put raw slugs like
+                // "running_tests:tools.test.ts" inside the reasoning block and
+                // into the persisted thinking field. Travels in the existing
+                // `text` field, so BuilderStreamEvent is unchanged.
                 emit_builder_stream_event(
                     &on_event,
                     StreamEvent {
                         stream_id: stream_id.clone(),
-                        event_type: "thinking_delta".to_string(),
-                        delta: Some(message),
-                        text: None,
+                        event_type: "status".to_string(),
+                        delta: None,
+                        text: Some(message),
                         error: None,
                         provider: Some(config.provider.clone()),
                         model: Some(config.model.clone()),
@@ -1291,8 +1306,14 @@ fn save_provider_api_key(
     model: Option<String>,
 ) -> Result<ModelProviderList, String> {
     let provider_id = canonical_provider_id(&provider_id);
-    if provider_preset(&provider_id).is_none() {
+    let Some(preset) = provider_preset(&provider_id) else {
         return Err(format!("Unsupported provider: {provider_id}"));
+    };
+    if preset.auth_method == AuthMethod::OAuth {
+        return Err(format!(
+            "{} is connected by signing in, not with an API key.",
+            preset.name
+        ));
     }
 
     let cleaned_key = api_key.trim();
@@ -1300,10 +1321,12 @@ fn save_provider_api_key(
         return Err("API key is required.".to_string());
     }
 
-    keyring_entry(&provider_id)?
-        .set_password(cleaned_key)
-        .map_err(|error| format!("Could not store API key in the OS keychain: {error}"))?;
-    forget_cached_keychain_account(&provider_id);
+    write_provider_credential(
+        &provider_id,
+        &StoredCredential::ApiKey {
+            key: cleaned_key.to_string(),
+        },
+    )?;
 
     save_role_model_config(
         &app,
@@ -1331,16 +1354,426 @@ fn set_active_model_provider(
     model: Option<String>,
 ) -> Result<ModelProviderList, String> {
     let provider_id = canonical_provider_id(&provider_id);
-    if provider_preset(&provider_id).is_none() {
+    let Some(preset) = provider_preset(&provider_id) else {
         return Err(format!("Unsupported provider: {provider_id}"));
-    }
+    };
 
-    if read_provider_api_key(&provider_id).is_empty() {
-        return Err("Save an API key for this provider first.".to_string());
+    if read_provider_credential(&provider_id).is_none() {
+        return Err(match preset.auth_method {
+            AuthMethod::ApiKey => "Save an API key for this provider first.".to_string(),
+            AuthMethod::OAuth => format!("Sign in to {} first.", preset.name),
+        });
     }
 
     save_role_model_config(&app, &role, &provider_id, model)?;
 
+    list_model_providers(app)
+}
+
+/// The token endpoint behind one OAuth provider.
+///
+/// Only the refresh half lives in Rust. The login half needs a local callback
+/// server and PKCE, which the Node sidecar already gets from pi.
+struct OAuthEndpoints {
+    token_url: &'static str,
+    client_id: &'static str,
+}
+
+fn oauth_endpoints(provider_id: &str) -> Option<OAuthEndpoints> {
+    match provider_id {
+        "openai-codex" => Some(OAuthEndpoints {
+            token_url: "https://auth.openai.com/oauth/token",
+            client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+        }),
+        _ => None,
+    }
+}
+
+/// Refresh an access token this far before it expires.
+///
+/// A turn can outlive a token that was valid when it started, and the stream is
+/// already mid-flight by then. Five minutes is what pi uses.
+const OAUTH_REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
+
+fn oauth_needs_refresh(expires: i64, now_ms: i64) -> bool {
+    expires <= now_ms + OAUTH_REFRESH_MARGIN_MS
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Serializes token refreshes across concurrent chats.
+///
+/// Refreshing rotates the refresh token, which invalidates the old one. Two
+/// chats starting a turn at the same moment would otherwise both refresh, and
+/// the loser would persist a token the server has already retired.
+static OAUTH_REFRESH_LOCK: std::sync::OnceLock<tauri::async_runtime::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn oauth_refresh_lock() -> &'static tauri::async_runtime::Mutex<()> {
+    OAUTH_REFRESH_LOCK.get_or_init(Default::default)
+}
+
+/// The access token to send for one OAuth provider, refreshing it if needed.
+async fn resolve_provider_access_token(provider_id: &str) -> Result<String, String> {
+    let signed_out = || {
+        let name = provider_preset(provider_id)
+            .map(|preset| preset.name.to_string())
+            .unwrap_or_else(|| provider_id.to_string());
+        format!("Sign in to {name} before running the agent.")
+    };
+
+    let Some(StoredCredential::OAuth {
+        access, expires, ..
+    }) = read_provider_credential(provider_id)
+    else {
+        return Err(signed_out());
+    };
+    if !oauth_needs_refresh(expires, now_ms()) {
+        return Ok(access);
+    }
+
+    let _guard = oauth_refresh_lock().lock().await;
+
+    // Re-read under the lock: another chat's turn may have just refreshed, in
+    // which case our refresh token is already dead and this one is valid.
+    let Some(StoredCredential::OAuth {
+        access,
+        refresh,
+        expires,
+        account_id,
+    }) = read_provider_credential(provider_id)
+    else {
+        return Err(signed_out());
+    };
+    if !oauth_needs_refresh(expires, now_ms()) {
+        return Ok(access);
+    }
+
+    let endpoints = oauth_endpoints(provider_id)
+        .ok_or_else(|| format!("{provider_id} cannot be refreshed."))?;
+    let response = reqwest::Client::new()
+        .post(endpoints.token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", endpoints.client_id),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach the sign-in service: {error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        // 400 is the server saying this refresh token is gone for good. Any
+        // other status — 429, 5xx, a captive portal — may well work next turn,
+        // so the credential stays put.
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            let _ = forget_provider_credential(provider_id);
+            return Err(format!(
+                "Your {} sign-in expired. Sign in again from /models.",
+                provider_preset(provider_id)
+                    .map(|preset| preset.name.to_string())
+                    .unwrap_or_else(|| provider_id.to_string())
+            ));
+        }
+        return Err(format!(
+            "Could not refresh the sign-in ({}). Try again in a moment.",
+            status.as_u16()
+        ));
+    }
+
+    // Deliberately not quoting the body on failure: it carries the tokens.
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|_| "The sign-in service returned an unreadable response.".to_string())?;
+    let new_access = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let new_refresh = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .unwrap_or(refresh.as_str())
+        .to_string();
+    let expires_in = payload
+        .get("expires_in")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    if new_access.is_empty() || expires_in <= 0 {
+        return Err("The sign-in service returned an incomplete token.".to_string());
+    }
+
+    // Persisted before it is used: the old refresh token is dead either way, so
+    // losing this write would lock the user out until they sign in again.
+    write_provider_credential(
+        provider_id,
+        &StoredCredential::OAuth {
+            access: new_access.clone(),
+            refresh: new_refresh,
+            expires: now_ms() + expires_in * 1000,
+            account_id,
+        },
+    )?;
+    Ok(new_access)
+}
+
+/// Live sign-in flows, so a pasted code can reach the sidecar's stdin.
+#[derive(Default)]
+struct OAuthLoginState {
+    stdin: Mutex<HashMap<String, std::process::ChildStdin>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthLoginEvent {
+    stream_id: String,
+    event_type: String,
+    url: Option<String>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+/// Signs in to a provider and stores the credential.
+///
+/// Cancellation reuses `cancel_model_chat_stream`: the sidecar is registered
+/// under `stream_id` like any other stream, and killing it releases the
+/// callback port.
+#[tauri::command]
+async fn run_provider_oauth_login(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, StreamCancelState>,
+    login_state: tauri::State<'_, OAuthLoginState>,
+    stream_id: String,
+    on_event: Channel<OAuthLoginEvent>,
+    provider_id: String,
+    role: Option<String>,
+    model: Option<String>,
+) -> Result<ModelProviderList, String> {
+    let provider_id = canonical_provider_id(&provider_id);
+    let Some(preset) = provider_preset(&provider_id) else {
+        return Err(format!("Unsupported provider: {provider_id}"));
+    };
+    if preset.auth_method != AuthMethod::OAuth {
+        return Err(format!("{} uses an API key, not a sign-in.", preset.name));
+    }
+
+    let sidecar_path = resolve_oauth_login_sidecar_path()?;
+    let mut child = Command::new("node")
+        .arg(sidecar_path)
+        .current_dir(
+            env::current_dir()
+                .map_err(|error| format!("Could not read current directory: {error}"))?,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start the sign-in helper: {error}"))?;
+    register_stream_process(&cancel_state, &stream_id, child.id())?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Sign-in helper stdin was unavailable.".to_string())?;
+    let request = json!({ "provider": provider_id });
+    let raw = serde_json::to_vec(&request)
+        .map_err(|error| format!("Could not serialize the sign-in request: {error}"))?;
+    stdin
+        .write_all(&raw)
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not send the sign-in request: {error}"))?;
+    if let Ok(mut handles) = login_state.stdin.lock() {
+        handles.insert(stream_id.clone(), stdin);
+    }
+
+    let emit = |event_type: &str, url: Option<String>, message: Option<String>| {
+        let _ = on_event.send(OAuthLoginEvent {
+            stream_id: stream_id.clone(),
+            event_type: event_type.to_string(),
+            url,
+            message,
+            error: None,
+        });
+    };
+    let finish = |login_state: &tauri::State<'_, OAuthLoginState>| {
+        if let Ok(mut handles) = login_state.stdin.lock() {
+            handles.remove(&stream_id);
+        }
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Sign-in helper stdout was unavailable.".to_string())?;
+    let mut credential: Option<StoredCredential> = None;
+    let mut failure: Option<String> = None;
+
+    for line in BufReader::new(stdout).lines() {
+        if is_stream_canceled(&cancel_state, &stream_id) {
+            let _ = child.kill();
+            let _ = child.wait();
+            clear_stream_canceled(&cancel_state, &stream_id);
+            finish(&login_state);
+            return Err("Sign-in canceled.".to_string());
+        }
+        let Ok(line) = line else { break };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        match event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "auth_url" => {
+                let url = event
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // Opening it here rather than in the renderer keeps the URL on
+                // the same allow-list as every other outbound link.
+                if let Err(error) = open_url_in_browser(&url) {
+                    emit("progress", None, Some(error));
+                }
+                emit("auth_url", Some(url), None);
+            }
+            "progress" => emit(
+                "progress",
+                None,
+                Some(
+                    event
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ),
+            "done" => {
+                let payload = event.get("credential").cloned().unwrap_or(Value::Null);
+                credential = Some(StoredCredential::OAuth {
+                    access: payload
+                        .get("access")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    refresh: payload
+                        .get("refresh")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    expires: payload
+                        .get("expires")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default(),
+                    account_id: payload
+                        .get("accountId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+            "error" => {
+                failure = Some(
+                    event
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Sign-in failed.")
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let _ = child.wait();
+    finish(&login_state);
+
+    // A cancel that lands while the read above is blocked kills the helper
+    // outright, so the loop ends at EOF rather than through the branch inside.
+    if is_stream_canceled(&cancel_state, &stream_id) {
+        clear_stream_canceled(&cancel_state, &stream_id);
+        return Err("Sign-in canceled.".to_string());
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let Some(credential) = credential else {
+        return Err("Sign-in did not complete.".to_string());
+    };
+    let StoredCredential::OAuth {
+        ref access,
+        ref refresh,
+        ..
+    } = credential
+    else {
+        return Err("Sign-in returned an unexpected credential.".to_string());
+    };
+    if access.is_empty() || refresh.is_empty() {
+        return Err("Sign-in returned an incomplete credential.".to_string());
+    }
+
+    write_provider_credential(&provider_id, &credential)?;
+    save_role_model_config(
+        &app,
+        &role.unwrap_or_else(|| "chat".to_string()),
+        &provider_id,
+        model,
+    )?;
+    list_model_providers(app)
+}
+
+/// Hands a hand-pasted authorization code to a running sign-in.
+///
+/// Needed whenever pi's callback server cannot bind its port — most often
+/// because the Codex CLI is already holding it.
+#[tauri::command]
+fn submit_provider_oauth_code(
+    login_state: tauri::State<'_, OAuthLoginState>,
+    stream_id: String,
+    code: String,
+) -> Result<(), String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("Paste the code from the browser first.".to_string());
+    }
+    let mut handles = login_state
+        .stdin
+        .lock()
+        .map_err(|_| "Could not reach the sign-in helper.".to_string())?;
+    let stdin = handles
+        .get_mut(&stream_id)
+        .ok_or_else(|| "That sign-in is no longer running.".to_string())?;
+    let raw = serde_json::to_vec(&json!({ "type": "manual_code", "code": code }))
+        .map_err(|error| format!("Could not serialize the code: {error}"))?;
+    stdin
+        .write_all(&raw)
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not send the code to the sign-in helper: {error}"))
+}
+
+#[tauri::command]
+fn sign_out_provider(
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> Result<ModelProviderList, String> {
+    let provider_id = canonical_provider_id(&provider_id);
+    if provider_preset(&provider_id).is_none() {
+        return Err(format!("Unsupported provider: {provider_id}"));
+    }
+    forget_provider_credential(&provider_id)?;
     list_model_providers(app)
 }
 
@@ -1416,6 +1849,26 @@ struct ModelConfig {
     base_url: String,
     model: String,
     api_key: String,
+    auth_method: AuthMethod,
+}
+
+/// How a provider proves who the user is.
+///
+/// `ApiKey` providers store a key the user pastes; `OAuth` providers store a
+/// rotating token pair obtained by signing in, and have no key to paste.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthMethod {
+    ApiKey,
+    OAuth,
+}
+
+impl AuthMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            AuthMethod::ApiKey => "api_key",
+            AuthMethod::OAuth => "oauth",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1426,6 +1879,11 @@ struct ProviderPreset {
     default_chat_model: &'static str,
     default_coding_model: &'static str,
     api_key_names: &'static [&'static str],
+    auth_method: AuthMethod,
+    /// Where this provider hands out API keys. Shown as a link next to the key
+    /// field so nobody has to go hunting for the right console page. Empty for
+    /// providers that authenticate by signing in.
+    api_key_url: &'static str,
 }
 
 #[tauri::command]
@@ -1509,8 +1967,10 @@ async fn run_main_agent_stream(
     messages: Vec<ChatMessage>,
     mode: String,
 ) -> Result<MainAgentReply, String> {
-    let config = resolve_model_config(Some(&app))?;
-    if config.api_key.is_empty() {
+    let mut config = resolve_model_config(Some(&app))?;
+    if config.auth_method == AuthMethod::OAuth {
+        config.api_key = resolve_provider_access_token(&config.provider).await?;
+    } else if config.api_key.is_empty() {
         return Err("Save a chat model API key before running the agent.".to_string());
     }
 
@@ -2508,6 +2968,22 @@ fn resolve_main_agent_sidecar_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not find scripts/main-agent-sidecar.mjs.".to_string())
 }
 
+fn resolve_oauth_login_sidecar_path() -> Result<PathBuf, String> {
+    let current =
+        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
+    let candidates = [
+        current.join("scripts").join("oauth-login-sidecar.mjs"),
+        current
+            .join("..")
+            .join("scripts")
+            .join("oauth-login-sidecar.mjs"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "Could not find scripts/oauth-login-sidecar.mjs.".to_string())
+}
+
 fn resolve_plugin_tool_runner_path() -> Result<PathBuf, String> {
     let current =
         env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
@@ -3092,7 +3568,7 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
     match provider_id {
         "openai" => Some(ProviderPreset {
             id: "openai",
-            name: "OpenAI",
+            name: "OpenAI API",
             base_url: "https://api.openai.com/v1",
             default_chat_model: "gpt-4.1-mini",
             default_coding_model: "gpt-4.1-mini",
@@ -3101,6 +3577,26 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
                 "STOCKBOT_OPENAI_API_KEY",
                 "OPENAI_API_KEY",
             ],
+            auth_method: AuthMethod::ApiKey,
+            api_key_url: "https://platform.openai.com/api-keys",
+        }),
+        // A ChatGPT subscription, not an API account: different host, different
+        // wire format, and its own model list. Kept as a separate provider for
+        // the same reason pi keeps it separate — nothing about it overlaps the
+        // api.openai.com entry above except the vendor name.
+        "openai-codex" => Some(ProviderPreset {
+            id: "openai-codex",
+            name: "ChatGPT",
+            base_url: "https://chatgpt.com/backend-api",
+            // The catalog lists older ids too, but a ChatGPT account is only
+            // entitled to the current ones — asking for gpt-5.2 comes back as
+            // "not supported when using Codex with a ChatGPT account". This is
+            // the default pi ships for the same provider.
+            default_chat_model: "gpt-5.5",
+            default_coding_model: "gpt-5.5",
+            api_key_names: &[],
+            auth_method: AuthMethod::OAuth,
+            api_key_url: "",
         }),
         "claude" => Some(ProviderPreset {
             id: "claude",
@@ -3113,10 +3609,12 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
                 "STOCKBOT_CLAUDE_API_KEY",
                 "ANTHROPIC_API_KEY",
             ],
+            auth_method: AuthMethod::ApiKey,
+            api_key_url: "https://console.anthropic.com/settings/keys",
         }),
         "moonshot" => Some(ProviderPreset {
             id: "moonshot",
-            name: "Moonshot / Kimi",
+            name: "Kimi",
             base_url: "https://api.moonshot.ai/v1",
             default_chat_model: "kimi-k2.5",
             default_coding_model: "kimi-k3",
@@ -3125,6 +3623,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
                 "STOCKBOT_MOONSHOT_API_KEY",
                 "MOONSHOT_API_KEY",
             ],
+            auth_method: AuthMethod::ApiKey,
+            api_key_url: "https://platform.moonshot.ai/console/api-keys",
         }),
         "kimi" => provider_preset("moonshot"),
         "kimi-coding" => Some(ProviderPreset {
@@ -3138,6 +3638,8 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
                 "STOCKBOT_KIMI_API_KEY",
                 "KIMI_API_KEY",
             ],
+            auth_method: AuthMethod::ApiKey,
+            api_key_url: "https://platform.moonshot.ai/console/api-keys",
         }),
         _ => None,
     }
@@ -3148,6 +3650,9 @@ fn canonical_provider_id(provider_id: &str) -> String {
         "kimi" => "moonshot".to_string(),
         "anthropic" => "claude".to_string(),
         "openai" => "openai".to_string(),
+        // Without this arm the catch-all below would quietly turn a signed-in
+        // ChatGPT user into a Moonshot user.
+        "openai-codex" => "openai-codex".to_string(),
         "claude" => "claude".to_string(),
         "moonshot" => "moonshot".to_string(),
         "kimi-coding" => "kimi-coding".to_string(),
@@ -3169,7 +3674,10 @@ fn provider_presets(app: &tauri::AppHandle) -> Result<Vec<ModelProvider>, String
         .map(canonical_provider_id)
         .unwrap_or_else(|| active_chat_provider.clone());
 
-    ["openai", "claude", "moonshot"]
+    // ChatGPT first: it is the only entry that connects without the user
+    // leaving to fetch a key, and the key-based OpenAI account trails the list
+    // because the UI keeps it behind a secondary link.
+    ["openai-codex", "claude", "moonshot", "openai"]
         .iter()
         .map(|provider_id| {
             let preset = provider_preset(provider_id).expect("static provider should exist");
@@ -3203,8 +3711,13 @@ fn provider_presets(app: &tauri::AppHandle) -> Result<Vec<ModelProvider>, String
                 coding_model: coding_model.to_string(),
                 chat_active: active_chat_provider == preset.id,
                 coding_active: active_coding_provider == preset.id,
-                connected: !read_provider_api_key(preset.id).is_empty()
+                // Any stored credential counts, whichever kind it is. The .env
+                // fallback only applies to key providers — there is no
+                // environment variable that can stand in for a sign-in.
+                connected: read_provider_credential(preset.id).is_some()
                     || !first_env_value(&entries, preset.api_key_names).is_empty(),
+                auth_method: preset.auth_method.as_str().to_string(),
+                api_key_url: preset.api_key_url.to_string(),
             })
         })
         .collect()
@@ -3256,6 +3769,20 @@ fn save_role_model_config(
         .map(str::to_string);
 
     match role.trim().to_lowercase().as_str() {
+        // One provider serves the whole app. The two config fields stay split
+        // so a future release can separate the roles again without a migration,
+        // but nothing in the UI writes them apart any more.
+        "both" | "all" => {
+            config.active_provider = Some(provider_id.to_string());
+            config.active_model = Some(
+                cleaned_model
+                    .clone()
+                    .unwrap_or_else(|| preset.default_chat_model.to_string()),
+            );
+            config.active_coding_provider = Some(provider_id.to_string());
+            config.active_coding_model =
+                Some(cleaned_model.unwrap_or_else(|| preset.default_coding_model.to_string()));
+        }
         "coding" | "build" => {
             config.active_coding_provider = Some(provider_id.to_string());
             config.active_coding_model =
@@ -3266,72 +3793,201 @@ fn save_role_model_config(
             config.active_model =
                 Some(cleaned_model.unwrap_or_else(|| preset.default_chat_model.to_string()));
         }
-        _ => return Err("Model role must be chat or coding.".to_string()),
+        _ => return Err("Model role must be chat, coding, or both.".to_string()),
     }
 
     save_app_config(app, config)
 }
 
-fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, provider_id)
+fn keyring_entry(account: &str) -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, account)
         .map_err(|error| format!("Could not open OS keychain entry: {error}"))
 }
 
-/// Keychain values already read this app run, keyed by account.
+/// The one keychain item that holds every secret this app stores.
 ///
-/// macOS authorizes per keychain item, per reading process. Nothing here used
-/// to be remembered, so every read was a fresh prompt — and the reads are not
-/// rare: `annotate_plugin_credentials` opens one entry per plugin per declared
-/// credential, and it runs on boot, on every plugin-sidebar render, and after
-/// every builder turn. Ten plugins with a key each meant ten prompts, again on
-/// every refresh.
+/// macOS authorizes per item, per app: with a keychain item per provider and
+/// per plugin credential, a cold run cost one password prompt per stored
+/// secret — three here, more as plugins with keys are added — and no amount of
+/// caching afterwards could bring that below one prompt each. One item is one
+/// prompt, whatever the user has configured.
+const KEYCHAIN_ACCOUNT: &str = "secrets";
+
+/// Every secret, keyed by the account name it used to have its own item under.
 ///
-/// Caching the value (not just whether one exists) is what makes the steady
-/// state zero prompts: the per-turn `resolve_model_config` read needs the
-/// secret itself. The entry is dropped on write and delete, so the cache can
-/// never serve a key the user has since changed through the app. A key rotated
-/// outside the app — directly in Keychain Access — is picked up on next launch.
+/// Loaded whole on the first read and kept for the run. Writes update it and
+/// persist the whole item, so the cache is never dropped and never stale — the
+/// value written is the value cached. A secret changed outside the app —
+/// directly in Keychain Access — is picked up on next launch.
+///
+/// The key space is shared between providers and plugins, which is safe because
+/// `plugin_credential_account` forces a `plugin:` prefix that no provider id can
+/// produce.
 static KEYCHAIN_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// Read one keychain account, going to the OS only the first time.
-fn read_keychain_account(account: &str) -> String {
+/// The whole vault, reading and migrating it at most once per run.
+fn load_keychain_vault() -> HashMap<String, String> {
     if let Ok(cache) = KEYCHAIN_CACHE.lock() {
-        if let Some(hit) = cache.as_ref().and_then(|entries| entries.get(account)) {
-            return hit.clone();
+        if let Some(entries) = cache.as_ref() {
+            return entries.clone();
         }
     }
 
-    let value = keyring_entry(account)
+    let raw = keyring_entry(KEYCHAIN_ACCOUNT)
         .and_then(|entry| {
             entry
                 .get_password()
                 .map_err(|error| format!("Could not read OS keychain entry: {error}"))
         })
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+        .unwrap_or_default();
+    let entries: HashMap<String, String> = serde_json::from_str(&raw).unwrap_or_default();
 
-    // A missing credential is cached too: the "not configured" badges re-read
-    // exactly those accounts on every render, and each miss is its own prompt.
     if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
-        cache
-            .get_or_insert_with(HashMap::new)
-            .insert(account.to_string(), value.clone());
+        *cache = Some(entries.clone());
+    }
+    entries
+}
+
+/// Persist the vault and keep the in-memory copy in step.
+fn store_keychain_vault(entries: HashMap<String, String>) -> Result<(), String> {
+    let serialized = serde_json::to_string(&entries)
+        .map_err(|error| format!("Could not serialize the stored credentials: {error}"))?;
+    keyring_entry(KEYCHAIN_ACCOUNT)
+        .and_then(|entry| {
+            entry
+                .set_password(&serialized)
+                .map_err(|error| format!("Could not write the OS keychain entry: {error}"))
+        })
+        .map_err(|error| format!("Could not store the credential in the OS keychain: {error}"))?;
+    if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
+        *cache = Some(entries);
+    }
+    Ok(())
+}
+
+/// Read one secret. Costs at most one prompt per app run, for the first read.
+fn read_keychain_account(account: &str) -> String {
+    let vault = load_keychain_vault();
+    if let Some(hit) = vault.get(account) {
+        return hit.clone();
+    }
+    migrate_legacy_keychain_account(account)
+}
+
+/// Folds a secret still stored under its own item into the vault.
+///
+/// Each of these costs the one prompt its own item always did, once, and then
+/// the item is removed so nothing reads it again. Leaving it behind would mean
+/// a signed-out provider's key survived in the keychain.
+fn migrate_legacy_keychain_account(account: &str) -> String {
+    let Ok(entry) = keyring_entry(account) else {
+        return String::new();
+    };
+    let value = entry.get_password().unwrap_or_default().trim().to_string();
+    if value.is_empty() {
+        // Cache the miss: "not configured" badges re-read exactly these
+        // accounts on every render, and a missing item is still a lookup.
+        let mut vault = load_keychain_vault();
+        vault.insert(account.to_string(), String::new());
+        if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
+            *cache = Some(vault);
+        }
+        return String::new();
+    }
+
+    let mut vault = load_keychain_vault();
+    vault.insert(account.to_string(), value.clone());
+    if store_keychain_vault(vault).is_ok() {
+        let _ = entry.delete_credential();
     }
     value
 }
 
-/// Drop one cached account after the stored value changed.
-fn forget_cached_keychain_account(account: &str) {
-    if let Ok(mut cache) = KEYCHAIN_CACHE.lock() {
-        if let Some(entries) = cache.as_mut() {
-            entries.remove(account);
-        }
-    }
+/// Store one secret, replacing whatever was there.
+fn write_keychain_account(account: &str, value: &str) -> Result<(), String> {
+    let mut vault = load_keychain_vault();
+    vault.insert(account.to_string(), value.to_string());
+    store_keychain_vault(vault)
 }
 
+/// Remove one secret, including a copy still under its own legacy item.
+fn delete_keychain_account(account: &str) -> Result<(), String> {
+    let mut vault = load_keychain_vault();
+    vault.insert(account.to_string(), String::new());
+    store_keychain_vault(vault)?;
+    if let Ok(entry) = keyring_entry(account) {
+        let _ = entry.delete_credential();
+    }
+    Ok(())
+}
+
+/// What one provider account holds in the keychain.
+///
+/// API keys have always been stored as the bare key string. OAuth needs three
+/// values that rotate together, so it is stored as a tagged JSON object under
+/// the same account. Anything that does not parse as that object is a key the
+/// user pasted before this existed, which is why there is no migration step.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+enum StoredCredential {
+    #[serde(rename = "api_key")]
+    ApiKey { key: String },
+    #[serde(rename = "oauth", rename_all = "camelCase")]
+    OAuth {
+        access: String,
+        refresh: String,
+        /// Access-token expiry, milliseconds since the epoch.
+        expires: i64,
+        #[serde(default)]
+        account_id: Option<String>,
+    },
+}
+
+fn parse_stored_credential(raw: &str) -> Option<StoredCredential> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.starts_with('{') {
+        return serde_json::from_str(raw).ok();
+    }
+    Some(StoredCredential::ApiKey {
+        key: raw.to_string(),
+    })
+}
+
+fn read_provider_credential(provider_id: &str) -> Option<StoredCredential> {
+    parse_stored_credential(&read_keychain_account(provider_id))
+}
+
+fn write_provider_credential(
+    provider_id: &str,
+    credential: &StoredCredential,
+) -> Result<(), String> {
+    let serialized = match credential {
+        // Kept as a bare string so a downgrade, or Keychain Access, still shows
+        // the key the user pasted.
+        StoredCredential::ApiKey { key } => key.clone(),
+        StoredCredential::OAuth { .. } => serde_json::to_string(credential)
+            .map_err(|error| format!("Could not serialize the stored credential: {error}"))?,
+    };
+    write_keychain_account(provider_id, &serialized)
+}
+
+fn forget_provider_credential(provider_id: &str) -> Result<(), String> {
+    delete_keychain_account(provider_id)
+}
+
+/// The pasteable API key for a provider, or "" when there is none.
+///
+/// An OAuth credential deliberately yields "": its access token rotates and is
+/// resolved per turn by `resolve_provider_access_token`, and returning the JSON
+/// envelope here would send a blob of JSON as a bearer token.
 fn read_provider_api_key(provider_id: &str) -> String {
-    read_keychain_account(provider_id)
+    match read_provider_credential(provider_id) {
+        Some(StoredCredential::ApiKey { key }) => key,
+        _ => String::new(),
+    }
 }
 
 /// Builds the keychain account for one plugin credential.
@@ -3395,15 +4051,8 @@ fn attach_plugin_credential_values(serialized: &mut Value, plugin: &GeneratedPlu
 
 fn forget_plugin_credential(plugin_id: &str, key: &str) -> Result<(), String> {
     let account = plugin_credential_account(plugin_id, key)?;
-    forget_cached_keychain_account(&account);
-    match keyring_entry(&account)?.delete_credential() {
-        Ok(()) => Ok(()),
-        // Removing a credential that was never stored is the desired end state.
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!(
-            "Could not remove the API key from the OS keychain: {error}"
-        )),
-    }
+    delete_keychain_account(&account)
+        .map_err(|error| format!("Could not remove the API key from the OS keychain: {error}"))
 }
 
 /// Fills in which declared credentials the user has actually stored. Reads the
@@ -3566,24 +4215,30 @@ fn resolve_model_config_for_role(
         } else {
             configured_model
         },
+        // An OAuth provider has no key here: its access token rotates, so the
+        // stream commands fill this in per turn via
+        // `resolve_provider_access_token`.
         api_key: if keyring_api_key.is_empty() {
             env_api_key
         } else {
             keyring_api_key
         },
+        auth_method: preset.auth_method,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plugin_tools_stub, clear_plugin_api_cache, ensure_shared_plugin_sdk,
-        external_url_target, forget_cached_keychain_account, generated_plugin_source_mtime_millis,
+        build_plugin_tools_stub, canonical_provider_id, clear_plugin_api_cache,
+        ensure_shared_plugin_sdk, external_url_target, generated_plugin_source_mtime_millis,
         load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis, plugin_credential_account,
-        read_generated_plugin_manifest, read_plugin_cache_settings, save_plugin_cache_settings,
-        BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
-        RuntimeToolsCache, StoredChatMessage, StreamEvent, KEYCHAIN_CACHE,
+        normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
+        parse_stored_credential, plugin_credential_account, provider_preset,
+        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
+        save_plugin_cache_settings, AuthMethod, BuilderStreamEvent, GeneratedPluginTool,
+        PluginBuilderRequest, PluginCacheSettings, RuntimeToolsCache, StoredChatMessage,
+        StoredCredential, StreamEvent, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::json;
     use std::fs;
@@ -3764,42 +4419,54 @@ mod tests {
         assert!(!tools.contains("./runtime.ts"));
     }
 
-    /// The cache exists to stop repeated OS keychain prompts, so the thing that
-    /// must never break is invalidation: serving a stale secret after the user
-    /// changed it would look like the new key was ignored. Seeded directly
-    /// rather than through the keyring, which would prompt in CI.
+    /// Every secret lives in one keychain item so a run costs one prompt, not
+    /// one per stored secret. What must hold is that a second, different
+    /// account is served from the vault already in memory rather than sending
+    /// anyone back to the OS. Seeded directly rather than through the keyring,
+    /// which would prompt in CI.
     #[test]
-    fn changing_a_stored_key_drops_it_from_the_keychain_cache() {
-        let account = format!("test-provider-{}", now_millis());
-        KEYCHAIN_CACHE
-            .lock()
-            .expect("lock keychain cache")
-            .get_or_insert_with(std::collections::HashMap::new)
-            .insert(account.clone(), "old-secret".to_string());
+    fn one_loaded_vault_serves_every_account() {
+        let stamp = now_millis();
+        let provider = format!("test-provider-{stamp}");
+        let plugin = format!("plugin:test.generated.plugin-{stamp}:API_KEY");
 
-        assert_eq!(
-            KEYCHAIN_CACHE
-                .lock()
-                .expect("lock keychain cache")
-                .as_ref()
-                .and_then(|entries| entries.get(&account))
-                .map(String::as_str),
-            Some("old-secret")
+        {
+            let mut cache = KEYCHAIN_CACHE.lock().expect("lock keychain cache");
+            let vault = cache.get_or_insert_with(std::collections::HashMap::new);
+            vault.insert(provider.clone(), "provider-secret".to_string());
+            vault.insert(plugin.clone(), "plugin-secret".to_string());
+            // A miss is cached too: the "not configured" badges re-read exactly
+            // these accounts on every render.
+            vault.insert(format!("{provider}-missing"), String::new());
+        }
+
+        assert_eq!(read_keychain_account(&provider), "provider-secret");
+        assert_eq!(read_keychain_account(&plugin), "plugin-secret");
+        assert_eq!(read_keychain_account(&format!("{provider}-missing")), "");
+    }
+
+    /// The vault is one JSON string in one item, so anything a provider or a
+    /// plugin can hand us has to survive the round trip — an OAuth envelope is
+    /// itself JSON, and pasted keys are not always tidy.
+    #[test]
+    fn the_vault_round_trips_secrets_that_are_themselves_json() {
+        let mut vault = std::collections::HashMap::new();
+        vault.insert(
+            "openai-codex".to_string(),
+            json!({ "type": "oauth", "access": "a\"b", "refresh": "r\nr" }).to_string(),
         );
+        vault.insert("claude".to_string(), "sk-ant-\"quoted\"".to_string());
 
-        forget_cached_keychain_account(&account);
+        let serialized = serde_json::to_string(&vault).expect("serialize vault");
+        let restored: std::collections::HashMap<String, String> =
+            serde_json::from_str(&serialized).expect("parse vault");
+        assert_eq!(restored, vault);
 
-        assert!(
-            KEYCHAIN_CACHE
-                .lock()
-                .expect("lock keychain cache")
-                .as_ref()
-                .and_then(|entries| entries.get(&account))
-                .is_none(),
-            "a rewritten key must be re-read from the OS, not served from cache"
-        );
-        // Forgetting an account that was never cached is the desired end state.
-        forget_cached_keychain_account(&account);
+        // A keychain item that predates the vault holds a bare key, not JSON.
+        // It must read as "no vault" so migration takes over, never as a panic.
+        let legacy: std::collections::HashMap<String, String> =
+            serde_json::from_str("sk-legacy-key").unwrap_or_default();
+        assert!(legacy.is_empty());
     }
 
     #[test]
@@ -3950,11 +4617,109 @@ mod tests {
             );
         }
 
-        for provider in ["openai", "claude", "moonshot"] {
+        for provider in ["openai", "openai-codex", "claude", "moonshot"] {
             let account = plugin_credential_account("open-weather", "OPENWEATHER_API_KEY").unwrap();
             assert_ne!(account, provider);
             assert!(account.starts_with("plugin:"));
         }
+    }
+
+    #[test]
+    fn keys_stored_before_oauth_existed_still_parse() {
+        // Every key already in a user's keychain is a bare string. Reading one
+        // as anything but an API key would sign them out on upgrade.
+        let legacy = parse_stored_credential("sk-abc123").expect("a bare key is a credential");
+        match legacy {
+            StoredCredential::ApiKey { key } => assert_eq!(key, "sk-abc123"),
+            StoredCredential::OAuth { .. } => panic!("a bare key must not parse as OAuth"),
+        }
+
+        assert!(parse_stored_credential("   ").is_none());
+        assert!(parse_stored_credential("").is_none());
+    }
+
+    #[test]
+    fn oauth_credentials_round_trip_and_never_pose_as_an_api_key() {
+        let credential = StoredCredential::OAuth {
+            access: "access-token".to_string(),
+            refresh: "refresh-token".to_string(),
+            expires: 1_700_000_000_000,
+            account_id: Some("acct_1".to_string()),
+        };
+        let serialized = serde_json::to_string(&credential).unwrap();
+        let parsed = parse_stored_credential(&serialized).expect("stored OAuth JSON parses back");
+
+        match parsed {
+            StoredCredential::OAuth {
+                access,
+                refresh,
+                expires,
+                account_id,
+            } => {
+                assert_eq!(access, "access-token");
+                assert_eq!(refresh, "refresh-token");
+                assert_eq!(expires, 1_700_000_000_000);
+                assert_eq!(account_id.as_deref(), Some("acct_1"));
+            }
+            StoredCredential::ApiKey { .. } => panic!("OAuth JSON must not parse as an API key"),
+        }
+
+        // The envelope must never reach a provider as a bearer token.
+        assert!(serialized.starts_with('{'));
+        assert!(serialized.contains("\"type\":\"oauth\""));
+    }
+
+    #[test]
+    fn access_tokens_refresh_before_they_expire_mid_turn() {
+        let now = 1_700_000_000_000;
+        assert!(oauth_needs_refresh(now - 1, now), "already expired");
+        assert!(
+            oauth_needs_refresh(now + 60_000, now),
+            "a minute of validity cannot outlast a turn"
+        );
+        assert!(oauth_needs_refresh(now + OAUTH_REFRESH_MARGIN_MS, now));
+        assert!(!oauth_needs_refresh(now + OAUTH_REFRESH_MARGIN_MS + 1, now));
+        assert!(!oauth_needs_refresh(now + 30 * 60_000, now));
+    }
+
+    #[test]
+    fn the_chatgpt_provider_is_its_own_provider_and_survives_normalization() {
+        // canonical_provider_id falls back to "moonshot" for unknown ids, so a
+        // missing arm here would silently sign a ChatGPT user into Moonshot.
+        assert_eq!(canonical_provider_id("openai-codex"), "openai-codex");
+        assert_eq!(canonical_provider_id("  OpenAI-Codex "), "openai-codex");
+        assert_eq!(canonical_provider_id("openai"), "openai");
+
+        let preset = provider_preset("openai-codex").expect("the ChatGPT preset exists");
+        assert_eq!(preset.base_url, "https://chatgpt.com/backend-api");
+        assert!(preset.auth_method == AuthMethod::OAuth);
+        // No environment variable can stand in for a sign-in.
+        assert!(preset.api_key_names.is_empty());
+
+        let openai = provider_preset("openai").expect("the API-key preset exists");
+        assert!(openai.auth_method == AuthMethod::ApiKey);
+        assert_ne!(openai.base_url, preset.base_url);
+        // The two OpenAI entries share a vendor and must not share a name: one
+        // row is the sign-in the onboarding pushes, the other is the key path
+        // hidden behind it.
+        assert_eq!(preset.name, "ChatGPT");
+        assert_ne!(openai.name, preset.name);
+    }
+
+    #[test]
+    fn every_key_provider_can_say_where_to_get_a_key() {
+        // The key form links straight to the issuing console; a provider with no
+        // link leaves the user hunting for the right settings page.
+        for provider_id in ["openai", "claude", "moonshot"] {
+            let preset = provider_preset(provider_id).expect("static provider should exist");
+            assert!(
+                preset.api_key_url.starts_with("https://"),
+                "{provider_id} has no API key page"
+            );
+        }
+        // A sign-in provider has no key page to offer.
+        let chatgpt = provider_preset("openai-codex").expect("the ChatGPT preset exists");
+        assert!(chatgpt.api_key_url.is_empty());
     }
 
     #[test]
@@ -4078,6 +4843,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(StreamCancelState::default())
+        .manage(OAuthLoginState::default())
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
             cancel_model_chat_stream,
@@ -4098,6 +4864,7 @@ pub fn run() {
             read_chat_history,
             run_main_agent_stream,
             run_plugin_builder_stream,
+            run_provider_oauth_login,
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,
@@ -4105,7 +4872,9 @@ pub fn run() {
             save_provider_api_key,
             scaffold_plugin_capability,
             set_active_model_provider,
-            set_active_provider
+            set_active_provider,
+            sign_out_provider,
+            submit_provider_oauth_code
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
