@@ -76,6 +76,8 @@ test('the release workflow prepares bundle inputs before Cargo validates them', 
   const importCertificate = workflow.indexOf('- name: Import Developer ID certificate');
   const signNativeRuntime = workflow.indexOf('- name: Sign standalone runtime native code');
   const tauriBuild = workflow.indexOf('npm run tauri:build -- --target aarch64-apple-darwin');
+  const notarizeDmg = workflow.indexOf('xcrun notarytool submit "$dmg_path"');
+  const validateDmgTicket = workflow.indexOf('xcrun stapler validate "$dmg_path"');
 
   expect(prepareRuntime).toBeGreaterThan(-1);
   expect(cargoTest).toBeGreaterThan(prepareRuntime);
@@ -84,4 +86,6 @@ test('the release workflow prepares bundle inputs before Cargo validates them', 
   expect(workflow.slice(signNativeRuntime, tauriBuild)).toContain(
     'codesign --force --options runtime --timestamp'
   );
+  expect(notarizeDmg).toBeGreaterThan(tauriBuild);
+  expect(validateDmgTicket).toBeGreaterThan(notarizeDmg);
 });
