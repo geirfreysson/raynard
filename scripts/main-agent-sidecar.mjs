@@ -5,6 +5,7 @@ import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple, Type } from '@mariozechner/pi-ai';
 import {
   buildMainAgentSystemPrompt,
+  defaultThinkingLevel,
   createBuildRequestTool,
   createDirectAnswerTool,
   createGeneratedPluginTools,
@@ -166,7 +167,7 @@ const agent = new Agent({
       plugins: installedPlugins
     }),
     model: createModel(request),
-    thinkingLevel: 'off',
+    thinkingLevel: defaultThinkingLevel('explore'),
     tools,
     messages: toAgentMessages(messages, request)
   },

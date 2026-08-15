@@ -1185,6 +1185,40 @@ a.models-modal-note {
   line-height: 1.5;
 }
 
+/* The builder's own prose. Carries the same treatment the bottom summary used
+   to have, so the closing message reads identically — just in place. */
+.builder-output {
+  padding: 2px 0;
+}
+
+.builder-output > :first-child {
+  margin-top: 0;
+}
+
+.builder-output > :last-child {
+  margin-bottom: 0;
+}
+
+/* Host milestones. Closer to the heartbeat than to a tool card: they are
+   things the app did, not things the model said. */
+.builder-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+}
+
+.builder-status::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  flex: none;
+}
+
 .builder-heartbeat {
   display: flex;
   align-items: center;

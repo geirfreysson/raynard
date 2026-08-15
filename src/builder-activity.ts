@@ -23,7 +23,34 @@ export type BuilderReasoningActivity = {
   text: string;
 };
 
-export type BuilderActivity = BuilderToolActivity | BuilderReasoningActivity;
+/**
+ * What the builder actually said to the user during this round.
+ *
+ * Held in the timeline for the same reason reasoning is: each stretch of prose
+ * was written between specific tool calls. Concatenated into one block at the
+ * bottom, consecutive rounds run together into a wall of text with no sentence
+ * breaks — "…run full node --test.Scaffold confirmed."
+ */
+export type BuilderOutputActivity = {
+  kind: 'output';
+  toolCallId: string;
+  text: string;
+};
+
+/** A host-side milestone: running tests, validation passed, a resumed pass. */
+export type BuilderStatusActivity = {
+  kind: 'status';
+  toolCallId: string;
+  status: string;
+};
+
+export type BuilderActivity =
+  | BuilderToolActivity
+  | BuilderReasoningActivity
+  | BuilderOutputActivity
+  | BuilderStatusActivity;
+
+type StreamedKind = 'reasoning' | 'output';
 
 export function isReasoningActivity(
   activity: BuilderActivity
@@ -31,32 +58,123 @@ export function isReasoningActivity(
   return (activity as BuilderReasoningActivity).kind === 'reasoning';
 }
 
+export function isOutputActivity(activity: BuilderActivity): activity is BuilderOutputActivity {
+  return (activity as BuilderOutputActivity).kind === 'output';
+}
+
+export function isStatusActivity(activity: BuilderActivity): activity is BuilderStatusActivity {
+  return (activity as BuilderStatusActivity).kind === 'status';
+}
+
+/** Tool entries recorded before `kind` existed have no discriminator at all. */
+export function isToolActivity(activity: BuilderActivity): activity is BuilderToolActivity {
+  const kind = (activity as { kind?: string }).kind;
+  return kind === undefined || kind === 'tool';
+}
+
 /**
- * Append reasoning text to the timeline.
+ * Append streamed text of one kind to the timeline.
  *
- * Deltas extend the trailing reasoning entry; anything else in between (a tool
- * call) closes it, so the next thought starts its own block.
+ * Deltas extend the trailing entry when it is the same kind; anything in
+ * between — a tool call, a status line, or a switch between reasoning and
+ * output — closes it, so the next stretch starts its own block.
  */
+function appendStreamedSegment(
+  activities: BuilderActivity[],
+  kind: StreamedKind,
+  delta: string
+): BuilderActivity[] {
+  if (!delta) return activities;
+  const lastIndex = activities.length - 1;
+  const last = activities[lastIndex];
+  if (last && (last as { kind?: string }).kind === kind) {
+    const extended = { ...(last as BuilderReasoningActivity | BuilderOutputActivity) };
+    extended.text += delta;
+    return activities.map((activity, index) => (index === lastIndex ? extended : activity));
+  }
+  return [
+    ...activities,
+    { kind, toolCallId: `${kind}-${activities.length}`, text: delta } as BuilderActivity
+  ];
+}
+
 export function applyBuilderThinkingDelta(
   activities: BuilderActivity[],
   delta: string
 ): BuilderActivity[] {
-  if (!delta) return activities;
+  return appendStreamedSegment(activities, 'reasoning', delta);
+}
+
+export function applyBuilderOutputDelta(
+  activities: BuilderActivity[],
+  delta: string
+): BuilderActivity[] {
+  return appendStreamedSegment(activities, 'output', delta);
+}
+
+/** A discrete milestone. A repeat of the preceding one is collapsed. */
+export function applyBuilderStatusEvent(
+  activities: BuilderActivity[],
+  status: string
+): BuilderActivity[] {
+  const value = String(status || '').trim();
+  if (!value) return activities;
   const last = activities[activities.length - 1];
-  if (last && isReasoningActivity(last)) {
-    return activities.map((activity, index) =>
-      index === activities.length - 1
-        ? { ...last, text: last.text + delta }
-        : activity
-    );
-  }
+  if (last && isStatusActivity(last) && last.status === value) return activities;
   return [
     ...activities,
-    { kind: 'reasoning', toolCallId: `reasoning-${activities.length}`, text: delta }
+    { kind: 'status', toolCallId: `status-${activities.length}`, status: value }
   ];
 }
 
-/** The reasoning text, in order — used to keep the persisted `thinking` field. */
+const STATUS_LABELS: Record<string, string> = {
+  builder_started: 'Starting the coding agent',
+  resuming_unfinished_build: 'Resuming an unfinished build',
+  validation_failed_retrying: 'Validation failed — retrying',
+  edit_no_changes_retrying: 'No changes were made — retrying',
+  running_tests: 'Running tests',
+  validation_passed: 'Validation passed'
+};
+
+/**
+ * Turn a sidecar status slug into a readable line.
+ *
+ * The sidecar emits compact, colon-delimited slugs (`running_tests:a.test.ts`,
+ * `validation_passed:2_tests:5_tools`). Unknown slugs are humanized rather than
+ * hidden, so a status added later still says something.
+ */
+export function builderStatusLabel(raw: string): string {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  const [head, ...rest] = value.split(':');
+  const detail = rest.join(':').trim();
+  const label = STATUS_LABELS[head] || humanizeStatusToken(head);
+
+  if (head === 'running_tests' && detail) {
+    return `${label} — ${detail.split(',').map((part) => part.trim()).filter(Boolean).join(', ')}`;
+  }
+  if (head === 'validation_passed' && detail) {
+    const counts = detail
+      .split(':')
+      .map((part) => part.trim().replace(/_/g, ' '))
+      .filter(Boolean);
+    return counts.length ? `${label} — ${counts.join(', ')}` : label;
+  }
+  return detail ? `${label} — ${detail.replace(/_/g, ' ')}` : label;
+}
+
+function humanizeStatusToken(token: string): string {
+  const words = token.replace(/[_-]+/g, ' ').trim();
+  if (!words) return '';
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * The reasoning text, in order — used to keep the persisted `thinking` field.
+ * Deliberately reasoning-only: host status lines and the builder's own prose
+ * are separate kinds and must not leak into what is stored as the model's
+ * thinking.
+ */
 export function collectBuilderReasoning(activities: BuilderActivity[]): string {
   return activities
     .filter(isReasoningActivity)
@@ -146,7 +264,7 @@ export function applyBuilderToolEvent(
   event: BuilderToolEvent
 ): BuilderActivity[] {
   const existingIndex = activities.findIndex(
-    (activity) => !isReasoningActivity(activity) && activity.toolCallId === event.toolCallId
+    (activity) => isToolActivity(activity) && activity.toolCallId === event.toolCallId
   );
   const existing =
     existingIndex >= 0 ? (activities[existingIndex] as BuilderToolActivity) : undefined;

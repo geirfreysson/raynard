@@ -352,4 +352,37 @@ describe('applyStreamPayload', () => {
 
     expect(errors[0].resumeAttempts).toBe(0);
   });
+
+  it('dispatches a builder status milestone', () => {
+    const seen: string[] = [];
+
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'status', text: 'running_tests:tools.test.ts' },
+      'active',
+      { streamed: '' },
+      { onStatus: (status) => seen.push(status) }
+    );
+
+    expect(seen).toEqual(['running_tests:tools.test.ts']);
+  });
+
+  it('ignores an empty status and one from a superseded stream', () => {
+    const seen: string[] = [];
+    const handlers = { onStatus: (status: string) => seen.push(status) };
+
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'status', text: '   ' },
+      'active',
+      { streamed: '' },
+      handlers
+    );
+    applyStreamPayload(
+      { stream_id: 'stale', event_type: 'status', text: 'builder_started' },
+      'active',
+      { streamed: '' },
+      handlers
+    );
+
+    expect(seen).toEqual([]);
+  });
 });

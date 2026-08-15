@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
 import { completeSimple, streamSimple } from '@mariozechner/pi-ai';
 import { createCodingTools } from '@mariozechner/pi-coding-agent';
-import { createModel, runWithTransientResume } from './main-agent-core.mjs';
+import { createModel, defaultThinkingLevel, runWithTransientResume } from './main-agent-core.mjs';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   createContextCompactor,
@@ -356,7 +356,7 @@ const agent = new Agent({
   initialState: {
     systemPrompt,
     model,
-    thinkingLevel: 'off',
+    thinkingLevel: defaultThinkingLevel('build'),
     tools: confineCodingTools(createCodingTools(pluginDir), pluginDir)
   },
   getApiKey: async () => apiKey,

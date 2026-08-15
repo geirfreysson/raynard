@@ -40,17 +40,33 @@ import {
   type CredentialRequest
 } from './credential-request-flow';
 import {
+  applyBuilderOutputDelta,
+  applyBuilderStatusEvent,
   applyBuilderThinkingDelta,
   applyBuilderToolEvent,
+  builderStatusLabel,
   collectBuilderReasoning,
+  isOutputActivity,
   isReasoningActivity,
+  isStatusActivity,
   planBuilderTimeline,
   type BuilderActivity,
+  type BuilderOutputActivity,
   type BuilderReasoningActivity,
+  type BuilderStatusActivity,
   type BuilderToolActivity,
   type BuilderToolEvent
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
+import {
+  needsProviderOnboarding,
+  partitionProviders,
+  providerActionLabel,
+  providerCanSignOut,
+  providerIsActive,
+  providerNeedsAuth,
+  type ProviderAuthMethod
+} from './model-providers';
 import { ChatRunRegistry, type ChatRun } from './chat-run-registry';
 import { recoverInterruptedMessages, shouldUsePluginEditMode } from './plugin-build-state';
 import { selectSplashPrompts } from './plugin-suggestions';
@@ -2987,6 +3003,21 @@ async function runPluginBuilderTurn(
     onDelta: (delta) => {
       streamed += delta;
       builderRecord.text = streamed;
+      // The prose belongs where it was written. `text` keeps the whole
+      // narration for model continuity and history previews; only the
+      // rendering moves into the timeline.
+      builderRecord.builderActivities = applyBuilderOutputDelta(
+        builderRecord.builderActivities || [],
+        delta
+      );
+      snapshotPersister.schedule();
+      renderLive();
+    },
+    onStatus: (status) => {
+      builderRecord.builderActivities = applyBuilderStatusEvent(
+        builderRecord.builderActivities || [],
+        status
+      );
       snapshotPersister.schedule();
       renderLive();
     },
@@ -3015,14 +3046,13 @@ async function runPluginBuilderTurn(
     },
     onRetry: (event) => {
       // A coding pass has no streaming answer to fall silent, so the wait has to
-      // be said out loud in the timeline or the build looks abandoned.
+      // be said out loud in the timeline or the build looks abandoned. It is a
+      // host-side wait, not model reasoning, so it goes on the status track.
       const label = agentActivityLabel({ running: true, streaming: false, retry: event });
-      builderRecord.builderActivities = applyBuilderThinkingDelta(
+      builderRecord.builderActivities = applyBuilderStatusEvent(
         builderRecord.builderActivities || [],
-        `\n${label}\n`
+        label || 'Retrying'
       );
-      thinking = collectBuilderReasoning(builderRecord.builderActivities);
-      builderRecord.thinking = thinking;
       snapshotPersister.schedule(true);
       renderLive();
       void logAgentTurnEvent('model_retry', event, run.chatId);
@@ -3118,7 +3148,7 @@ function renderBuilderRun(
       timeline.className = 'builder-timeline';
       container.insertBefore(timeline, summaryEl());
     }
-    reconcileBuilderTimeline(timeline, activities);
+    reconcileBuilderTimeline(timeline, activities, live && message.status === 'running');
   } else {
     if (timeline) timeline.remove();
     if (message.status === 'running') {
@@ -3153,10 +3183,15 @@ function renderBuilderRun(
     heartbeat.remove();
   }
 
-  // Final summary text.
-  const showSummary = Boolean(
-    message.text && (message.text !== 'Plugin builder is running.' || message.status !== 'running')
-  );
+  // Final summary text. Suppressed once the narration is interleaved, since the
+  // closing message is then the last timeline entry; kept for chats recorded
+  // before that, which have no output entries to show.
+  const hasInlineOutput = activitiesForThinking.some(isOutputActivity);
+  const showSummary =
+    !hasInlineOutput &&
+    Boolean(
+      message.text && (message.text !== 'Plugin builder is running.' || message.status !== 'running')
+    );
   let summary = container.querySelector<HTMLElement>(':scope > .builder-summary');
   if (showSummary) {
     if (!summary) {
@@ -3184,7 +3219,11 @@ function renderBuilderRun(
 // Reconcile timeline cards against activities. applyBuilderToolEvent keeps
 // activities append-only and updates entries in place, so card index i always
 // maps to activity i: either patch the existing card or append a new one.
-function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderActivity[]) {
+function reconcileBuilderTimeline(
+  timeline: HTMLElement,
+  activities: BuilderActivity[],
+  live: boolean
+) {
   const existingIds = Array.from(timeline.children).map(
     (child) => (child as HTMLElement).dataset.toolCallId || ''
   );
@@ -3204,6 +3243,31 @@ function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderActi
       }
       continue;
     }
+    if (isStatusActivity(activity)) {
+      if (op.action === 'reuse' && existing) {
+        updateBuilderStatusCard(existing, activity);
+      } else {
+        timeline.insertBefore(
+          renderBuilderStatusCard(activity),
+          timeline.children[op.index] ?? null
+        );
+      }
+      continue;
+    }
+    if (isOutputActivity(activity)) {
+      // Markdown once the block is settled: still-streaming prose renders as
+      // plain text, matching how the bottom summary has always behaved.
+      const settled = op.index < activities.length - 1 || !live;
+      if (op.action === 'reuse' && existing) {
+        updateBuilderOutputCard(existing, activity, settled);
+      } else {
+        timeline.insertBefore(
+          renderBuilderOutputCard(activity, settled),
+          timeline.children[op.index] ?? null
+        );
+      }
+      continue;
+    }
     if (op.action === 'reuse') {
       updateBuilderToolCard(timeline.children[op.index] as HTMLDetailsElement, activity);
     } else {
@@ -3214,6 +3278,50 @@ function reconcileBuilderTimeline(timeline: HTMLElement, activities: BuilderActi
   while (timeline.children.length > length) {
     timeline.lastElementChild?.remove();
   }
+}
+
+function renderBuilderOutputCard(activity: BuilderOutputActivity, settled: boolean) {
+  const card = document.createElement('div');
+  card.className = 'builder-output message-text';
+  card.dataset.toolCallId = activity.toolCallId;
+  updateBuilderOutputCard(card, activity, settled);
+  return card;
+}
+
+function updateBuilderOutputCard(
+  card: HTMLElement,
+  activity: BuilderOutputActivity,
+  settled: boolean
+) {
+  if (card.className !== 'builder-output message-text') {
+    card.className = 'builder-output message-text';
+  }
+  if (card.dataset.toolCallId !== activity.toolCallId) {
+    card.dataset.toolCallId = activity.toolCallId;
+  }
+  const text = activity.text.trim();
+  const signature = `${settled ? 'md' : 'raw'}:${text}`;
+  // Re-rendering Markdown on every delta would thrash; only redraw on change.
+  if (card.dataset.rendered === signature) return;
+  card.dataset.rendered = signature;
+  renderMessageText(card, text, settled);
+}
+
+function renderBuilderStatusCard(activity: BuilderStatusActivity) {
+  const card = document.createElement('div');
+  card.className = 'builder-status';
+  card.dataset.toolCallId = activity.toolCallId;
+  updateBuilderStatusCard(card, activity);
+  return card;
+}
+
+function updateBuilderStatusCard(card: HTMLElement, activity: BuilderStatusActivity) {
+  if (card.className !== 'builder-status') card.className = 'builder-status';
+  if (card.dataset.toolCallId !== activity.toolCallId) {
+    card.dataset.toolCallId = activity.toolCallId;
+  }
+  const label = builderStatusLabel(activity.status);
+  if (card.textContent !== label) card.textContent = label;
 }
 
 function renderBuilderReasoningCard(activity: BuilderReasoningActivity) {

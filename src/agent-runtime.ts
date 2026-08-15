@@ -32,6 +32,7 @@ export type StreamPayload = {
     | 'credential_request'
     | 'done'
     | 'retry'
+    | 'status'
     | 'error';
   delta?: string | null;
   text?: string | null;
@@ -126,6 +127,8 @@ export type AgentStreamHandlers = {
   onToolExecutionEnd?: (event: AgentToolExecutionEndEvent) => void;
   onBuildRequest?: (request: AgentBuildRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
+  /** A host-side build milestone (running tests, validation passed). */
+  onStatus?: (status: string) => void;
   onRetry?: (event: AgentRetryEvent) => void;
   onError?: (event: AgentErrorEvent) => void;
 };
@@ -291,6 +294,10 @@ export function applyStreamPayload(
   }
   if (payload.event_type === 'build_request' && payload.build_request) {
     handlers.onBuildRequest?.(payload.build_request);
+  }
+  if (payload.event_type === 'status') {
+    const status = payload.text?.trim() || '';
+    if (status) handlers.onStatus?.(status);
   }
   if (payload.event_type === 'retry') {
     handlers.onRetry?.({
