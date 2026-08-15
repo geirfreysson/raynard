@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assignCitationNumbers,
   buildPiTypeFromSchema,
   buildMainAgentSystemPrompt,
   createBuildRequestTool,
+  createCitationCounter,
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
@@ -333,6 +335,41 @@ describe('main agent core', () => {
     expect(result.details.card.name.singular).toBe('story list');
   });
 
+  it('numbers citations across every tool call in one turn, for the host too', async () => {
+    const definition = {
+      name: 'fetch',
+      description: 'Fetch data.',
+      parameters: { type: 'object', properties: {} },
+      card: { name: { singular: 'row', plural: 'rows' }, layout: [] }
+    };
+    let call = 0;
+    const tools = createGeneratedPluginTools({
+      Type,
+      plugins: [{ id: 'p', directory: '/plugins/p', tools: [definition] }],
+      executePluginTool: async () => {
+        call += 1;
+        return {
+          text: `Call ${call}`,
+          references:
+            call === 1
+              ? [{ referenceLabel: 'A' }, { referenceLabel: 'B' }]
+              : [{ referenceLabel: 'C' }],
+          data: {}
+        };
+      }
+    });
+
+    const first = await tools[0].execute('call-1', {});
+    const second = await tools[0].execute('call-2', {});
+
+    // The model's markers and the host's stored references are the same numbers.
+    expect(first.content[0].text).toContain('[^1] A');
+    expect(first.content[0].text).toContain('[^2] B');
+    expect(second.content[0].text).toContain('[^3] C');
+    expect(first.details.references.map((reference) => reference.citationNumber)).toEqual([1, 2]);
+    expect(second.details.references[0].citationNumber).toBe(3);
+  });
+
   describe('missing plugin credentials', () => {
     function weatherPlugin(overrides = {}) {
       return {
@@ -602,9 +639,44 @@ describe('formatToolResult', () => {
       referenceMeta: { sourceUrl: `https://example.com/${i}` }
     }));
     const formatted = formatToolResult({ text: 'Many sources.', references, data: {} });
-    expect(formatted).toContain('[20] Source 19');
+    expect(formatted).toContain('[^20] Source 19');
     expect(formatted).not.toContain('Source 20');
     expect(formatted).toContain('5 further source(s) omitted');
+  });
+
+  it('lists citations under the numbers the turn assigned', () => {
+    const counter = createCitationCounter();
+    const first = { text: 'a', references: [{ referenceLabel: 'A' }], data: {} };
+    const second = { text: 'b', references: [{ referenceLabel: 'B' }], data: {} };
+    assignCitationNumbers(first, counter);
+    assignCitationNumbers(second, counter);
+
+    expect(formatToolResult(first)).toContain('[^1] A');
+    // The second call continues the turn's numbering rather than restarting.
+    expect(formatToolResult(second)).toContain('[^2] B');
+  });
+});
+
+describe('assignCitationNumbers', () => {
+  it('numbers every reference across calls so a marker means one thing', () => {
+    const counter = createCitationCounter();
+    const search = { references: [{ referenceLabel: 'A' }, { referenceLabel: 'B' }] };
+    const fetch = { references: [{ referenceLabel: 'C' }] };
+
+    assignCitationNumbers(search, counter);
+    assignCitationNumbers(fetch, counter);
+
+    expect(search.references.map((reference) => reference.citationNumber)).toEqual([1, 2]);
+    expect(fetch.references[0].citationNumber).toBe(3);
+  });
+
+  it('ignores results that carry no references', () => {
+    const counter = createCitationCounter();
+    assignCitationNumbers({ text: 'no refs' }, counter);
+    assignCitationNumbers(null, counter);
+    assignCitationNumbers('plain', counter);
+
+    expect(counter.next).toBe(1);
   });
 
   it('handles non-object and empty results without throwing', () => {

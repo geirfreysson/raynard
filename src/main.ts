@@ -15,6 +15,15 @@ import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
 import { parseChartSpec } from './chart-spec';
 import { renderChart, unmountChart } from './chart-mount';
+import { wrapCopyable } from './copy-affordance';
+import { chartRootToPngBlob, chartSpecToMarkdown, tableToPngBlob } from './copy-export';
+import { chartSourceEntries, extractToolSource, type ChartSource } from './chart-sources';
+import {
+  citedCitationNumbers,
+  createChartCitationLine,
+  createCitationLine,
+  createInlineCitation
+} from './citation-modal';
 import { describeModelFailure } from './model-error';
 import {
   cancelAgentTurnStream,
@@ -161,6 +170,11 @@ type StoredChatMessage = {
   builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
   /**
+   * The API calls that fed this turn, one entry per citing tool call. Persisted
+   * so a chart copied out of a reloaded chat still names its data sources.
+   */
+  sources?: ChartSource[];
+  /**
    * A tool needed an API key the user has not stored. Persisted so the prompt
    * survives navigation and restart; it never carries a value, and whether each
    * key is configured is re-derived from the plugin list on every render.
@@ -271,8 +285,25 @@ type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'upda
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
+/**
+ * What a rendered assistant message knows about the turn behind it: the API
+ * calls it cited, and the result cards those calls produced. A citation points
+ * at a card by index, so the rows are stored once and read from here.
+ */
+type MessageContext = {
+  sources: ChartSource[];
+  cards: StoredResultCard[];
+};
+
+const EMPTY_MESSAGE_CONTEXT: MessageContext = { sources: [], cards: [] };
+
+function messageContext(record: { sources?: ChartSource[]; cards?: StoredResultCard[] }): MessageContext {
+  return { sources: record.sources ?? [], cards: record.cards ?? [] };
+}
+
+// The trailing alternative is a citation marker the model wrote, e.g. [^3].
 const INLINE_MARKDOWN_PATTERN =
-  /(?:`([^`]+)`)|(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(?:\*\*([^*]+)\*\*)|(?:__([^_]+)__)|(?:\*([^*]+)\*)|(?:_([^_]+)_)/g;
+  /(?:`([^`]+)`)|(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(?:\*\*([^*]+)\*\*)|(?:__([^_]+)__)|(?:\*([^*]+)\*)|(?:_([^_]+)_)|(?:\[\^(\d{1,3})\])/g;
 const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
@@ -2343,7 +2374,13 @@ function resetConversationState() {
 }
 
 function renderStoredMessage(message: StoredChatMessage) {
-  const article = addMessage(message.role, message.builderRun ? '' : message.text, false, message.role === 'assistant');
+  const article = addMessage(
+    message.role,
+    message.builderRun ? '' : message.text,
+    false,
+    message.role === 'assistant',
+    messageContext(message)
+  );
   renderedMessageArticles.set(message, article);
   if (message.modeStatus) article.classList.add('mode-status-message');
   if (message.role === 'assistant' && message.builderRun) {
@@ -2453,6 +2490,12 @@ function ensureCardContainer(article: HTMLElement): HTMLElement {
 function renderMessageCards(article: HTMLElement, cards: StoredResultCard[] | undefined) {
   if (!cards || !cards.length) return;
   renderResultCards(ensureCardContainer(article), cards);
+}
+
+/** The display name of the plugin that owns a runtime tool, for citations. */
+function pluginNameForTool(toolName: string): string | undefined {
+  return generatedPlugins.find((plugin) => plugin.tools.some((tool) => tool.name === toolName))
+    ?.name;
 }
 
 /** Pull a storable result card out of a tool-result event, if the tool has one. */
@@ -2588,6 +2631,17 @@ async function startAgentTurn(content: string) {
   try {
     let requestedBuild: AgentBuildRequest | undefined;
     let requestedCredential: CredentialRequest | undefined;
+    /**
+     * Set the moment the turn's reply is in hand.
+     *
+     * The stream promise can resolve while channel events are still queued: the
+     * completion path renders the final Markdown and then awaits the snapshot
+     * write, which lets a trailing delta run and overwrite the message body with
+     * raw streamed text and the record's status back to "running". A chat left
+     * with a rendered chart replaced by its own JSON fence is that race. After
+     * the reply arrives, no stream event may touch this turn.
+     */
+    let settled = false;
     const reply = await runMainAgentStream(turnChatMessages, turnMode, {
       onStreamId: (streamId) => {
         chatRuns.setStreamId(turnSessionId, run.id, streamId);
@@ -2595,6 +2649,7 @@ async function startAgentTurn(content: string) {
         void logAgentTurnEvent('stream_id', { streamId }, turnSessionId);
       },
       onDelta: (delta) => {
+        if (settled) return;
         // Output is proof the resumed round is running again.
         pendingRetry = undefined;
         streamed += delta;
@@ -2612,6 +2667,7 @@ async function startAgentTurn(content: string) {
         syncRemountedTurn();
       },
       onThinkingDelta: (delta) => {
+        if (settled) return;
         pendingRetry = undefined;
         thinking += delta;
         assistantRecord.text = streamed || 'Thinking...';
@@ -2631,6 +2687,7 @@ async function startAgentTurn(content: string) {
         syncRemountedTurn();
       },
       onToolCall: (toolCall) => {
+        if (settled) return;
         pendingRetry = undefined;
         assistantRecord.text = streamed || `Running ${toolCall.toolName}...`;
         assistantRecord.thinking = thinking.trim() || undefined;
@@ -2645,16 +2702,26 @@ async function startAgentTurn(content: string) {
         }, turnSessionId);
       },
       onToolResult: (toolCall) => {
+        if (settled) return;
         assistantRecord.text = streamed || `Ran ${toolCall.toolName}.`;
         assistantRecord.thinking = thinking.trim() || undefined;
         assistantRecord.status = 'running';
         activeToolName = undefined;
         refreshActivity();
         const resultCard = extractResultCard(toolCall);
+        let cardIndex: number | undefined;
         if (resultCard) {
-          (assistantRecord.cards ??= []).push(resultCard);
+          cardIndex = (assistantRecord.cards ??= []).push(resultCard) - 1;
           if (turnIsActive()) renderMessageCards(pending, assistantRecord.cards);
         }
+        const source = extractToolSource(
+          toolCall.result,
+          toolCall.toolName,
+          pluginNameForTool(toolCall.toolName)
+        );
+        // A citation opens the card this same call rendered.
+        if (source && cardIndex !== undefined) source.cardIndex = cardIndex;
+        if (source) (assistantRecord.sources ??= []).push(source);
         snapshotPersister.schedule(true);
         syncRemountedTurn();
         void logAgentTurnEvent('tool_result', {
@@ -2664,6 +2731,7 @@ async function startAgentTurn(content: string) {
         }, turnSessionId);
       },
       onToolError: (toolCall) => {
+        if (settled) return;
         activeToolName = undefined;
         refreshActivity();
         assistantRecord.text = toolCall.error || `Tool failed: ${toolCall.toolName}`;
@@ -2699,6 +2767,7 @@ async function startAgentTurn(content: string) {
         streamError = event;
       }
     });
+    settled = true;
     if (thinkingPreview.parentElement) {
       thinkingPreview.remove();
     }
@@ -2737,7 +2806,9 @@ async function startAgentTurn(content: string) {
 
     const finalContent = reply.content || streamed || 'The model returned an empty response.';
     if (turnIsActive()) {
-      if (pendingBody) renderMessageText(pendingBody, finalContent, true);
+      if (pendingBody) {
+        renderMessageText(pendingBody, finalContent, true, messageContext(assistantRecord));
+      }
       pending.classList.remove('pending');
       turnChatMessages.push({ role: 'assistant', content: finalContent });
     }
@@ -2834,7 +2905,7 @@ function syncRemountedRun(
       // something that looks like an assistant answer.
       renderModelFailure(body, record.modelFailure);
     } else if (body) {
-      renderMessageText(body, record.text, record.role === 'assistant');
+      renderMessageText(body, record.text, record.role === 'assistant', messageContext(record));
       if (record.cards?.length) renderMessageCards(article, record.cards);
     }
   } else {
@@ -3932,7 +4003,13 @@ function showConversation() {
   document.querySelector<HTMLElement>('.intro-stage')?.classList.remove('is-hidden');
 }
 
-function addMessage(role: ChatMessage['role'], content: string, pending = false, markdown = false) {
+function addMessage(
+  role: ChatMessage['role'],
+  content: string,
+  pending = false,
+  markdown = false,
+  context: MessageContext = EMPTY_MESSAGE_CONTEXT
+) {
   if (!messages) {
     throw new Error('Missing messages container');
   }
@@ -3942,7 +4019,7 @@ function addMessage(role: ChatMessage['role'], content: string, pending = false,
 
   const body = document.createElement('div');
   body.className = 'message-text';
-  renderMessageText(body, content, markdown);
+  renderMessageText(body, content, markdown, context);
 
   article.appendChild(body);
   messages.appendChild(article);
@@ -3951,19 +4028,33 @@ function addMessage(role: ChatMessage['role'], content: string, pending = false,
   return article;
 }
 
-function renderMessageText(container: HTMLElement, text: string, markdown = false) {
+/**
+ * The turn's API calls travel with the text: a chart copied out of the message
+ * has to name them, and a citation has to open the card one of them rendered.
+ * Both are inert for every block that is not a chart, table, or citation.
+ */
+function renderMessageText(
+  container: HTMLElement,
+  text: string,
+  markdown = false,
+  context: MessageContext = EMPTY_MESSAGE_CONTEXT
+) {
   if (!markdown) {
     container.textContent = text;
     return;
   }
 
-  renderMarkdown(container, text);
+  renderMarkdown(container, text, context);
   if (!container.childNodes.length) {
     container.textContent = text;
   }
 }
 
-function renderMarkdown(container: HTMLElement, text: string) {
+function renderMarkdown(
+  container: HTMLElement,
+  text: string,
+  context: MessageContext = EMPTY_MESSAGE_CONTEXT
+) {
   // Charts own a React root; release it before the node is discarded below.
   container.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
   container.textContent = '';
@@ -3975,10 +4066,40 @@ function renderMarkdown(container: HTMLElement, text: string) {
     return;
   }
 
-  renderMarkdownLightweight(container, sourceText, sourceLines);
+  renderMarkdownLightweight(container, sourceText, sourceLines, context);
 }
 
-function renderMarkdownLightweight(container: HTMLElement, sourceText: string, sourceLines: string[]) {
+/**
+ * Cites the turn's API calls beneath a chart or table.
+ *
+ * These sources are turn-level, so every data block in one answer carries the
+ * same line — the same claim the copied image makes. It is the fallback for an
+ * answer that cites nothing inline; when the model placed `[^n]` markers, those
+ * are the more precise attribution and this line would only repeat them.
+ */
+function appendCitationLine(
+  container: HTMLElement,
+  context: MessageContext,
+  suppressed: boolean
+) {
+  if (suppressed) return;
+  const line = createCitationLine(context.sources, context.cards);
+  if (line) container.appendChild(line);
+}
+
+function renderMarkdownLightweight(
+  container: HTMLElement,
+  sourceText: string,
+  sourceLines: string[],
+  context: MessageContext = EMPTY_MESSAGE_CONTEXT
+) {
+  // Decided up front: a marker can sit anywhere in the answer, including after
+  // the chart or table whose block line it would replace.
+  const cited = citedCitationNumbers(sourceText, context.sources);
+  const citedInline = cited.length > 0;
+  // A copied image has no click target, so it names its sources instead —
+  // narrowed to what the answer cited when it cited anything.
+  const sourceEntries = chartSourceEntries(context.sources, cited);
   let index = 0;
   let guard = 0;
 
@@ -4014,9 +4135,25 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
       if (language === 'chart') {
         const spec = parseChartSpec(block.join('\n'));
         if (spec) {
+          // A chart cites what it plotted, which only the spec knows: the turn's
+          // other calls found the data rather than supplying it.
+          const plotted = spec.sources ?? [];
+          const chartEntries = plotted.length
+            ? chartSourceEntries(context.sources, plotted)
+            : sourceEntries;
           const chart = document.createElement('div');
           chart.dataset.chartRoot = 'true';
-          container.appendChild(chart);
+          const wrapper = wrapCopyable(chart, 'Copy chart', () => ({
+            text: chartSpecToMarkdown(spec),
+            image: () => chartRootToPngBlob(chart, spec, chartEntries)
+          }));
+          wrapper.classList.add('copyable-chart');
+          container.appendChild(wrapper);
+          const chartLine = plotted.length
+            ? createChartCitationLine(plotted, context.sources, context.cards)
+            : null;
+          if (chartLine) container.appendChild(chartLine);
+          else appendCitationLine(container, context, citedInline);
           renderChart(chart, spec);
           continue;
         }
@@ -4036,7 +4173,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
     if (headingMatch) {
       const level = Math.min(6, headingMatch[1].length);
       const heading = document.createElement(`h${level}`);
-      appendInlineMarkdownSafe(heading, headingMatch[2]);
+      appendInlineMarkdownSafe(heading, headingMatch[2], context);
       container.appendChild(heading);
       index += 1;
       continue;
@@ -4050,7 +4187,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
       }
       const blockquote = document.createElement('blockquote');
       const paragraph = document.createElement('p');
-      appendInlineMarkdownSafe(paragraph, quoteLines.join(' '));
+      appendInlineMarkdownSafe(paragraph, quoteLines.join(' '), context);
       blockquote.appendChild(paragraph);
       container.appendChild(blockquote);
       continue;
@@ -4067,6 +4204,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
       }
 
       const alignments = parseMarkdownTableAlignment(sourceLines[index + 1]);
+      const tableStart = index;
       const table = document.createElement('table');
       const thead = document.createElement('thead');
       const headerRow = document.createElement('tr');
@@ -4075,7 +4213,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
         if (alignments[cellIndex]) {
           cell.style.textAlign = alignments[cellIndex];
         }
-        appendInlineMarkdownSafe(cell, cellText);
+        appendInlineMarkdownSafe(cell, cellText, context);
         headerRow.appendChild(cell);
       });
       thead.appendChild(headerRow);
@@ -4093,7 +4231,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
           if (alignments[cellIndex]) {
             cell.style.textAlign = alignments[cellIndex];
           }
-          appendInlineMarkdownSafe(cell, cellText);
+          appendInlineMarkdownSafe(cell, cellText, context);
           row.appendChild(cell);
         });
         while (row.childElementCount < headerCells.length) {
@@ -4115,7 +4253,16 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
         }
       }
       table.appendChild(tbody);
-      container.appendChild(table);
+      // Copy the source rather than the rendered table, so a table truncated
+      // for display still lands on the clipboard whole.
+      const tableMarkdown = sourceLines.slice(tableStart, index).join('\n');
+      container.appendChild(
+        wrapCopyable(table, 'Copy table', () => ({
+          text: tableMarkdown,
+          image: () => tableToPngBlob(table, sourceEntries)
+        }))
+      );
+      appendCitationLine(container, context, citedInline);
       continue;
     }
 
@@ -4127,7 +4274,7 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
         const markerPattern = ordered ? /^\d+\.\s+/ : /^[-*+]\s+/;
         if (!markerPattern.test(listLine)) break;
         const item = document.createElement('li');
-        appendInlineMarkdownSafe(item, listLine.replace(markerPattern, ''));
+        appendInlineMarkdownSafe(item, listLine.replace(markerPattern, ''), context);
         list.appendChild(item);
         index += 1;
       }
@@ -4148,12 +4295,16 @@ function renderMarkdownLightweight(container: HTMLElement, sourceText: string, s
       index += 1;
     }
     const paragraph = document.createElement('p');
-    appendInlineMarkdownSafe(paragraph, paragraphLines.join(' '));
+    appendInlineMarkdownSafe(paragraph, paragraphLines.join(' '), context);
     container.appendChild(paragraph);
   }
 }
 
-function appendInlineMarkdownSafe(container: HTMLElement, text: string) {
+function appendInlineMarkdownSafe(
+  container: HTMLElement,
+  text: string,
+  context: MessageContext = EMPTY_MESSAGE_CONTEXT
+) {
   const source = String(text || '');
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -4184,6 +4335,11 @@ function appendInlineMarkdownSafe(container: HTMLElement, text: string) {
       const emphasis = document.createElement('em');
       emphasis.textContent = match[6] || match[7];
       container.appendChild(emphasis);
+    } else if (match[8]) {
+      // A marker for a reference this turn never issued cites nothing, so it
+      // stays the literal text the model wrote rather than becoming a chip.
+      const citation = createInlineCitation(Number(match[8]), context.sources, context.cards);
+      container.appendChild(citation ?? document.createTextNode(match[0]));
     }
 
     lastIndex = INLINE_MARKDOWN_PATTERN.lastIndex;

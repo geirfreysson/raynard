@@ -24,6 +24,12 @@ export type ChartSpec = {
   stacked?: boolean;
   /** Series or category names the answer is about; the rest are drawn muted. */
   highlight?: string[];
+  /**
+   * Citation numbers whose observations were plotted. Only the model knows
+   * which of a turn's calls actually fed the rows — a turn spends most of its
+   * calls finding the data — so it names them here and the host cites those.
+   */
+  sources?: number[];
   series: ChartSeries[];
   rows: ChartRow[];
 };
@@ -31,6 +37,7 @@ export type ChartSpec = {
 export const MAX_CHART_SERIES = 8;
 export const MAX_CHART_ROWS = 200;
 export const MAX_CHART_HIGHLIGHTS = 8;
+export const MAX_CHART_SOURCES = 8;
 
 function optionalText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -123,6 +130,24 @@ function parseHighlight(value: unknown): string[] | undefined {
   return tokens.length ? tokens : undefined;
 }
 
+/**
+ * Collect the citation numbers backing the plotted rows. Never fails the spec:
+ * a malformed source list costs the chart its citation, not its chart.
+ */
+function parseSources(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const numbers: number[] = [];
+
+  for (const entry of value) {
+    const parsed = typeof entry === 'number' ? entry : Number(String(entry).replace(/[[\]^]/g, ''));
+    if (!Number.isInteger(parsed) || parsed <= 0 || numbers.includes(parsed)) continue;
+    numbers.push(parsed);
+    if (numbers.length >= MAX_CHART_SOURCES) break;
+  }
+
+  return numbers.length ? numbers : undefined;
+}
+
 /** Parse a ```chart fence body. Returns null for anything malformed. */
 export function parseChartSpec(source: string): ChartSpec | null {
   const text = String(source || '').trim();
@@ -157,6 +182,7 @@ export function parseChartSpec(source: string): ChartSpec | null {
     yLabel: optionalText(record.yLabel),
     stacked: type === 'bar' && record.stacked === true ? true : undefined,
     highlight: parseHighlight(record.highlight),
+    sources: parseSources(record.sources),
     series,
     rows
   };

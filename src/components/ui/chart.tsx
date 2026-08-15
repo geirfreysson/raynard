@@ -296,7 +296,9 @@ export function ChartBlock({ spec }: { spec: ChartSpec }) {
       <Card>
         {spec.title && (
           <CardHeader>
-            <CardTitle>{spec.title}</CardTitle>
+            {/* Marked so a copied chart image can redraw the title, which lives
+                in HTML rather than in the plot's SVG. */}
+            <CardTitle data-chart-title="">{spec.title}</CardTitle>
           </CardHeader>
         )}
         <CardContent>

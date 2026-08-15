@@ -88,6 +88,11 @@ struct StoredChatMessage {
     /// Each entry is { toolName, template, data }; rendered beneath the message.
     #[serde(default)]
     cards: Option<Value>,
+    /// The API calls that fed this turn, one entry per citing tool call
+    /// ({ plugin, label, sourceUrl }). Opaque passthrough so a chart copied out
+    /// of a reloaded chat still names its data sources.
+    #[serde(default)]
+    sources: Option<Value>,
     /// A tool needed an API key the user has not stored. Opaque passthrough so
     /// the prompt card survives navigation and restart. Names only, no values.
     #[serde(rename = "credentialRequest", default)]
@@ -3539,6 +3544,7 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 builder_run: message.builder_run,
                 builder_activities: message.builder_activities,
                 cards: message.cards,
+                sources: message.sources,
                 credential_request: message.credential_request,
             })
         })
@@ -4622,6 +4628,7 @@ mod tests {
             builder_run: Some(true),
             builder_activities: Some(activities.clone()),
             cards: None,
+            sources: None,
             credential_request: None,
         }]);
 
@@ -4853,6 +4860,7 @@ mod tests {
                 builder_run: None,
                 builder_activities: None,
                 cards: None,
+                sources: None,
                 credential_request: Some(request.clone()),
             },
             StoredChatMessage {
@@ -4867,6 +4875,7 @@ mod tests {
                 builder_run: None,
                 builder_activities: None,
                 cards: None,
+                sources: None,
                 credential_request: Some(request.clone()),
             },
         ]);

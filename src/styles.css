@@ -892,6 +892,297 @@ textarea:focus {
   background: #f9f9f9;
 }
 
+/* Tables and charts are wrapped so a copy button can be positioned over them.
+   The wrapper takes the margin its child used to carry, because the
+   first/last-child resets above now land on the wrapper instead. */
+.message-text .copyable {
+  position: relative;
+  margin: 10px 0;
+}
+
+.message-text .copyable-chart {
+  margin: 4px 0 20px;
+}
+
+.message-text .copyable > table,
+.message-text .copyable > [data-chart-root] {
+  margin: 0;
+}
+
+.copyable-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--mac-panel-strong);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(4px);
+  color: var(--text-muted);
+  font-family: var(--font-family-sans);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+/* Hidden until the block is hovered, but reachable by keyboard. */
+.copyable:hover .copyable-copy,
+.copyable-copy:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.copyable-copy:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.copyable-copy.done {
+  color: var(--assistant-line);
+  border-color: var(--assistant-line);
+}
+
+.copyable-copy.err {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Citations for a host-rendered data block: who served the numbers, and a way
+   into the observation behind them. */
+.message-text .block-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.block-sources-lead {
+  font-weight: 600;
+}
+
+.block-sources-rest {
+  color: var(--text-muted);
+}
+
+.block-source-chip {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-family-sans);
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.block-source-chip:hover,
+.block-source-chip:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+/* A `[^n]` marker the model wrote, resolved to the reference it cites. */
+.inline-citation {
+  position: relative;
+  top: -0.35em;
+  min-width: 15px;
+  margin: 0 1px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-family-sans);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  vertical-align: baseline;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.inline-citation:hover,
+.inline-citation:focus-visible {
+  border-color: var(--accent);
+  background: rgba(160, 55, 43, 0.06);
+  color: var(--accent);
+}
+
+.citation-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.32);
+  animation: modal-fade-in 150ms ease;
+}
+
+.citation-modal-overlay.is-hidden {
+  display: none;
+}
+
+.citation-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: min(80vh, 720px);
+  border: 1px solid var(--mac-border);
+  border-radius: 14px;
+  background: var(--mac-panel-strong);
+  box-shadow: var(--mac-shadow);
+  animation: modal-sheet-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.citation-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.citation-modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.citation-modal-hint {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.citation-modal-hint.is-hidden {
+  display: none;
+}
+
+/* Matches the models modal's close affordance. */
+.citation-modal-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.52);
+  color: rgba(60, 60, 67, 0.72);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.citation-modal-close:hover,
+.citation-modal-close:focus-visible {
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.citation-modal-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  overflow-y: auto;
+}
+
+.citation-modal-quote {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.citation-modal-payload {
+  width: 100%;
+  max-height: 360px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #f9f9f9;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  tab-size: 2;
+}
+
+/* Highlighting for a rendered JSON payload. Punctuation and structure stay in
+   the muted body color so the values carry the eye. */
+.json-view {
+  color: var(--text-muted);
+  white-space: pre;
+}
+
+.json-key {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.json-string {
+  color: #2f6f3f;
+}
+
+.json-number {
+  color: #1f5fa8;
+}
+
+.json-atom {
+  color: #7a3ba8;
+}
+
+.citation-modal-card {
+  width: 100%;
+}
+
+.citation-modal-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.citation-modal-link {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .message-text hr {
   border: 0;
   border-top: 1px solid var(--border-soft);

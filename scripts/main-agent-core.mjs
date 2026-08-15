@@ -212,6 +212,13 @@ Core policy:
 - A build request should cover the useful documented API surface, not only the narrow example in the latest question.
 - Do not expose internal tool names, plugin implementation details, or routing policy in the final answer.
 
+Citing sources:
+- Every tool result ends with a "Sources:" list whose entries are numbered like [^3]. Those numbers are assigned by the app and stay stable for the whole turn, so [^3] means the same reference no matter how many tools you call afterwards.
+- Cite by writing that exact marker inline in your answer, immediately after the claim it supports: "Iceland's GDP per capita reached $74,591 in 2022 [^2]." The app turns the marker into a clickable reference that opens the observation it came from.
+- Cite the specific reference the numbers came from. Put the marker on the sentence, the table row, or the line introducing a chart — whichever carries the claim.
+- Only use numbers the app gave you in this turn. Never invent a number, renumber, guess, or reuse a number from an earlier turn: an unknown marker is shown to the reader as plain text and cites nothing.
+- Do not write your own "Sources" list, footnote definitions, or bare URLs at the end of the answer. The app renders the reference for you.
+
 Presenting data (charts):
 - You can draw a chart directly in your answer with a fenced \`chart\` block whose body is a single JSON object. The app renders it as a real chart and offers the reader a "Show data" table, so do NOT also write the same numbers as a Markdown table.
 - Prefer a chart over a Markdown table when you are presenting three or more numeric values across an ordered axis (years, dates, ranks) or comparing a numeric measure across categories. Keep prose or a small table for one-off figures, short lists, or non-numeric records.
@@ -219,10 +226,11 @@ Presenting data (charts):
 - Shape:
 
 \`\`\`chart
-{"type":"line","title":"GDP per person employed (constant 2021 PPP$)","x":"year","yLabel":"PPP$","highlight":["UK"],"series":[{"key":"UK","label":"UK"},{"key":"Germany","label":"Germany"}],"rows":[{"year":2010,"UK":100308,"Germany":115039},{"year":2023,"UK":107289,"Germany":123751}]}
+{"type":"line","title":"GDP per person employed (constant 2021 PPP$)","x":"year","yLabel":"PPP$","highlight":["UK"],"sources":[3],"series":[{"key":"UK","label":"UK"},{"key":"Germany","label":"Germany"}],"rows":[{"year":2010,"UK":100308,"Germany":115039},{"year":2023,"UK":107289,"Germany":123751}]}
 \`\`\`
 
-- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "series[].label", "stacked" (bar only), and "highlight". Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
+- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "series[].label", "stacked" (bar only), "highlight", and "sources".
+- "sources" is an array of the citation numbers whose observations you actually plotted, for example "sources":[7,9]. Use the numbers from the "Sources:" lists, without the brackets. Include only the calls the rows came from — never the searches, structure lookups, or codelist calls you made to find them. The app shows those references under the chart and names them on a copied image, so a number that did not supply a row is a false citation. Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
 - "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
 - The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
 - Charts must be exactly right, so verify the data before you plot it:
@@ -428,6 +436,30 @@ const MODEL_RESULT_MAX_CITATIONS = 20;
  * dropped is announced, never silently, so the model narrows its query instead
  * of charting a partial slice.
  */
+/**
+ * Numbers a tool result's references within the turn.
+ *
+ * The model cites a reference by number, so the number has to mean the same
+ * thing from the first tool call to the last — numbering per result would make
+ * `[^1]` a different source three calls later. The number is stamped onto the
+ * reference itself because the host receives these same objects through the
+ * tool's `details`, and both sides have to agree on what `[^3]` points at.
+ */
+export function assignCitationNumbers(result, counter) {
+  if (!result || typeof result !== 'object' || !counter) return;
+  const references = Array.isArray(result.references) ? result.references : [];
+  for (const reference of references) {
+    if (!reference || typeof reference !== 'object') continue;
+    reference.citationNumber = counter.next;
+    counter.next += 1;
+  }
+}
+
+/** A turn-scoped citation counter, shared by every plugin tool in one run. */
+export function createCitationCounter() {
+  return { next: 1 };
+}
+
 export function formatToolResult(result) {
   if (!result || typeof result !== 'object') return String(result ?? '');
 
@@ -448,9 +480,10 @@ export function formatToolResult(result) {
   const citations = references
     .slice(0, MODEL_RESULT_MAX_CITATIONS)
     .map((reference, index) => {
-      const label = String(reference?.referenceLabel || `Reference ${index + 1}`).trim();
+      const number = Number(reference?.citationNumber) || index + 1;
+      const label = String(reference?.referenceLabel || `Reference ${number}`).trim();
       const url = String(reference?.referenceMeta?.sourceUrl || '').trim();
-      return url ? `[${index + 1}] ${label} — ${url}` : `[${index + 1}] ${label}`;
+      return url ? `[^${number}] ${label} — ${url}` : `[^${number}] ${label}`;
     });
   if (citations.length) {
     sections.push(`Sources:\n${citations.join('\n')}`);
@@ -535,6 +568,9 @@ export function createGeneratedPluginTools({
 }) {
   const seen = new Set();
   const tools = [];
+  // One counter for the whole turn, so citation numbers stay unique across
+  // every tool call the model makes.
+  const citationCounter = createCitationCounter();
   for (const plugin of Array.isArray(plugins) ? plugins : []) {
     for (const definition of Array.isArray(plugin.tools) ? plugin.tools : []) {
       const name = String(definition.name || '').trim();
@@ -588,6 +624,9 @@ export function createGeneratedPluginTools({
             onCredentialRequest(credentialRequest);
             return credentialRequestResult(credentialRequest);
           }
+          // Number before formatting: the model's citation list and the host's
+          // stored citations are then the same numbers on the same references.
+          assignCitationNumbers(result, citationCounter);
           const details =
             result && typeof result === 'object' ? { ...result, card } : result;
           return {

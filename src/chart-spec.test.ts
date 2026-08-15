@@ -3,6 +3,7 @@ import {
   MAX_CHART_HIGHLIGHTS,
   MAX_CHART_ROWS,
   MAX_CHART_SERIES,
+  MAX_CHART_SOURCES,
   parseChartSpec,
   toChartNumber
 } from './chart-spec';
@@ -124,6 +125,49 @@ describe('parseChartSpec', () => {
     const spec = parseChartSpec(JSON.stringify({ type: 'line', x: 'year', series, rows }));
     expect(spec?.series).toHaveLength(MAX_CHART_SERIES);
     expect(spec?.rows).toHaveLength(MAX_CHART_ROWS);
+  });
+
+  it('collects the citation numbers whose rows were plotted', () => {
+    const base = {
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'UK' }],
+      rows: [{ year: 2010, UK: 1 }]
+    };
+    expect(parseChartSpec(JSON.stringify({ ...base, sources: [7, 9, 7] }))?.sources).toEqual([7, 9]);
+    // Models write the marker rather than the bare number often enough to accept it.
+    expect(parseChartSpec(JSON.stringify({ ...base, sources: ['[^3]', '4'] }))?.sources).toEqual([
+      3, 4
+    ]);
+  });
+
+  it('never fails a good spec over a bad source list', () => {
+    const base = {
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'UK' }],
+      rows: [{ year: 2010, UK: 1 }]
+    };
+    for (const sources of [[], ['x'], [0, -2, 1.5], {}, 'two', null]) {
+      const spec = parseChartSpec(JSON.stringify({ ...base, sources }));
+      expect(spec).not.toBeNull();
+      expect(spec?.sources).toBeUndefined();
+    }
+    expect(parseChartSpec(JSON.stringify(base))?.sources).toBeUndefined();
+  });
+
+  it('caps the number of chart sources', () => {
+    const sources = Array.from({ length: MAX_CHART_SOURCES + 5 }, (_, i) => i + 1);
+    const spec = parseChartSpec(
+      JSON.stringify({
+        type: 'line',
+        x: 'year',
+        sources,
+        series: [{ key: 'UK' }],
+        rows: [{ year: 2010, UK: 1 }]
+      })
+    );
+    expect(spec?.sources).toHaveLength(MAX_CHART_SOURCES);
   });
 
   it('collects highlight tokens, trimmed and de-duplicated', () => {
