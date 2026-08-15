@@ -112,6 +112,26 @@ jobs:
           chmod 600 "$api_key_path"
           echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
 
+      - name: Sign standalone runtime native code
+        shell: bash
+        run: |
+          set -euo pipefail
+          native_count=0
+          while IFS= read -r -d '' candidate; do
+            if file "$candidate" | grep -q 'Mach-O'; then
+              codesign --force --options runtime --timestamp \
+                --sign "$APPLE_SIGNING_IDENTITY" \
+                "$candidate"
+              codesign --verify --strict --verbose=2 "$candidate"
+              native_count=$((native_count + 1))
+            fi
+          done < <(
+            find src-tauri/runtime/agent-runtime -type f \
+              \( -perm -111 -o -name '*.node' -o -name '*.dylib' \) \
+              -print0
+          )
+          test "$native_count" -gt 0
+
       - name: Build, sign, notarize, and staple DMG
         run: npm run tauri:build -- --target aarch64-apple-darwin --bundles dmg --ci
 

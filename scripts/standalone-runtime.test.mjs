@@ -73,7 +73,15 @@ test('the release workflow prepares bundle inputs before Cargo validates them', 
   );
   const prepareRuntime = workflow.indexOf('npm run runtime:prepare:macos-arm64');
   const cargoTest = workflow.indexOf('cargo test --manifest-path src-tauri/Cargo.toml --lib');
+  const importCertificate = workflow.indexOf('- name: Import Developer ID certificate');
+  const signNativeRuntime = workflow.indexOf('- name: Sign standalone runtime native code');
+  const tauriBuild = workflow.indexOf('npm run tauri:build -- --target aarch64-apple-darwin');
 
   expect(prepareRuntime).toBeGreaterThan(-1);
   expect(cargoTest).toBeGreaterThan(prepareRuntime);
+  expect(signNativeRuntime).toBeGreaterThan(importCertificate);
+  expect(tauriBuild).toBeGreaterThan(signNativeRuntime);
+  expect(workflow.slice(signNativeRuntime, tauriBuild)).toContain(
+    'codesign --force --options runtime --timestamp'
+  );
 });
