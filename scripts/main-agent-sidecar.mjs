@@ -10,6 +10,7 @@ import {
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
+  createUsageTotal,
   extractAssistantText,
   runWithTransientResume,
   toAgentMessages
@@ -159,6 +160,10 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
   })
   .filter((plugin) => plugin.slug);
 
+// Built once so its resolved contextWindow — pi's catalog first, FALLBACK_LIMITS
+// second — is the same number both the agent runs against and /status divides by.
+const agentModel = createModel(request);
+
 const agent = new Agent({
   initialState: {
     systemPrompt: buildMainAgentSystemPrompt({
@@ -166,7 +171,7 @@ const agent = new Agent({
       toolNames: generatedTools.map((tool) => tool.name),
       plugins: installedPlugins
     }),
-    model: createModel(request),
+    model: agentModel,
     thinkingLevel: defaultThinkingLevel('explore'),
     tools,
     messages: toAgentMessages(messages, request)
@@ -196,6 +201,10 @@ let lastErrorMessage = '';
 // rounds earlier — which is how a "let me fetch the data…" preamble came to be
 // presented as a finished answer.
 let lastMessageHadText = false;
+// Every assistant message of this turn is billed, including tool rounds and
+// rounds replayed after a transient failure, so usage accumulates and is never
+// cleared by resetRound.
+const usageTotal = createUsageTotal(agentModel.contextWindow);
 const unsubscribe = agent.subscribe((event) => {
   if (event.type === 'message_update') {
     const update = event.assistantMessageEvent;
@@ -208,6 +217,7 @@ const unsubscribe = agent.subscribe((event) => {
     return;
   }
   if (event.type === 'message_end' && event.message?.role === 'assistant') {
+    usageTotal.add(event.message.usage);
     const text = extractAssistantText(event.message);
     lastMessageHadText = Boolean(text);
     finalText = text || finalText;
@@ -273,7 +283,15 @@ try {
     stderr.write(`[main-agent] stopReason=${lastStopReason || 'none'} ${reason}\n`);
     // resumeAttempts lets the host say "retried 3 times" instead of presenting a
     // one-shot failure the user could reasonably expect us to have retried.
-    emit({ type: 'error', error: detail, stopReason: lastStopReason, resumeAttempts });
+    // A turn that burned tokens and then failed still spent them, so usage rides
+    // the error too rather than vanishing from the totals.
+    emit({
+      type: 'error',
+      error: detail,
+      stopReason: lastStopReason,
+      resumeAttempts,
+      usage: usageTotal.value()
+    });
     process.exit(1);
   }
   emit({
@@ -281,7 +299,8 @@ try {
     text: directAnswer || finalText,
     buildRequest,
     result: credentialRequest || undefined,
-    stopReason: lastStopReason
+    stopReason: lastStopReason,
+    usage: usageTotal.value()
   });
 } catch (error) {
   unsubscribe();

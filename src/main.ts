@@ -33,7 +33,8 @@ import {
   type AgentErrorEvent,
   type AgentRetryEvent,
   type ChatMessage,
-  type PluginBuilderRequest
+  type PluginBuilderRequest,
+  type TurnUsage
 } from './agent-runtime';
 import {
   automaticModeForUserTurn,
@@ -79,6 +80,13 @@ import {
 import { ChatRunRegistry, type ChatRun } from './chat-run-registry';
 import { recoverInterruptedMessages, shouldUsePluginEditMode } from './plugin-build-state';
 import { selectSplashPrompts } from './plugin-suggestions';
+import { filterSlashCommands, type SlashCommand } from './slash-commands';
+import {
+  openStatusModal,
+  type ChatUsageSnapshot,
+  type ProviderQuota,
+  type UsageTotals
+} from './status-modal';
 import { renderResultCards } from './result-card/mount';
 import { buildExampleData } from './result-card/example';
 import type { CardTemplate, StoredResultCard } from './result-card/types';
@@ -180,6 +188,11 @@ type StoredChatMessage = {
    * key is configured is re-derived from the plugin list on every render.
    */
   credentialRequest?: StoredCredentialRequest;
+  /**
+   * Token counts for the turn that produced this message. Counts only — the
+   * source of the context meter and the per-chat figures in `/status`.
+   */
+  usage?: TurnUsage;
 };
 
 type StoredCredentialRequest = {
@@ -411,12 +424,7 @@ app.innerHTML = `
         </div>
       </form>
 
-      <div id="slashMenu" class="slash-menu is-hidden" aria-hidden="true">
-        <button type="button" class="slash-menu-item" data-command="/models">
-          <span class="slash-menu-command">/models</span>
-          <span class="slash-menu-description">Connect or switch model providers</span>
-        </button>
-      </div>
+      <div id="slashMenu" class="slash-menu is-hidden" aria-hidden="true"></div>
 
       <div id="mentionMenu" class="mention-menu is-hidden" aria-hidden="true"></div>
 
@@ -507,7 +515,8 @@ const chatEnvLabel = document.querySelector<HTMLElement>('#chatEnvLabel');
 const stopStreamButton = document.querySelector<HTMLButtonElement>('#stopStreamButton');
 const suggestionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-suggestion]'));
 const slashMenu = document.querySelector<HTMLElement>('#slashMenu');
-const slashMenuItem = document.querySelector<HTMLButtonElement>('[data-command="/models"]');
+type SlashState = { input: HTMLTextAreaElement; items: SlashCommand[]; active: number };
+let slashState: SlashState | null = null;
 const mentionMenu = document.querySelector<HTMLElement>('#mentionMenu');
 type MentionState = {
   input: HTMLTextAreaElement;
@@ -613,15 +622,12 @@ for (const input of [introInput, chatInput]) {
     // The open @menu owns arrow/enter/tab/escape before anything else.
     if (handleMentionKeydown(event)) return;
 
+    // The open slash menu owns arrow/enter/tab/escape next.
+    if (handleSlashKeydown(event)) return;
+
     if (event.key === 'Escape') {
       hideSlashMenu();
       closeModelsModal();
-      return;
-    }
-
-    if (event.key === 'Enter' && slashMenu && !slashMenu.classList.contains('is-hidden')) {
-      event.preventDefault();
-      void openModelsCommandFlow(input);
       return;
     }
 
@@ -633,11 +639,6 @@ for (const input of [introInput, chatInput]) {
     }
   });
 }
-
-slashMenuItem?.addEventListener('click', () => {
-  const input = shell?.classList.contains('pre-chat') ? introInput : chatInput;
-  void openModelsCommandFlow(input ?? null);
-});
 
 modelsModalClose?.addEventListener('click', () => closeModelsModal());
 modelsModal?.addEventListener('click', (event) => {
@@ -791,25 +792,107 @@ function syncModeControls() {
   }
 }
 
+function slashMenuIsOpen(): boolean {
+  return Boolean(slashMenu && !slashMenu.classList.contains('is-hidden'));
+}
+
 function syncSlashMenu(input: HTMLTextAreaElement | null) {
   if (!input || !slashMenu) return;
-  const value = input.value.trim();
-  if (!value || !'/models'.startsWith(value) || !value.startsWith('/')) {
+  const items = filterSlashCommands(input.value);
+  if (!items.length) {
     hideSlashMenu();
     return;
   }
 
+  // Keep the highlighted command as the typed prefix narrows the list.
+  const previous = slashState?.items[slashState.active]?.command;
+  const carried = items.findIndex((item) => item.command === previous);
+  slashState = { input, items, active: carried === -1 ? 0 : carried };
+  renderSlashMenu();
+
   const rect = input.getBoundingClientRect();
   slashMenu.style.left = `${Math.round(rect.left)}px`;
   slashMenu.style.width = `${Math.round(rect.width)}px`;
-  slashMenu.style.top = `${Math.max(8, Math.round(rect.top - 62))}px`;
   slashMenu.classList.remove('is-hidden');
   slashMenu.setAttribute('aria-hidden', 'false');
+  // Anchor above the input now that the row count is known.
+  const menuRect = slashMenu.getBoundingClientRect();
+  slashMenu.style.top = `${Math.max(8, Math.round(rect.top - menuRect.height - 8))}px`;
+}
+
+function renderSlashMenu() {
+  if (!slashMenu || !slashState) return;
+  slashMenu.innerHTML = '';
+  slashState.items.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `slash-menu-item${index === slashState!.active ? ' is-active' : ''}`;
+    button.dataset.command = item.command;
+    const command = document.createElement('span');
+    command.className = 'slash-menu-command';
+    command.textContent = item.command;
+    const description = document.createElement('span');
+    description.className = 'slash-menu-description';
+    description.textContent = item.description;
+    button.append(command, description);
+    // mousedown fires before the textarea blur, so clicking selects cleanly.
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      void runSlashCommand(item.command, slashState?.input ?? null);
+    });
+    slashMenu.appendChild(button);
+  });
 }
 
 function hideSlashMenu() {
   slashMenu?.classList.add('is-hidden');
   slashMenu?.setAttribute('aria-hidden', 'true');
+  slashState = null;
+}
+
+// Returns true when the keystroke was consumed by the open slash menu.
+function handleSlashKeydown(event: KeyboardEvent): boolean {
+  if (!slashMenuIsOpen() || !slashState) return false;
+  const count = slashState.items.length;
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    slashState.active = (slashState.active + 1) % count;
+    renderSlashMenu();
+    return true;
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    slashState.active = (slashState.active - 1 + count) % count;
+    renderSlashMenu();
+    return true;
+  }
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault();
+    void runSlashCommand(slashState.items[slashState.active].command, slashState.input);
+    return true;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    hideSlashMenu();
+    return true;
+  }
+  return false;
+}
+
+/** Dispatch a slash command by name. Unknown commands fall through to the model. */
+async function runSlashCommand(typed: string, input: HTMLTextAreaElement | null): Promise<boolean> {
+  // Matched the same way the menu filters, so "/Status" runs rather than being
+  // sent to the model as a question.
+  const command = typed.trim().toLowerCase();
+  if (command === '/models') {
+    await openModelsCommandFlow(input);
+    return true;
+  }
+  if (command === '/status') {
+    await openStatusCommandFlow(input);
+    return true;
+  }
+  return false;
 }
 
 function mentionMenuIsOpen(): boolean {
@@ -931,6 +1014,63 @@ async function openModelsCommandFlow(input: HTMLTextAreaElement | null) {
   }
 }
 
+/**
+ * Sum this chat's saved turns. Context fill comes from the most recent turn that
+ * reported it, because the window describes the conversation now — not the total
+ * of everything ever sent through it.
+ */
+function currentChatUsage(): ChatUsageSnapshot {
+  const snapshot: ChatUsageSnapshot = {
+    provider: '',
+    model: '',
+    contextTokens: 0,
+    contextWindow: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    turns: 0
+  };
+
+  for (const message of storedMessages) {
+    const usage = message.usage;
+    if (!usage) continue;
+    snapshot.input += usage.input || 0;
+    snapshot.output += usage.output || 0;
+    snapshot.cacheRead += usage.cacheRead || 0;
+    snapshot.cacheWrite += usage.cacheWrite || 0;
+    snapshot.totalTokens += usage.totalTokens || 0;
+    snapshot.turns += 1;
+    if (usage.contextWindow) {
+      snapshot.contextTokens = usage.contextTokens || 0;
+      snapshot.contextWindow = usage.contextWindow;
+    }
+    if (message.provider) snapshot.provider = message.provider;
+    if (message.model) snapshot.model = message.model;
+  }
+
+  return snapshot;
+}
+
+async function openStatusCommandFlow(input: HTMLTextAreaElement | null) {
+  if (input) input.value = '';
+  hideSlashMenu();
+
+  let totals: UsageTotals = { totals: {} };
+  try {
+    totals = await invoke<UsageTotals>('read_usage_totals');
+  } catch {
+    // An unreadable odometer is not a reason to withhold the rest of the modal.
+  }
+
+  // The provider lookup is passed in unawaited: the modal paints on local
+  // numbers and swaps the account section in when the network answers.
+  openStatusModal({ chat: currentChatUsage(), totals }, () =>
+    invoke<ProviderQuota>('read_provider_quota')
+  );
+}
+
 function openModelsModal() {
   modelsModal?.classList.remove('is-hidden');
   modelsModal?.setAttribute('aria-hidden', 'false');
@@ -1048,7 +1188,6 @@ function renderOnboardingOther() {
     choice.type = 'button';
     choice.className = 'onboarding-choice';
     choice.innerHTML = `
-      <span class="models-provider-icon" aria-hidden="true">${providerIcon(provider.id)}</span>
       <span class="models-provider-main">
         <strong>${escapeHtml(provider.name)}</strong>
         <span>${escapeHtml(providerSubtitle(provider))}</span>
@@ -1113,7 +1252,6 @@ function providerRow(provider: ModelProvider, host: ProviderFlowHost) {
   const row = document.createElement('section');
   row.className = `models-provider-row${providerIsActive(provider) ? ' is-active' : ''}`;
   row.innerHTML = `
-    <span class="models-provider-icon" aria-hidden="true">${providerIcon(provider.id)}</span>
     <span class="models-provider-main">
       <strong>${escapeHtml(provider.name)}</strong>
       <span>${escapeHtml(providerSubtitle(provider))}</span>
@@ -1513,12 +1651,6 @@ function labelFromProvidersForMode(providers: ModelProvider[]) {
   const active = providers.find((provider) => (appMode === 'build' ? provider.codingActive : provider.chatActive));
   if (!active) return '';
   return appMode === 'build' ? `${active.id}/${active.codingModel}` : `${active.id}/${active.chatModel}`;
-}
-
-function providerIcon(providerId: string) {
-  if (providerId === 'openai' || providerId === 'openai-codex') return 'O';
-  if (providerId === 'claude') return 'C';
-  return 'K';
 }
 
 function escapeHtml(value: string) {
@@ -2518,10 +2650,7 @@ async function submitMessage(input: HTMLTextAreaElement | null) {
 
   const content = input.value.trim();
   if (!content) return;
-  if (content === '/models') {
-    await openModelsCommandFlow(input);
-    return;
-  }
+  if (await runSlashCommand(content, input)) return;
 
   input.value = '';
   appendUserTurn(content);
@@ -2817,6 +2946,7 @@ async function startAgentTurn(content: string) {
     assistantRecord.thinking = thinking.trim() || undefined;
     assistantRecord.provider = reply.provider;
     assistantRecord.model = reply.model;
+    assistantRecord.usage = reply.usage;
     assistantRecord.status = 'completed';
     assistantRecord.error = undefined;
     await persistChatSnapshot(turnMeta, turnStored);

@@ -115,6 +115,83 @@ export function createModel(request) {
   };
 }
 
+/**
+ * The context ceiling for a provider/model pair, resolved exactly as
+ * `createModel` resolves it so `/status` divides by the same number the agent
+ * is actually running against.
+ */
+export function resolveContextWindow(provider, model) {
+  const providerId = String(provider || '').trim();
+  const modelId = String(model || '').trim();
+  const known = modelId ? getModel(catalogProvider(providerId), modelId) : null;
+  const limits = known || FALLBACK_LIMITS[providerId] || DEFAULT_LIMITS;
+  return limits.contextWindow || DEFAULT_LIMITS.contextWindow;
+}
+
+const USAGE_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite'];
+
+function usageNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+export function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+}
+
+// A block's own token count: what it reported, or the sum of its parts when the
+// provider omitted totalTokens. Resolved per block rather than over the running
+// sum, so one block reporting a total does not suppress the fallback for the next.
+function blockTotal(usage) {
+  const reported = usageNumber(usage?.totalTokens);
+  if (reported) return reported;
+  return USAGE_FIELDS.reduce((sum, field) => sum + usageNumber(usage?.[field]), 0);
+}
+
+/** Sum two usage blocks into a new one. Neither input is mutated. */
+export function addUsage(base, next) {
+  const total = emptyUsage();
+  for (const field of USAGE_FIELDS) {
+    total[field] = usageNumber(base?.[field]) + usageNumber(next?.[field]);
+  }
+  total.totalTokens = blockTotal(base) + blockTotal(next);
+  return total;
+}
+
+/**
+ * Accumulates usage over the assistant messages of one turn.
+ *
+ * A turn is not one model call: every tool round ends a message, and
+ * `runWithTransientResume` can restart a round after a transient failure. Those
+ * tokens were all billed, so the running total is deliberately never reset by
+ * the round bookkeeping that clears stop reasons.
+ */
+export function createUsageTotal(contextWindow = 0) {
+  let total = emptyUsage();
+  let rounds = 0;
+  let contextTokens = 0;
+  return {
+    add(usage) {
+      if (!usage || typeof usage !== 'object') return;
+      total = addUsage(total, usage);
+      rounds += 1;
+      // Context fill is the last round's prompt plus its completion, NOT the
+      // running sum: a turn with six tool calls resends the whole conversation
+      // six times, so summed input passes contextWindow on a healthy chat and a
+      // meter built on it would read several hundred percent. This is the
+      // high-water mark of the window when the turn ended, which is what "how
+      // full am I" actually means. Matches pi's own calculateContextTokens.
+      const roundContext = blockTotal(usage);
+      // An aborted or failed round reports all-zero usage. Letting it overwrite
+      // would drop the meter to empty on a conversation that is nearly full.
+      if (roundContext > 0) contextTokens = roundContext;
+    },
+    value() {
+      return { ...total, rounds, contextTokens, contextWindow: usageNumber(contextWindow) };
+    }
+  };
+}
+
 function toAssistantMessage(message, auth) {
   return {
     role: 'assistant',

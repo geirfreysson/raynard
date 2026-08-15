@@ -97,6 +97,11 @@ struct StoredChatMessage {
     /// the prompt card survives navigation and restart. Names only, no values.
     #[serde(rename = "credentialRequest", default)]
     credential_request: Option<Value>,
+    /// Token counts for the turn that produced this message
+    /// ({ input, output, cacheRead, cacheWrite, totalTokens, contextTokens,
+    /// contextWindow }). Counts only — never text, ids, or headers.
+    #[serde(default)]
+    usage: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -1802,6 +1807,10 @@ struct MainAgentReply {
     provider: String,
     model: String,
     build_request: Option<Value>,
+    /// The turn's summed token usage. Delivered on the reply rather than only on
+    /// the stream channel because `startAgentTurn` ignores channel events that
+    /// land after the promise settles, and this has to reach the saved message.
+    usage: Option<Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1846,6 +1855,10 @@ struct MainAgentStreamEvent {
     /// Sidecar `retry` payload, passed through untouched so the renderer can say
     /// which attempt is running and why.
     retry: Option<Value>,
+    /// Token usage for the whole turn, summed over its rounds by the sidecar and
+    /// present only on `done`. The renderer persists it onto the assistant
+    /// message so `/status` can report the conversation's context fill.
+    usage: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -2049,6 +2062,7 @@ async fn run_main_agent_stream(
     let reader = BufReader::new(stdout);
     let mut answer = String::new();
     let mut build_request = None;
+    let mut turn_usage: Option<Value> = None;
 
     for line in reader.lines() {
         if is_stream_canceled(&cancel_state, &stream_id) {
@@ -2072,12 +2086,14 @@ async fn run_main_agent_stream(
                 result: None,
                 build_request: None,
                 retry: None,
+                usage: None,
             });
             return Ok(MainAgentReply {
                 content,
                 provider: config.provider,
                 model: config.model,
                 build_request,
+                usage: turn_usage,
             });
         }
 
@@ -2105,6 +2121,17 @@ async fn run_main_agent_stream(
         if event_type == "build_request" {
             build_request = payload.get("buildRequest").cloned();
         }
+        // Both terminal events carry the turn's summed usage; a failed turn was
+        // still billed for what it burned before it stopped. Recorded here
+        // rather than after the loop so the `error` branch below, which returns
+        // early, still counts against the all-time totals.
+        if event_type == "done" || event_type == "error" {
+            turn_usage = payload.get("usage").cloned();
+            if let Some(usage) = turn_usage.as_ref() {
+                // A failed totals write must never fail a completed turn.
+                let _ = record_turn_usage(&app, &config.provider, &config.model, usage);
+            }
+        }
         if event_type == "error" {
             let error = payload
                 .get("error")
@@ -2126,6 +2153,7 @@ async fn run_main_agent_stream(
                 // Carries resumeAttempts, so the host can say the turn was
                 // retried rather than presenting a one-shot failure.
                 retry: Some(payload.clone()),
+                usage: None,
             });
             let _ = child.kill();
             clear_stream_canceled(&cancel_state, &stream_id);
@@ -2160,6 +2188,7 @@ async fn run_main_agent_stream(
             } else {
                 None
             },
+            usage: turn_usage.clone(),
         });
     }
 
@@ -2187,12 +2216,14 @@ async fn run_main_agent_stream(
             result: None,
             build_request: None,
             retry: None,
+            usage: None,
         });
         return Ok(MainAgentReply {
             content,
             provider: config.provider,
             model: config.model,
             build_request,
+            usage: turn_usage,
         });
     }
     if !status.success() {
@@ -2204,6 +2235,7 @@ async fn run_main_agent_stream(
         provider: config.provider,
         model: config.model,
         build_request,
+        usage: turn_usage,
     })
 }
 
@@ -3546,6 +3578,7 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 cards: message.cards,
                 sources: message.sources,
                 credential_request: message.credential_request,
+                usage: message.usage,
             })
         })
         .collect()
@@ -3765,6 +3798,482 @@ fn save_app_config(app: &tauri::AppHandle, config: AppConfig) -> Result<(), Stri
     let raw = serde_json::to_string_pretty(&config)
         .map_err(|error| format!("Could not serialize app config: {error}"))?;
     fs::write(path, raw).map_err(|error| format!("Could not write app config: {error}"))
+}
+
+// ---------------------------------------------------------------------------
+// All-time token totals
+//
+// An odometer, not an invoice. Kept in its own aggregate file rather than
+// recomputed from chat history because a stored message carries `cards` and
+// `sources` — the latter holding real API response payloads — so summing four
+// integers would mean parsing the entire corpus on the UI's critical path,
+// growing without bound. A lost write here is cosmetic.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+struct UsageTotalsRow {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    total_tokens: i64,
+    turns: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct UsageTotals {
+    /// Versioned so a future "rebuild from history" migration is possible
+    /// without having to guess what wrote the file.
+    schema_version: u32,
+    updated_at: i64,
+    /// Keyed by "provider/model".
+    totals: BTreeMap<String, UsageTotalsRow>,
+}
+
+impl Default for UsageTotals {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            updated_at: 0,
+            totals: BTreeMap::new(),
+        }
+    }
+}
+
+fn usage_number(usage: &Value, key: &str) -> i64 {
+    usage
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value as i64)
+        .unwrap_or_default()
+}
+
+/// Fold one turn's usage into the totals. Pure, so it is testable without an
+/// AppHandle — the same split `normalize_stored_messages` uses.
+fn merge_turn_usage(totals: &mut UsageTotals, key: &str, usage: &Value) {
+    let row = totals.totals.entry(key.to_string()).or_default();
+    row.input += usage_number(usage, "input");
+    row.output += usage_number(usage, "output");
+    row.cache_read += usage_number(usage, "cacheRead");
+    row.cache_write += usage_number(usage, "cacheWrite");
+    row.total_tokens += usage_number(usage, "totalTokens");
+    row.turns += 1;
+}
+
+fn usage_totals_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("usage-totals.json"))
+}
+
+fn load_usage_totals(app: &tauri::AppHandle) -> Result<UsageTotals, String> {
+    let path = usage_totals_path(app)?;
+    if !path.is_file() {
+        return Ok(UsageTotals::default());
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read usage totals: {error}"))?;
+    // A corrupt odometer is not worth failing /status over.
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+fn record_turn_usage(
+    app: &tauri::AppHandle,
+    provider: &str,
+    model: &str,
+    usage: &Value,
+) -> Result<(), String> {
+    let mut totals = load_usage_totals(app)?;
+    merge_turn_usage(&mut totals, &format!("{provider}/{model}"), usage);
+    totals.updated_at = now_ms();
+    let path = usage_totals_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create app data directory: {error}"))?;
+    }
+    let raw = serde_json::to_string_pretty(&totals)
+        .map_err(|error| format!("Could not serialize usage totals: {error}"))?;
+    fs::write(path, raw).map_err(|error| format!("Could not write usage totals: {error}"))
+}
+
+#[tauri::command]
+fn read_usage_totals(app: tauri::AppHandle) -> Result<UsageTotals, String> {
+    load_usage_totals(&app)
+}
+
+// ---------------------------------------------------------------------------
+// Provider quota
+//
+// Only two providers can answer "what is left": ChatGPT reports rolling quota
+// windows, and Kimi reports a dollar balance. Anthropic and api.openai.com have
+// no balance endpoint for an ordinary key — the admin cost report needs a
+// different credential — so they get an honest "unavailable" and a billing link
+// rather than a number invented from local token counts.
+//
+// Credentials never leave this file: the command takes no token argument and
+// returns percentages and dollars only.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct QuotaWindow {
+    label: String,
+    used_percent: f64,
+    /// Epoch milliseconds, converted at this boundary so the renderer only ever
+    /// deals in ms — ChatGPT reports seconds.
+    resets_at: Option<i64>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ProviderQuota {
+    provider_id: String,
+    provider_name: String,
+    /// "windows" | "balance" | "unavailable"
+    kind: String,
+    message: Option<String>,
+    console_url: Option<String>,
+    plan: Option<String>,
+    balance_usd: Option<f64>,
+    voucher_balance_usd: Option<f64>,
+    cash_balance_usd: Option<f64>,
+    windows: Vec<QuotaWindow>,
+    fetched_at: i64,
+}
+
+impl ProviderQuota {
+    /// An empty `message` is deliberate silence: the section renders with its
+    /// console link and no explanatory line.
+    fn unavailable(provider_id: &str, message: &str) -> Self {
+        let name = provider_preset(provider_id)
+            .map(|preset| preset.name.to_string())
+            .unwrap_or_else(|| provider_id.to_string());
+        Self {
+            provider_id: provider_id.to_string(),
+            provider_name: name,
+            kind: "unavailable".to_string(),
+            message: Some(message.to_string()).filter(|text| !text.is_empty()),
+            console_url: provider_billing_url(provider_id).map(str::to_string),
+            plan: None,
+            balance_usd: None,
+            voucher_balance_usd: None,
+            cash_balance_usd: None,
+            windows: Vec::new(),
+            fetched_at: now_ms(),
+        }
+    }
+}
+
+/// Where a user tops up or inspects spend. Deliberately not `api_key_url`, which
+/// points at key management — a different page from billing.
+fn provider_billing_url(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "claude" => Some("https://console.anthropic.com/settings/billing"),
+        "openai" => Some("https://platform.openai.com/settings/organization/billing/overview"),
+        "moonshot" | "kimi" => Some("https://platform.moonshot.ai/console/pay"),
+        "openai-codex" => Some("https://chatgpt.com/codex/settings/usage"),
+        _ => None,
+    }
+}
+
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits = 0u32;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => continue,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// The ChatGPT account id carried inside the access token.
+///
+/// The stored credential's `accountId` depends on what the login helper returned
+/// and is often absent; pi's own Codex provider reads it out of the JWT for the
+/// same reason. Without it the usage endpoint answers 401.
+fn account_id_from_access_token(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64url_decode(payload)?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn format_quota_window(seconds: i64) -> String {
+    match seconds {
+        s if s <= 0 => "Current window".to_string(),
+        s if s % 604_800 == 0 && s / 604_800 == 1 => "Weekly".to_string(),
+        s if s % 86_400 == 0 => {
+            let days = s / 86_400;
+            format!("{days} day{}", if days == 1 { "" } else { "s" })
+        }
+        s if s % 3_600 == 0 => {
+            let hours = s / 3_600;
+            format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
+        }
+        s => format!("{} minutes", s / 60),
+    }
+}
+
+fn parse_quota_window(value: &Value, fallback_label: &str) -> Option<QuotaWindow> {
+    // No synthesized zeros: a meter reading 0% because the field moved is worse
+    // than saying the number is unavailable, because the user would act on it.
+    let used_percent = value.get("used_percent").and_then(Value::as_f64)?;
+    let resets_at = value
+        .get("reset_at")
+        .and_then(Value::as_i64)
+        // ChatGPT reports unix seconds; the renderer only handles ms.
+        .map(|seconds| seconds * 1000)
+        .or_else(|| {
+            // The streamed form gives a relative offset instead of an instant.
+            value
+                .get("reset_after_seconds")
+                .and_then(Value::as_i64)
+                .map(|seconds| now_ms() + seconds * 1000)
+        });
+    // `window_minutes` is what the live wire format uses (10080 == weekly);
+    // `limit_window_seconds` appears in the REST shape. Accept either.
+    let label = value
+        .get("window_minutes")
+        .and_then(Value::as_i64)
+        .map(|minutes| minutes.saturating_mul(60))
+        .or_else(|| value.get("limit_window_seconds").and_then(Value::as_i64))
+        .map(format_quota_window)
+        .unwrap_or_else(|| fallback_label.to_string());
+    Some(QuotaWindow {
+        label,
+        used_percent,
+        resets_at,
+    })
+}
+
+/// ChatGPT's quota report.
+///
+/// Two shapes are accepted deliberately. The `codex.rate_limits` event pi
+/// receives on the chat stream nests the numbers under `rate_limits.primary` /
+/// `.secondary` and names the window `window_minutes`; the REST usage endpoint
+/// reports them at the top level with `limit_window_seconds`. Neither is a
+/// documented API, so parsing both is what keeps this working when one moves.
+fn parse_chatgpt_usage(payload: &Value) -> Option<ProviderQuota> {
+    let limits = payload.get("rate_limits").unwrap_or(payload);
+    let mut windows = Vec::new();
+
+    let primary = limits.get("primary").unwrap_or(limits);
+    if let Some(window) = parse_quota_window(primary, "Current window") {
+        windows.push(window);
+    }
+    if let Some(window) = limits
+        .get("secondary")
+        .and_then(|value| parse_quota_window(value, "Weekly"))
+    {
+        windows.push(window);
+    }
+    for extra in payload
+        .get("additional_rate_limits")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if let Some(window) = parse_quota_window(extra, "Additional limit") {
+            windows.push(window);
+        }
+    }
+    if windows.is_empty() {
+        return None;
+    }
+
+    // `credits.balance` arrives as a string.
+    let credits = payload
+        .get("credits")
+        .filter(|credits| {
+            credits
+                .get("has_credits")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .and_then(|credits| credits.get("balance"))
+        .and_then(|balance| {
+            balance
+                .as_f64()
+                .or_else(|| balance.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+        });
+
+    Some(ProviderQuota {
+        provider_id: "openai-codex".to_string(),
+        provider_name: "ChatGPT".to_string(),
+        kind: "windows".to_string(),
+        message: None,
+        console_url: provider_billing_url("openai-codex").map(str::to_string),
+        plan: payload
+            .get("plan_type")
+            .or_else(|| payload.get("plan"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        balance_usd: credits,
+        voucher_balance_usd: None,
+        cash_balance_usd: None,
+        windows,
+        fetched_at: now_ms(),
+    })
+}
+
+fn parse_moonshot_balance(payload: &Value) -> Option<ProviderQuota> {
+    if payload.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+        return None;
+    }
+    let data = payload.get("data")?;
+    let available = data.get("available_balance").and_then(Value::as_f64)?;
+    Some(ProviderQuota {
+        provider_id: "moonshot".to_string(),
+        provider_name: "Kimi".to_string(),
+        kind: "balance".to_string(),
+        message: None,
+        console_url: provider_billing_url("moonshot").map(str::to_string),
+        plan: None,
+        balance_usd: Some(available),
+        voucher_balance_usd: data.get("voucher_balance").and_then(Value::as_f64),
+        cash_balance_usd: data.get("cash_balance").and_then(Value::as_f64),
+        windows: Vec::new(),
+        fetched_at: now_ms(),
+    })
+}
+
+/// In-memory only. A shape change self-heals on the next launch instead of
+/// persisting a bad parse to disk.
+#[derive(Default)]
+struct ProviderQuotaCache(Mutex<HashMap<String, ProviderQuota>>);
+
+const QUOTA_CACHE_MS: i64 = 60_000;
+// A failed lookup expires sooner so a user who just reconnected is not made to
+// wait out a full minute.
+const QUOTA_CACHE_FAILURE_MS: i64 = 15_000;
+
+async fn fetch_chatgpt_quota() -> ProviderQuota {
+    let unavailable = |message: &str| ProviderQuota::unavailable("openai-codex", message);
+    let Ok(token) = resolve_provider_access_token("openai-codex").await else {
+        return unavailable("Sign in to ChatGPT to see your usage.");
+    };
+    let account_id = match read_provider_credential("openai-codex") {
+        Some(StoredCredential::OAuth {
+            account_id: Some(id),
+            ..
+        }) if !id.is_empty() => id,
+        _ => match account_id_from_access_token(&token) {
+            Some(id) => id,
+            None => return unavailable("Usage is unavailable for this account."),
+        },
+    };
+    let base_url = provider_preset("openai-codex")
+        .map(|preset| preset.base_url.to_string())
+        .unwrap_or_default();
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/wham/usage"))
+        .bearer_auth(&token)
+        .header("chatgpt-account-id", account_id)
+        .header("originator", "raynard")
+        .send()
+        .await;
+    // Deliberately not quoting any response body: it carries account metadata
+    // and an error body may echo the bearer.
+    let Ok(response) = response else {
+        return unavailable("Could not reach ChatGPT to read your usage.");
+    };
+    if !response.status().is_success() {
+        // Silent: the endpoint is undocumented and may simply not answer for
+        // this account. The console link is more use than a line of apology.
+        return unavailable("");
+    }
+    let Ok(payload) = response.json::<Value>().await else {
+        return unavailable("ChatGPT returned an unreadable usage response.");
+    };
+    parse_chatgpt_usage(&payload).unwrap_or_else(|| unavailable(""))
+}
+
+async fn fetch_moonshot_quota(api_key: &str) -> ProviderQuota {
+    let unavailable = |message: &str| ProviderQuota::unavailable("moonshot", message);
+    if api_key.is_empty() {
+        return unavailable("Add a Kimi API key to see your balance.");
+    }
+    let base_url = provider_preset("moonshot")
+        .map(|preset| preset.base_url.to_string())
+        .unwrap_or_default();
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/users/me/balance"))
+        .bearer_auth(api_key)
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return unavailable("Could not reach Kimi to read your balance.");
+    };
+    if !response.status().is_success() {
+        return unavailable("Kimi did not report a balance for this key.");
+    }
+    let Ok(payload) = response.json::<Value>().await else {
+        return unavailable("Kimi returned an unreadable balance response.");
+    };
+    parse_moonshot_balance(&payload)
+        .unwrap_or_else(|| unavailable("Kimi did not report a balance for this key."))
+}
+
+#[tauri::command]
+async fn read_provider_quota(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, ProviderQuotaCache>,
+) -> Result<ProviderQuota, String> {
+    // The active provider is resolved here rather than passed in: naming one
+    // would be an extra argument to validate and a way to probe providers the
+    // user is not using.
+    let config = resolve_model_config(Some(&app))?;
+    let provider_id = config.provider.clone();
+
+    if let Ok(entry) = cache.0.lock() {
+        if let Some(hit) = entry.get(&provider_id) {
+            let ttl = if hit.kind == "unavailable" {
+                QUOTA_CACHE_FAILURE_MS
+            } else {
+                QUOTA_CACHE_MS
+            };
+            if now_ms() - hit.fetched_at < ttl {
+                return Ok(hit.clone());
+            }
+        }
+    }
+
+    let quota = match provider_id.as_str() {
+        "openai-codex" => fetch_chatgpt_quota().await,
+        "moonshot" | "kimi" => fetch_moonshot_quota(&config.api_key).await,
+        other => ProviderQuota::unavailable(
+            other,
+            "This provider does not publish a balance through its API.",
+        ),
+    };
+
+    if let Ok(mut entry) = cache.0.lock() {
+        entry.insert(provider_id, quota.clone());
+    }
+    Ok(quota)
 }
 
 fn save_role_model_config(
@@ -4244,15 +4753,17 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plugin_tools_stub, canonical_provider_id, clear_plugin_api_cache,
-        ensure_shared_plugin_sdk, external_url_target, generated_plugin_source_mtime_millis,
-        load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
-        packaged_node_path_for, packaged_runtime_scripts_dir_for, parse_stored_credential,
-        plugin_credential_account, provider_preset, read_generated_plugin_manifest,
-        read_keychain_account, read_plugin_cache_settings, save_plugin_cache_settings, AuthMethod,
-        BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
-        RuntimeToolsCache, StoredChatMessage, StoredCredential, StreamEvent, KEYCHAIN_CACHE,
+        account_id_from_access_token, build_plugin_tools_stub, canonical_provider_id,
+        clear_plugin_api_cache, ensure_shared_plugin_sdk, external_url_target, format_quota_window,
+        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
+        merge_turn_usage, next_available_plugin_slug, normalize_plugin_slug,
+        normalize_stored_messages, now_millis, oauth_needs_refresh, packaged_node_path_for,
+        packaged_runtime_scripts_dir_for, parse_chatgpt_usage, parse_moonshot_balance,
+        parse_stored_credential, plugin_credential_account, provider_preset,
+        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
+        save_plugin_cache_settings, AuthMethod, BuilderStreamEvent, GeneratedPluginTool,
+        PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
+        StoredChatMessage, StoredCredential, StreamEvent, UsageTotals, KEYCHAIN_CACHE,
         OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::json;
@@ -4630,6 +5141,7 @@ mod tests {
             cards: None,
             sources: None,
             credential_request: None,
+            usage: None,
         }]);
 
         assert_eq!(normalized[0].builder_run, Some(true));
@@ -4840,6 +5352,243 @@ mod tests {
     }
 
     #[test]
+    fn stored_usage_survives_normalization() {
+        // normalize_stored_messages rebuilds every field by hand, so a field
+        // added to the struct but not copied here is silently dropped on the
+        // first save. That failure is invisible until /status reports zero.
+        let usage = json!({
+            "input": 1200,
+            "output": 340,
+            "cacheRead": 80,
+            "cacheWrite": 0,
+            "totalTokens": 1620,
+            "contextTokens": 1620,
+            "contextWindow": 200000
+        });
+        let normalized = normalize_stored_messages(vec![StoredChatMessage {
+            role: "assistant".to_string(),
+            text: "Answered.".to_string(),
+            timestamp: 1,
+            thinking: None,
+            provider: Some("claude".to_string()),
+            model: Some("claude-3-5-sonnet-latest".to_string()),
+            status: Some("completed".to_string()),
+            error: None,
+            builder_run: None,
+            builder_activities: None,
+            cards: None,
+            sources: None,
+            credential_request: None,
+            usage: Some(usage.clone()),
+        }]);
+
+        assert_eq!(normalized[0].usage, Some(usage));
+    }
+
+    #[test]
+    fn a_chat_saved_before_token_counting_still_loads() {
+        let raw = r#"{"role":"assistant","text":"Older answer","timestamp":7}"#;
+        let message: StoredChatMessage = serde_json::from_str(raw).expect("older chat must load");
+        assert_eq!(message.usage, None);
+    }
+
+    #[test]
+    fn turn_usage_accumulates_per_provider_and_model() {
+        let mut totals = UsageTotals::default();
+        let usage = json!({ "input": 100, "output": 20, "cacheRead": 5, "cacheWrite": 1, "totalTokens": 126 });
+        merge_turn_usage(&mut totals, "claude/sonnet", &usage);
+        merge_turn_usage(&mut totals, "claude/sonnet", &usage);
+        merge_turn_usage(&mut totals, "moonshot/kimi-k2.5", &usage);
+
+        let row = &totals.totals["claude/sonnet"];
+        assert_eq!(row.input, 200);
+        assert_eq!(row.total_tokens, 252);
+        assert_eq!(row.turns, 2);
+        assert_eq!(totals.totals["moonshot/kimi-k2.5"].turns, 1);
+    }
+
+    #[test]
+    fn turn_usage_ignores_missing_and_negative_counts() {
+        let mut totals = UsageTotals::default();
+        merge_turn_usage(&mut totals, "claude/sonnet", &json!({}));
+        merge_turn_usage(
+            &mut totals,
+            "claude/sonnet",
+            &json!({ "input": -5, "output": "many", "totalTokens": 10 }),
+        );
+
+        let row = &totals.totals["claude/sonnet"];
+        assert_eq!(row.input, 0);
+        assert_eq!(row.output, 0);
+        assert_eq!(row.total_tokens, 10);
+        assert_eq!(row.turns, 2);
+    }
+
+    #[test]
+    fn chatgpt_usage_reports_each_window_in_milliseconds() {
+        let payload = json!({
+            "used_percent": 42.5,
+            "reset_at": 1_700_000_000_i64,
+            "limit_window_seconds": 18000,
+            "plan": "plus",
+            "secondary": {
+                "used_percent": 7.0,
+                "reset_at": 1_700_500_000_i64,
+                "limit_window_seconds": 604800
+            }
+        });
+
+        let quota = parse_chatgpt_usage(&payload).expect("usage must parse");
+        assert_eq!(quota.kind, "windows");
+        assert_eq!(quota.plan.as_deref(), Some("plus"));
+        assert_eq!(quota.windows.len(), 2);
+        assert_eq!(quota.windows[0].label, "5 hours");
+        assert_eq!(quota.windows[0].used_percent, 42.5);
+        // Seconds are converted at the Rust boundary; the renderer sees only ms.
+        assert_eq!(quota.windows[0].resets_at, Some(1_700_000_000_000));
+        assert_eq!(quota.windows[1].label, "Weekly");
+    }
+
+    #[test]
+    fn chatgpt_usage_parses_the_streamed_rate_limits_shape() {
+        // Verbatim from pi's own openai-codex-stream test fixture: the live
+        // wire format nests under rate_limits.primary and measures the window
+        // in minutes, unlike the REST shape handled above.
+        let payload = json!({
+            "type": "codex.rate_limits",
+            "plan_type": "plus",
+            "rate_limits": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary": {
+                    "used_percent": 7,
+                    "window_minutes": 10080,
+                    "reset_after_seconds": 556112,
+                    "reset_at": 1_785_269_351_i64
+                },
+                "secondary": null
+            },
+            "code_review_rate_limits": null,
+            "additional_rate_limits": null,
+            "credits": { "has_credits": false, "unlimited": false, "balance": "0" },
+            "promo": null
+        });
+
+        let quota = parse_chatgpt_usage(&payload).expect("streamed shape must parse");
+        assert_eq!(quota.windows.len(), 1);
+        assert_eq!(quota.windows[0].used_percent, 7.0);
+        // 10080 minutes is the weekly window.
+        assert_eq!(quota.windows[0].label, "Weekly");
+        assert_eq!(quota.windows[0].resets_at, Some(1_785_269_351_000));
+        assert_eq!(quota.plan.as_deref(), Some("plus"));
+        // has_credits is false, so no balance is claimed.
+        assert_eq!(quota.balance_usd, None);
+    }
+
+    #[test]
+    fn chatgpt_credits_are_read_from_a_string_balance() {
+        let payload = json!({
+            "plan_type": "pro",
+            "rate_limits": { "primary": { "used_percent": 3, "window_minutes": 300 } },
+            "credits": { "has_credits": true, "balance": "12.50" }
+        });
+
+        let quota = parse_chatgpt_usage(&payload).expect("must parse");
+        assert_eq!(quota.balance_usd, Some(12.5));
+        assert_eq!(quota.windows[0].label, "5 hours");
+    }
+
+    #[test]
+    fn an_unrecognized_chatgpt_shape_reports_nothing_rather_than_zero() {
+        // A meter reading 0% because the field moved is worse than "unavailable",
+        // because the user would act on it.
+        assert!(parse_chatgpt_usage(&json!({})).is_none());
+        assert!(parse_chatgpt_usage(&json!({ "detail": "Not Found" })).is_none());
+        assert!(parse_chatgpt_usage(&json!({ "used_percent": "42" })).is_none());
+    }
+
+    #[test]
+    fn moonshot_balance_parses_and_rejects_an_error_code() {
+        let payload = json!({
+            "code": 0,
+            "data": { "available_balance": 49.58894, "voucher_balance": 46.58893, "cash_balance": 3.00001 },
+            "status": true
+        });
+
+        let quota = parse_moonshot_balance(&payload).expect("balance must parse");
+        assert_eq!(quota.kind, "balance");
+        assert_eq!(quota.balance_usd, Some(49.58894));
+        assert_eq!(quota.cash_balance_usd, Some(3.00001));
+
+        assert!(parse_moonshot_balance(&json!({ "code": 1, "data": {} })).is_none());
+        assert!(parse_moonshot_balance(&json!({ "code": 0, "data": {} })).is_none());
+    }
+
+    #[test]
+    fn quota_windows_are_labelled_in_human_units() {
+        assert_eq!(format_quota_window(18000), "5 hours");
+        assert_eq!(format_quota_window(3600), "1 hour");
+        assert_eq!(format_quota_window(604_800), "Weekly");
+        assert_eq!(format_quota_window(0), "Current window");
+    }
+
+    #[test]
+    fn the_chatgpt_account_id_is_recovered_from_the_access_token() {
+        // The stored accountId is often absent, so the usage call falls back to
+        // the JWT claim exactly as pi's own Codex provider does.
+        let claims = json!({ "https://api.openai.com/auth": { "chatgpt_account_id": "acct-123" } });
+        let encoded = base64url_encode_for_test(&serde_json::to_vec(&claims).unwrap());
+        let token = format!("header.{encoded}.signature");
+
+        assert_eq!(
+            account_id_from_access_token(&token),
+            Some("acct-123".to_string())
+        );
+        assert_eq!(account_id_from_access_token("not-a-jwt"), None);
+
+        let without_claim = base64url_encode_for_test(b"{\"sub\":\"x\"}");
+        assert_eq!(
+            account_id_from_access_token(&format!("header.{without_claim}.sig")),
+            None
+        );
+    }
+
+    /// Minimal unpadded base64url encoder, test-only: the crate decodes JWTs but
+    /// never needs to write one outside this assertion.
+    fn base64url_encode_for_test(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            let indices = [n >> 18, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+            for (i, index) in indices.iter().enumerate() {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[*index as usize] as char);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn providers_without_a_balance_api_point_at_billing_not_key_management() {
+        let quota = ProviderQuota::unavailable("claude", "no balance");
+        assert_eq!(quota.kind, "unavailable");
+        assert_eq!(quota.provider_name, "Claude");
+        assert_eq!(
+            quota.console_url.as_deref(),
+            Some("https://console.anthropic.com/settings/billing")
+        );
+        assert!(quota.windows.is_empty());
+        assert_eq!(quota.balance_usd, None);
+    }
+
+    #[test]
     fn stored_credential_request_round_trips_and_empty_text_is_still_dropped() {
         let request = json!({
             "pluginId": "open-weather",
@@ -4862,6 +5611,7 @@ mod tests {
                 cards: None,
                 sources: None,
                 credential_request: Some(request.clone()),
+                usage: None,
             },
             StoredChatMessage {
                 role: "assistant".to_string(),
@@ -4877,6 +5627,7 @@ mod tests {
                 cards: None,
                 sources: None,
                 credential_request: Some(request.clone()),
+                usage: None,
             },
         ]);
 
@@ -4890,6 +5641,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(StreamCancelState::default())
         .manage(OAuthLoginState::default())
+        .manage(ProviderQuotaCache::default())
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
             cancel_model_chat_stream,
@@ -4908,6 +5660,8 @@ pub fn run() {
             list_model_providers,
             read_generated_plugin,
             read_chat_history,
+            read_provider_quota,
+            read_usage_totals,
             run_main_agent_stream,
             run_plugin_builder_stream,
             run_provider_oauth_login,

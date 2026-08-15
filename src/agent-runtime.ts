@@ -10,11 +10,31 @@ export type ChatMessage = {
   content: string;
 };
 
+/**
+ * Token counts for one turn, summed across its rounds by the sidecar.
+ *
+ * `contextTokens` is the last round's prompt plus completion, not the sum: a
+ * turn with several tool calls resends the conversation each time, so the sum
+ * exceeds the window on a healthy chat and only the last round describes how
+ * full the window actually is.
+ */
+export type TurnUsage = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  rounds?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+};
+
 export type AgentReply = {
   content: string;
   provider?: string;
   model?: string;
   buildRequest?: AgentBuildRequest;
+  usage?: TurnUsage;
 };
 
 export type StreamPayload = {
@@ -54,6 +74,8 @@ export type StreamPayload = {
   result?: unknown;
   is_error?: boolean | null;
   build_request?: AgentBuildRequest | null;
+  /** Present on `done`; the turn's summed token counts. */
+  usage?: TurnUsage | null;
 };
 
 export type AgentBuildRequest = {
@@ -189,7 +211,8 @@ export async function runMainAgentStream(
     content: reply.content || streamed,
     provider: reply.provider ?? provider,
     model: reply.model ?? model,
-    buildRequest: reply.buildRequest ?? buildRequest
+    buildRequest: reply.buildRequest ?? buildRequest,
+    usage: reply.usage
   };
 }
 

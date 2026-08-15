@@ -8,6 +8,10 @@ import {
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createModel,
+  createUsageTotal,
+  addUsage,
+  emptyUsage,
+  resolveContextWindow,
   defaultThinkingLevel,
   inferReasoningSupport,
   formatToolResult,
@@ -887,5 +891,135 @@ describe('reasoning support', () => {
     expect(defaultThinkingLevel('build')).not.toBe('off');
     expect(defaultThinkingLevel('build')).toBe('medium');
     expect(defaultThinkingLevel('explore')).toBe('low');
+  });
+});
+
+describe('token usage accounting', () => {
+  it('starts empty', () => {
+    expect(emptyUsage()).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0
+    });
+  });
+
+  it('sums usage across the rounds of one turn instead of overwriting', () => {
+    // A turn with a tool call produces two assistant messages. Taking only the
+    // last one would report the tool round and lose the first model call.
+    const total = createUsageTotal();
+    total.add({ input: 100, output: 20, cacheRead: 5, cacheWrite: 1, totalTokens: 126 });
+    total.add({ input: 300, output: 40, cacheRead: 7, cacheWrite: 2, totalTokens: 349 });
+
+    expect(total.value()).toMatchObject({
+      input: 400,
+      output: 60,
+      cacheRead: 12,
+      cacheWrite: 3,
+      totalTokens: 475,
+      rounds: 2
+    });
+  });
+
+  it('reports context fill from the last round only, never the running sum', () => {
+    // Each tool round resends the whole conversation. Summing input would put a
+    // healthy chat past 100% of the window, so the meter tracks the last round.
+    const total = createUsageTotal(200000);
+    total.add({ input: 10000, output: 200, cacheRead: 0, cacheWrite: 0 });
+    total.add({ input: 12000, output: 300, cacheRead: 500, cacheWrite: 0 });
+
+    const value = total.value();
+    expect(value.contextTokens).toBe(12800);
+    expect(value.contextWindow).toBe(200000);
+    // The cumulative spend is still available, and is deliberately larger.
+    expect(value.totalTokens).toBe(23000);
+    expect(value.contextTokens).toBeLessThan(value.totalTokens);
+  });
+
+  it('prefers a reported totalTokens for context fill, as pi does', () => {
+    // Some providers report totalTokens and leave the parts at zero. Summing
+    // parts alone would show an empty meter on a full conversation.
+    const total = createUsageTotal(200000);
+    total.add({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 90_000 });
+
+    expect(total.value().contextTokens).toBe(90_000);
+  });
+
+  it('does not let an aborted round empty the context meter', () => {
+    const total = createUsageTotal(200000);
+    total.add({ input: 150_000, output: 400, cacheRead: 0, cacheWrite: 0 });
+    // A cancelled or failed round reports nothing; the window is still full.
+    total.add({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 });
+
+    expect(total.value().contextTokens).toBe(150_400);
+  });
+
+  it('carries the context window through so the renderer never guesses it', () => {
+    expect(createUsageTotal(262144).value().contextWindow).toBe(262144);
+    expect(createUsageTotal().value().contextWindow).toBe(0);
+  });
+
+  it('keeps counting across a retry, which resetRound must not clear', () => {
+    const total = createUsageTotal();
+    total.add({ input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 });
+    // runWithTransientResume restarts the round; the tokens already billed by
+    // the failed attempt were still charged and must survive.
+    total.add({ input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 });
+
+    expect(total.value().totalTokens).toBe(220);
+  });
+
+  it('derives totalTokens when the provider omits it', () => {
+    const total = createUsageTotal();
+    total.add({ input: 30, output: 12, cacheRead: 4, cacheWrite: 2 });
+
+    expect(total.value().totalTokens).toBe(48);
+  });
+
+  it('ignores missing, partial, and non-numeric usage rather than producing NaN', () => {
+    const total = createUsageTotal();
+    total.add(undefined);
+    total.add(null);
+    total.add({});
+    total.add({ input: 'lots', output: Number.NaN, totalTokens: 5 });
+    total.add({ input: 10 });
+
+    expect(total.value()).toMatchObject({
+      input: 10,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 15
+    });
+    expect(Number.isNaN(total.value().contextTokens)).toBe(false);
+  });
+
+  it('adds two usage blocks without mutating either', () => {
+    const a = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10 };
+    const b = { input: 5, output: 6, cacheRead: 7, cacheWrite: 8, totalTokens: 26 };
+    const sum = addUsage(a, b);
+
+    expect(sum).toEqual({ input: 6, output: 8, cacheRead: 10, cacheWrite: 12, totalTokens: 36 });
+    expect(a.input).toBe(1);
+    expect(b.input).toBe(5);
+  });
+});
+
+describe('resolveContextWindow', () => {
+  it('matches the context window the model is actually built with', () => {
+    for (const provider of ['claude', 'moonshot', 'openai', 'openai-codex']) {
+      const model = createModel({ provider, model: 'some-model', baseUrl: 'https://example.test' });
+      expect(resolveContextWindow(provider, 'some-model')).toBe(model.contextWindow);
+    }
+  });
+
+  it('falls back for an unknown provider', () => {
+    expect(resolveContextWindow('nobody', 'nothing')).toBe(128000);
+  });
+
+  it('tolerates missing arguments', () => {
+    expect(resolveContextWindow('', '')).toBe(128000);
+    expect(resolveContextWindow(undefined, undefined)).toBe(128000);
   });
 });
