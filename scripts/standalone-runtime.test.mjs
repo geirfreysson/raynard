@@ -65,3 +65,15 @@ test('the locked standalone dependency set includes builder runtime dependencies
   expect(runtimePackage.dependencies['@mariozechner/pi-coding-agent']).toBe('0.73.1');
   expect(runtimePackage.dependencies.typescript).toBe('5.9.3');
 });
+
+test('the release workflow prepares bundle inputs before Cargo validates them', async () => {
+  const workflow = await readFile(
+    join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'),
+    'utf8'
+  );
+  const prepareRuntime = workflow.indexOf('npm run runtime:prepare:macos-arm64');
+  const cargoTest = workflow.indexOf('cargo test --manifest-path src-tauri/Cargo.toml --lib');
+
+  expect(prepareRuntime).toBeGreaterThan(-1);
+  expect(cargoTest).toBeGreaterThan(prepareRuntime);
+});
