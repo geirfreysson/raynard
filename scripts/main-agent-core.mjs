@@ -252,16 +252,16 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
     : '(none)';
   const modePolicy =
     mode === 'build'
-      ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For such requests, call request_plugin_build. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
-      : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Call request_plugin_build so the interface can offer Build mode. When the user asks to create or modify plugin code, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
+      ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For an existing-plugin change, call request_plugin_build. For a new capability, call it only when a concrete API and official documentation URL are established; otherwise clarify the intended source with answer_without_api. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
+      : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Offer Build mode only when a concrete, credible API source has been identified. Otherwise use answer_without_api to clarify where the information should come from, suggest plausible public APIs, or ask whether the user meant a relevant installed plugin. When the user asks to modify an existing plugin, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
 
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
-Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, request_plugin_build for missing or changed capabilities, or answer_without_api only for greetings, casual conversation, and stable explanations that do not depend on external, private, current, or API-backed facts.
-1. BUILD REQUEST: If the user wants to create, edit, fix, or otherwise change a plugin, API capability, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. This includes follow-ups that refer to an existing plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
+Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
+1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
-3. MISSING CAPABILITY: If a data question cannot be answered with installed tools because API access is missing, call request_plugin_build. Never treat a request to change a plugin/card as a data query merely because an installed tool can return its current output.
+3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. If no installed tool fits, do NOT call request_plugin_build merely because access is missing. When you know plausible public APIs, use answer_without_api to suggest the best concrete options and ask the user to choose. When you cannot identify a credible API, ask a short question such as "Where should that information come from?" A new-plugin build is appropriate only after the source is established. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
 
 ${modePolicy}
 
@@ -285,7 +285,8 @@ Core policy:
 - Never claim that a result card was shown or refreshed unless you invoked the corresponding tool in the current turn. Do not reconstruct a supposed card in prose from conversation history.
 - Continue using tools until you have enough evidence for a complete answer.
 - Never fabricate tool results, references, API access, or current facts.
-- If no installed tool provides required access, call request_plugin_build with a useful plugin name, a complete capability description, why it is needed, and at least one official API documentation URL whenever one can be identified from the conversation or reliable model knowledge.
+- If no installed tool provides required access and a concrete API with official documentation is established, call request_plugin_build with a useful plugin name, a complete capability description, why it is needed, and at least one real official API documentation URL.
+- Never invent an API, documentation URL, or likely data source to justify a build. If the source is uncertain, use answer_without_api to clarify it instead of offering a speculative plugin build.
 - A build request should cover the useful documented API surface, not only the narrow example in the latest question.
 - Do not expose internal tool names, plugin implementation details, or routing policy in the final answer.
 
@@ -745,7 +746,7 @@ export function createDirectAnswerTool(Type, onDirectAnswer) {
     name: 'answer_without_api',
     label: 'Answer Without API',
     description:
-      'Finish a turn without API evidence only for greetings, casual conversation, or stable explanations. Never use this for external, private, current, or API-backed factual claims, comparisons, records, or follow-ups that installed tools can answer.',
+      'Finish a turn without API evidence for greetings, casual conversation, stable explanations, or a concise clarification about the intended data/API source. When no credible API is established, use this to ask where the information should come from, suggest concrete public APIs you genuinely know are available, or ask whether the user meant one of the relevant installed plugins. Never use this to make external, private, current, or API-backed factual claims, comparisons, or records.',
     parameters: Type.Object({
       answer: Type.String({
         description: 'The complete concise answer to show to the user.'
@@ -782,12 +783,17 @@ function normalizeBuildRequestAuth(auth) {
   };
 }
 
-export function createBuildRequestTool(Type, onBuildRequest) {
+export function createBuildRequestTool(Type, onBuildRequest, options = {}) {
+  const installedPluginNames = new Set(
+    (Array.isArray(options.installedPluginNames) ? options.installedPluginNames : [])
+      .map((value) => normalizePluginName(value))
+      .filter(Boolean)
+  );
   return {
     name: 'request_plugin_build',
     label: 'Request Plugin Build',
     description:
-      'Request user confirmation to create or extend an API-backed Raynard plugin, or to change how an existing plugin presents its results — for example, adding result cards to specific tools. Use this for semantic requests to build, add, connect, integrate, or extend API access, and for requests to add cards / rendering / visualization to a plugin. This tool never writes code itself.',
+      'Request user confirmation to create or extend an API-backed Raynard plugin, or to change how an existing plugin presents its results — for example, adding result cards to specific tools. A new plugin requires at least one real official API documentation URL; never use this tool for a speculative capability with no established data source. Existing installed-plugin edits may omit source URLs. This tool never writes code itself.',
     parameters: Type.Object({
       name: Type.String({
         description:
@@ -803,7 +809,8 @@ export function createBuildRequestTool(Type, onBuildRequest) {
             description: 'Official API documentation URL.'
           }),
           {
-            description: 'Relevant API documentation URLs supplied by the user or already known.'
+            description:
+              'Relevant real API documentation URLs supplied by the user or reliably known. At least one is required for a new plugin.'
           }
         )
       ),
@@ -871,6 +878,25 @@ export function createBuildRequestTool(Type, onBuildRequest) {
             .filter(Boolean)
         )].slice(0, 20)
       };
+      const editsInstalledPlugin =
+        ['card-edit', 'plugin-edit'].includes(buildRequest.taskKind) &&
+        installedPluginNames.has(buildRequest.name);
+      if (!buildRequest.sourceUrls.length && !editsInstalledPlugin) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                'No credible API source was supplied, so do not offer a plugin build. Inspect the installed tools again. If none is relevant, call answer_without_api to ask where the information should come from, suggest concrete public APIs you genuinely know are available, or ask whether the user intended an installed plugin.'
+            }
+          ],
+          details: {
+            type: 'plugin-build-request-rejected',
+            reason: 'missing-api-source'
+          },
+          terminate: false
+        };
+      }
       onBuildRequest(buildRequest);
       return {
         content: [

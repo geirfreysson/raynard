@@ -139,6 +139,24 @@ describe('main agent core', () => {
     expect(build).toContain('Only the separate Pi coding agent may write plugin files');
   });
 
+  it('clarifies the data source instead of proposing a plugin without a credible API', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['hn_top', 'openweather_forecast'],
+      plugins: [
+        { slug: 'hacker-news', name: 'Hacker News', toolCount: 1 },
+        { slug: 'open-weather', name: 'OpenWeather', toolCount: 1 }
+      ]
+    });
+
+    expect(explore).toMatch(/do not call request_plugin_build/i);
+    expect(explore).toMatch(/credible.*API|API.*credible/i);
+    expect(explore).toMatch(/where.*information.*come from/i);
+    expect(explore).toMatch(/suggest.*public APIs/i);
+    expect(explore).toMatch(/installed (plugins|tools)/i);
+    expect(explore).toMatch(/answer_without_api.*clarif/i);
+  });
+
   it('teaches the agent that result cards are a built-in feature, not content to design', () => {
     const build = buildMainAgentSystemPrompt({ mode: 'build', toolNames: ['dnd_get_spell'] });
 
@@ -205,6 +223,14 @@ describe('main agent core', () => {
     expect(answers).toEqual(['Hello! How can I help?']);
     expect(result.terminate).toBe(true);
     expect(result.details.type).toBe('direct-answer');
+  });
+
+  it('allows a source clarification without pretending to answer the data question', () => {
+    const tool = createDirectAnswerTool(Type, () => {});
+
+    expect(tool.description).toMatch(/clarif/i);
+    expect(tool.description).toMatch(/data source|API source/i);
+    expect(tool.description).toMatch(/installed (plugins|tools)/i);
   });
 
   it('routes visual changes to existing cards through the plugin builder', () => {
@@ -523,12 +549,63 @@ describe('main agent core', () => {
     expect(result.details.type).toBe('plugin-build-request');
   });
 
+  it('rejects a new-plugin proposal that has no credible API source', async () => {
+    const emitted = [];
+    const tool = createBuildRequestTool(Type, (request) => emitted.push(request));
+    const result = await tool.execute('build-1', {
+      name: 'mystery-data',
+      description: 'Retrieve unspecified information.',
+      reason: 'No installed tool can answer the question.',
+      taskKind: 'plugin-create'
+    });
+
+    expect(emitted).toEqual([]);
+    expect(result.terminate).toBe(false);
+    expect(result.details.type).toBe('plugin-build-request-rejected');
+    expect(result.content[0].text).toMatch(/ask.*source|where.*come from/i);
+  });
+
+  it('still allows a source-less edit to an actually installed plugin', async () => {
+    const emitted = [];
+    const tool = createBuildRequestTool(Type, (request) => emitted.push(request), {
+      installedPluginNames: ['hacker-news']
+    });
+    const result = await tool.execute('build-1', {
+      name: 'hacker-news',
+      description: 'Make the story card title larger.',
+      reason: 'The installed card needs a presentation change.',
+      taskKind: 'card-edit',
+      targetTools: ['hn_top']
+    });
+
+    expect(emitted).toHaveLength(1);
+    expect(result.terminate).toBe(true);
+    expect(result.details.type).toBe('plugin-build-request');
+  });
+
+  it('rejects a source-less edit label for a plugin that is not installed', async () => {
+    const emitted = [];
+    const tool = createBuildRequestTool(Type, (request) => emitted.push(request), {
+      installedPluginNames: ['hacker-news']
+    });
+    const result = await tool.execute('build-1', {
+      name: 'made-up-plugin',
+      description: 'Add access to an unspecified source.',
+      reason: 'The capability is missing.',
+      taskKind: 'plugin-edit'
+    });
+
+    expect(emitted).toEqual([]);
+    expect(result.details.reason).toBe('missing-api-source');
+  });
+
   it('carries an advance API-key notice so the user can register during the build', async () => {
     const emitted = [];
     const tool = createBuildRequestTool(Type, (request) => emitted.push(request));
     await tool.execute('build-1', {
       name: 'open-weather',
       description: 'Current weather and forecasts.',
+      sourceUrls: ['https://openweathermap.org/api'],
       reason: 'No installed tool can reach OpenWeather.',
       auth: {
         required: true,
@@ -551,6 +628,7 @@ describe('main agent core', () => {
     await tool.execute('build-1', {
       name: 'open-weather',
       description: 'Weather.',
+      sourceUrls: ['https://openweathermap.org/api'],
       reason: 'Missing capability.',
       auth: { required: true, signupUrl: 'not-a-url' }
     });
@@ -559,6 +637,7 @@ describe('main agent core', () => {
     await tool.execute('build-2', {
       name: 'hacker-news',
       description: 'Stories.',
+      sourceUrls: ['https://github.com/HackerNews/API'],
       reason: 'Missing capability.',
       auth: { required: false }
     });

@@ -128,17 +128,6 @@ const generatedTools = createGeneratedPluginTools({
     emit({ type: 'credential_request', result: nextRequest });
   }
 });
-let buildRequest = null;
-let directAnswer = null;
-const buildRequestTool = createBuildRequestTool(Type, (nextRequest) => {
-  buildRequest = nextRequest;
-  emit({ type: 'build_request', buildRequest: nextRequest });
-});
-const directAnswerTool = createDirectAnswerTool(Type, (answer) => {
-  directAnswer = answer;
-});
-const tools = [...generatedTools, buildRequestTool, directAnswerTool];
-const internalToolNames = new Set([directAnswerTool.name]);
 
 // Real identities of installed plugins so the agent edits an existing plugin by
 // its exact name instead of inventing a near-miss name that scaffolds a
@@ -159,6 +148,22 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
     };
   })
   .filter((plugin) => plugin.slug);
+
+let buildRequest = null;
+let directAnswer = null;
+const buildRequestTool = createBuildRequestTool(
+  Type,
+  (nextRequest) => {
+    buildRequest = nextRequest;
+    emit({ type: 'build_request', buildRequest: nextRequest });
+  },
+  { installedPluginNames: installedPlugins.map((plugin) => plugin.slug) }
+);
+const directAnswerTool = createDirectAnswerTool(Type, (answer) => {
+  directAnswer = answer;
+});
+const tools = [...generatedTools, buildRequestTool, directAnswerTool];
+const internalToolNames = new Set([directAnswerTool.name]);
 
 // Built once so its resolved contextWindow — pi's catalog first, FALLBACK_LIMITS
 // second — is the same number both the agent runs against and /status divides by.
