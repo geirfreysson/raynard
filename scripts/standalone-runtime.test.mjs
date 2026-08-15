@@ -89,3 +89,43 @@ test('the release workflow prepares bundle inputs before Cargo validates them', 
   expect(notarizeDmg).toBeGreaterThan(tauriBuild);
   expect(validateDmgTicket).toBeGreaterThan(notarizeDmg);
 });
+
+test('tagged releases validate their version and publish the binary with its checksum', async () => {
+  const workflow = await readFile(
+    join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'),
+    'utf8'
+  );
+  const validateVersion = workflow.indexOf('scripts/validate-release-version.mjs');
+  const tauriBuild = workflow.indexOf('npm run tauri:build -- --target aarch64-apple-darwin');
+  const createRelease = workflow.indexOf('gh release create "$GITHUB_REF_NAME"');
+  const uploadRelease = workflow.indexOf('gh release upload "$GITHUB_REF_NAME"');
+  const publishRelease = workflow.indexOf(
+    'gh release edit "$GITHUB_REF_NAME" --draft=false --latest'
+  );
+
+  expect(validateVersion).toBeGreaterThan(-1);
+  expect(validateVersion).toBeLessThan(tauriBuild);
+  expect(createRelease).toBeGreaterThan(tauriBuild);
+  expect(uploadRelease).toBeGreaterThan(createRelease);
+  expect(workflow.slice(createRelease, uploadRelease)).toContain('--draft');
+  expect(publishRelease).toBeGreaterThan(uploadRelease);
+  expect(workflow).toContain('--notes-file release-draft.md');
+  expect(workflow).toContain('Raynard-${version}-mac-arm64.dmg.sha256');
+});
+
+test('the docs homepage downloads the stable asset published by every latest release', async () => {
+  const [workflow, homepageCopy, docsConfig, gettingStarted] = await Promise.all([
+    readFile(join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'), 'utf8'),
+    readFile(join(scriptsDir, '../docs/src/content/homepage-copy.json'), 'utf8'),
+    readFile(join(scriptsDir, '../docs/docusaurus.config.js'), 'utf8'),
+    readFile(join(scriptsDir, '../docs/docs/getting-started.md'), 'utf8')
+  ]);
+  const latestDownload =
+    'https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg';
+
+  expect(workflow).toContain('stable_artifact_name="Raynard-mac-arm64.dmg"');
+  expect(workflow).toContain('stable_checksum_name="Raynard-mac-arm64.dmg.sha256"');
+  expect(homepageCopy).toContain(latestDownload);
+  expect(docsConfig).toContain(latestDownload);
+  expect(gettingStarted).toContain(latestDownload);
+});

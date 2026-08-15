@@ -197,6 +197,50 @@ Release builds are tag-triggered (`v*`) or manual, and require these repository
 secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY_BASE64`,
 `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`.
 
+## Release Workflow
+
+- When the user says `create a new release`, treat that prompt as a request to
+  run the complete release procedure below. Do not create a tag immediately.
+- First inspect the current version in `package.json` and recommend the next
+  minor version by default (for example, recommend `v0.2.0` after `0.1.0`). Ask
+  the user to confirm the exact target version unless they already supplied it.
+- Never create or push a release tag until the user has confirmed its exact
+  version.
+- After confirmation, perform the release in this order:
+  - inspect the git worktree and understand any existing changes before editing
+  - update the app version consistently in `package.json`, `package-lock.json`,
+    `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the Raynard package
+    entry in `src-tauri/Cargo.lock`
+  - identify the previous release tag and derive the release notes from the
+    previous-tag-to-HEAD diff; for the first release, derive them from the
+    repository history
+  - create or update `release-draft.md`; its first line must be exactly
+    `# Raynard v<version>`, and its contents must describe the actual shipped
+    changes rather than a generic template
+  - run `npm run release:validate -- v<version>`, `npm test -- --run`,
+    `npm run build`, `cargo test --manifest-path src-tauri/Cargo.toml --lib`, and
+    `cargo check --manifest-path src-tauri/Cargo.toml`
+  - commit the version and release notes with a clear release commit message
+    unless the user explicitly asks not to commit
+  - create an annotated `v<version>` tag on that release commit, using the
+    release notes in its message when practical
+  - push the release commit to the main remote branch, then push the tag
+- Before pushing, verify all app version sources equal the tag without its
+  leading `v`, `release-draft.md` has the exact release heading, the annotated
+  tag points at the release commit, and the release workflow still validates
+  the version before building.
+- The pushed tag triggers `.github/workflows/release-macos-arm64.yml`. A
+  successful workflow must build, sign, notarize, and verify the Apple Silicon
+  app; publish a non-draft GitHub release; and attach both
+  `Raynard-<version>-mac-arm64.dmg` and its SHA-256 checksum. It must also attach
+  the stable `Raynard-mac-arm64.dmg` alias used by the docs homepage's
+  `/releases/latest/download/` link.
+- After pushing, report the exact release commit and tag and tell the user that
+  GitHub Actions is producing the release binary. If possible, check the
+  workflow run and report its final result rather than assuming it succeeded.
+- If unrelated uncommitted changes make the release risky, stop and ask how to
+  proceed instead of including them in the release.
+
 ## Coding Style & Naming Conventions
 
 Use TypeScript for renderer code and Rust for Tauri commands. Keep UI helpers small and close to their call sites unless they are shared across files. Prefer explicit type aliases for Tauri payloads and responses. Use `camelCase` in TypeScript and serialized JSON payloads, and `snake_case` for Rust internals with Serde renaming where needed.

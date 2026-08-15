@@ -6,8 +6,9 @@ sidebar_position: 2
 
 ## Download Raynard
 
-Select **Download for macOS** on the Raynard website to download the latest
-installer.
+[Download the latest Apple Silicon macOS installer](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg),
+or select **Download for macOS** on the Raynard website. The link always follows
+the newest published release.
 
 ## Install and run Raynard
 

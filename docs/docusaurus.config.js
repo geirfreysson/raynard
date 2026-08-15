@@ -2,6 +2,9 @@
 
 import {themes as prismThemes} from 'prism-react-renderer';
 
+const latestMacDownload =
+  'https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Raynard',
@@ -64,7 +67,7 @@ const config = {
             position: 'right',
           },
           {
-            to: '/docs/getting-started',
+            href: latestMacDownload,
             label: 'Download for Mac',
             position: 'right',
             className: 'navbar-download',
