@@ -156,6 +156,47 @@ Do not start `npm run dev` or `npm run tauri dev` when the user asks for
 documentation-only work or explicitly wants the current application process
 left undisturbed.
 
+## Packaged macOS Release
+
+A shipped app cannot rely on the developer's machine, so the desktop bundle
+embeds its own Node runtime. `scripts/standalone-runtime.mjs` downloads the
+checksum-pinned Node for `aarch64-apple-darwin` and stages two build outputs,
+both gitignored:
+
+- `src-tauri/binaries/node-aarch64-apple-darwin`, declared as `externalBin`, so
+  Tauri places it at `Raynard.app/Contents/MacOS/node`.
+- `src-tauri/runtime/agent-runtime`, declared as a bundle `resources` entry, so
+  it lands at `Raynard.app/Contents/Resources/agent-runtime` with `scripts/`,
+  `plugin-sdk/`, and the locked `node_modules`.
+
+`beforeBuildCommand` is `npm run build:desktop`, which stages that runtime
+before the Rust build. `RUNTIME_SCRIPTS` in `standalone-runtime.mjs` must hold
+the full relative-import closure of the four sidecar entry points; a test in
+`scripts/standalone-runtime.test.mjs` derives that closure and fails when a new
+`./*.mjs` import is not packaged.
+
+Rust resolves those paths from `env::current_exe()` first and falls back to the
+directory-relative `scripts/` candidates for `tauri dev` and tests. A packaged
+app is launched with `/` as its current directory, so CWD-relative lookups and a
+bare `Command::new("node")` only ever work in development.
+
+The embedded Node arrives from nodejs.org already signed and carrying
+`com.apple.security.get-task-allow`, which Apple's notary rejects. Tauri
+re-signs it with `src-tauri/Entitlements.plist`, dropping that key and keeping
+the `allow-jit` and `allow-unsigned-executable-memory` entitlements V8 needs
+under the hardened runtime. `.github/workflows/release-macos-arm64.yml` asserts
+this rather than assuming it.
+
+`scripts/verify-standalone-macos.mjs` is the gate that matters: it runs the
+bundled Node, syntax-checks every script the manifest claims to package, drives
+both sidecars to their "model API key is required" error, and executes a real
+tool through the packaged runner. Run it against a local build with
+`npm run verify:macos:bundle`.
+
+Release builds are tag-triggered (`v*`) or manual, and require these repository
+secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY_BASE64`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`.
+
 ## Coding Style & Naming Conventions
 
 Use TypeScript for renderer code and Rust for Tauri commands. Keep UI helpers small and close to their call sites unless they are shared across files. Prefer explicit type aliases for Tauri payloads and responses. Use `camelCase` in TypeScript and serialized JSON payloads, and `snake_case` for Rust internals with Serde renaming where needed.

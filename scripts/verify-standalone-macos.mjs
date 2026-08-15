@@ -48,11 +48,10 @@ export async function verifyStandaloneMacApp(appPath) {
   assert.equal(run(nodePath, ['--version']).trim(), `v${manifest.node.version}`);
   assert.match(run('file', [nodePath]), /Mach-O 64-bit executable arm64/);
 
-  for (const name of [
-    'main-agent-sidecar.mjs',
-    'plugin-builder-sidecar.mjs',
-    'plugin-tool-runner.mjs'
-  ]) {
+  // Every script the manifest claims to package must be present and parseable,
+  // so a sidecar that grows a new local import fails here and not on a user's
+  // first chat turn.
+  for (const name of manifest.scripts) {
     run(nodePath, ['--check', join(scriptDir, name)]);
   }
 

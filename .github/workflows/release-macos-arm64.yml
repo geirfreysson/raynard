@@ -37,6 +37,14 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      - name: Cache the pinned embedded Node runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/.standalone-runtime-cache
+            scripts/standalone-runtime/node_modules
+          key: standalone-runtime-${{ runner.os }}-${{ hashFiles('scripts/standalone-runtime.mjs', 'scripts/standalone-runtime/package-lock.json') }}
+
       - name: Install application dependencies
         run: npm ci
 
@@ -117,6 +125,19 @@ jobs:
           node scripts/verify-standalone-macos.mjs "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
+
+          # The embedded Node ships from nodejs.org already signed, carrying the
+          # debug entitlement `get-task-allow` that Apple's notary rejects. Tauri
+          # re-signs it with this app's Entitlements.plist, which drops that key
+          # and keeps the JIT entitlements V8 needs under the hardened runtime.
+          # Assert the re-sign happened rather than trusting it silently.
+          node_entitlements="$(codesign -d --entitlements - "$app_path/Contents/MacOS/node" 2>/dev/null)"
+          if grep -q "get-task-allow" <<<"$node_entitlements"; then
+            echo "Embedded Node still carries com.apple.security.get-task-allow; notarization would reject it." >&2
+            exit 1
+          fi
+          grep -q "allow-jit" <<<"$node_entitlements"
+          codesign -dv "$app_path/Contents/MacOS/node" 2>&1 | grep -q "flags=.*runtime"
           xcrun stapler validate "$dmg_path"
           hdiutil detach "$mount_dir"
           trap - EXIT

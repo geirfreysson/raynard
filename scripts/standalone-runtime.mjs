@@ -28,11 +28,15 @@ export const NODE_RUNTIME = Object.freeze({
   binarySha256: '8179f1d4a920be531d81edef7a26df5cc5c9cb11c8b5a28fb336aa030fbfe3df'
 });
 
-const RUNTIME_SCRIPTS = [
-  'main-agent-sidecar.mjs',
+export const RUNTIME_SCRIPTS = [
+  'builder-compaction.mjs',
   'main-agent-core.mjs',
-  'plugin-builder-sidecar.mjs',
+  'main-agent-sidecar.mjs',
+  'oauth-callback-page.mjs',
+  'oauth-login-core.mjs',
+  'oauth-login-sidecar.mjs',
   'plugin-builder-core.mjs',
+  'plugin-builder-sidecar.mjs',
   'plugin-tool-runner.mjs'
 ];
 

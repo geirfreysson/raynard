@@ -6,3 +6,9 @@ target
 
 # Host-owned plugin cache written when the runner tests exercise a fixture.
 scripts/fixtures/.plugin-data
+
+# Embedded Node runtime staged into the bundle by scripts/standalone-runtime.mjs.
+src-tauri/binaries/
+src-tauri/runtime/
+src-tauri/.standalone-runtime-cache/
+scripts/standalone-runtime/node_modules/

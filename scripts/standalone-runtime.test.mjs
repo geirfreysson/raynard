@@ -29,6 +29,32 @@ test('the standalone runtime packager pins and verifies the Apple Silicon Node a
   expect(packager.NODE_RUNTIME.archive).toBe('node-v22.21.1-darwin-arm64.tar.gz');
 });
 
+test('every script a packaged sidecar imports is copied into the runtime', async () => {
+  const { RUNTIME_SCRIPTS } = await import('./standalone-runtime.mjs');
+  const entryPoints = [
+    'main-agent-sidecar.mjs',
+    'plugin-builder-sidecar.mjs',
+    'plugin-tool-runner.mjs',
+    'oauth-login-sidecar.mjs'
+  ];
+
+  const required = new Set();
+  const pending = [...entryPoints];
+  while (pending.length > 0) {
+    const name = pending.pop();
+    if (required.has(name)) continue;
+    required.add(name);
+    const source = await readFile(join(scriptsDir, name), 'utf8');
+    for (const [, imported] of source.matchAll(/from '(\.\/[^']+\.mjs)'/g)) {
+      pending.push(imported.slice(2));
+    }
+  }
+
+  for (const name of [...required].sort()) {
+    expect(RUNTIME_SCRIPTS, `${name} is imported at runtime but never packaged`).toContain(name);
+  }
+});
+
 test('the locked standalone dependency set includes builder runtime dependencies', async () => {
   const runtimePackage = JSON.parse(
     await readFile(join(scriptsDir, 'standalone-runtime/package.json'), 'utf8')

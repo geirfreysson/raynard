@@ -864,7 +864,7 @@ async fn execute_generated_plugin_tool(
         "credentials": credentials
     });
 
-    let mut child = Command::new("node")
+    let mut child = Command::new(resolve_node_command())
         .arg(runner_path)
         .current_dir(&plugin_dir)
         .stdin(Stdio::piped())
@@ -967,7 +967,7 @@ async fn run_plugin_builder_stream(
         "pluginRunnerPath": plugin_runner_path.to_string_lossy().to_string()
     });
 
-    let mut child = Command::new("node")
+    let mut child = Command::new(resolve_node_command())
         .arg(sidecar_path)
         .current_dir(&plugin_dir)
         .stdin(Stdio::piped())
@@ -1565,7 +1565,7 @@ async fn run_provider_oauth_login(
     }
 
     let sidecar_path = resolve_oauth_login_sidecar_path()?;
-    let mut child = Command::new("node")
+    let mut child = Command::new(resolve_node_command())
         .arg(sidecar_path)
         .current_dir(
             env::current_dir()
@@ -2015,7 +2015,7 @@ async fn run_main_agent_stream(
         "plugins": plugins
     });
 
-    let mut child = Command::new("node")
+    let mut child = Command::new(resolve_node_command())
         .arg(sidecar_path)
         .current_dir(
             env::current_dir()
@@ -2936,68 +2936,76 @@ fn resolve_generated_plugin_by_tool(
     ))
 }
 
-fn resolve_plugin_builder_sidecar_path() -> Result<PathBuf, String> {
+/// Where `scripts/standalone-runtime.mjs` lands inside a bundled macOS app.
+/// The executable sits in `Raynard.app/Contents/MacOS/`, and the packaged
+/// runtime is a bundle resource, so the scripts are two levels up under
+/// `Contents/Resources/agent-runtime/scripts/`.
+fn packaged_runtime_scripts_dir_for(executable: &Path) -> Option<PathBuf> {
+    let contents_dir = executable.parent()?.parent()?;
+    Some(
+        contents_dir
+            .join("Resources")
+            .join("agent-runtime")
+            .join("scripts"),
+    )
+}
+
+/// The embedded Node executable is bundled as an external binary, so Tauri
+/// drops it next to the app executable with its target-triple suffix removed.
+fn packaged_node_path_for(executable: &Path) -> Option<PathBuf> {
+    Some(executable.parent()?.join("node"))
+}
+
+/// A packaged app has no useful current directory — it is launched with `/` —
+/// so bundle resources are resolved from the executable first. The
+/// directory-relative candidates keep `tauri dev` and the test suite working.
+fn resolve_runtime_script_path(script_name: &str) -> Result<PathBuf, String> {
+    if let Some(path) = env::current_exe()
+        .ok()
+        .and_then(|executable| packaged_runtime_scripts_dir_for(&executable))
+        .map(|scripts| scripts.join(script_name))
+        .filter(|path| path.is_file())
+    {
+        return Ok(path);
+    }
+
     let current =
         env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
     let candidates = [
-        current.join("scripts").join("plugin-builder-sidecar.mjs"),
-        current
-            .join("..")
-            .join("scripts")
-            .join("plugin-builder-sidecar.mjs"),
+        current.join("scripts").join(script_name),
+        current.join("..").join("scripts").join(script_name),
     ];
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| "Could not find scripts/plugin-builder-sidecar.mjs.".to_string())
+        .ok_or_else(|| format!("Could not find scripts/{script_name}."))
+}
+
+/// Node is only on `PATH` for developer machines. A packaged app must use the
+/// embedded executable, otherwise every agent turn depends on what the person
+/// who downloaded the app happens to have installed.
+fn resolve_node_command() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|executable| packaged_node_path_for(&executable))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("node"))
+}
+
+fn resolve_plugin_builder_sidecar_path() -> Result<PathBuf, String> {
+    resolve_runtime_script_path("plugin-builder-sidecar.mjs")
 }
 
 fn resolve_main_agent_sidecar_path() -> Result<PathBuf, String> {
-    let current =
-        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
-    let candidates = [
-        current.join("scripts").join("main-agent-sidecar.mjs"),
-        current
-            .join("..")
-            .join("scripts")
-            .join("main-agent-sidecar.mjs"),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "Could not find scripts/main-agent-sidecar.mjs.".to_string())
+    resolve_runtime_script_path("main-agent-sidecar.mjs")
 }
 
 fn resolve_oauth_login_sidecar_path() -> Result<PathBuf, String> {
-    let current =
-        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
-    let candidates = [
-        current.join("scripts").join("oauth-login-sidecar.mjs"),
-        current
-            .join("..")
-            .join("scripts")
-            .join("oauth-login-sidecar.mjs"),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "Could not find scripts/oauth-login-sidecar.mjs.".to_string())
+    resolve_runtime_script_path("oauth-login-sidecar.mjs")
 }
 
 fn resolve_plugin_tool_runner_path() -> Result<PathBuf, String> {
-    let current =
-        env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
-    let candidates = [
-        current.join("scripts").join("plugin-tool-runner.mjs"),
-        current
-            .join("..")
-            .join("scripts")
-            .join("plugin-tool-runner.mjs"),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "Could not find scripts/plugin-tool-runner.mjs.".to_string())
+    resolve_runtime_script_path("plugin-tool-runner.mjs")
 }
 
 fn normalize_chat_id(raw: &str) -> String {
@@ -3326,7 +3334,7 @@ fn read_generated_plugin_runtime_tools(
         "pluginDir": plugin_dir.to_string_lossy().to_string(),
         "listTools": true
     });
-    let mut child = Command::new("node")
+    let mut child = Command::new(resolve_node_command())
         .arg(runner_path)
         .current_dir(plugin_dir)
         .stdin(Stdio::piped())
@@ -4234,14 +4242,43 @@ mod tests {
         ensure_shared_plugin_sdk, external_url_target, generated_plugin_source_mtime_millis,
         load_generated_plugin_runtime_tools_cached, next_available_plugin_slug,
         normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
-        parse_stored_credential, plugin_credential_account, provider_preset,
-        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
-        save_plugin_cache_settings, AuthMethod, BuilderStreamEvent, GeneratedPluginTool,
-        PluginBuilderRequest, PluginCacheSettings, RuntimeToolsCache, StoredChatMessage,
-        StoredCredential, StreamEvent, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
+        packaged_node_path_for, packaged_runtime_scripts_dir_for, parse_stored_credential,
+        plugin_credential_account, provider_preset, read_generated_plugin_manifest,
+        read_keychain_account, read_plugin_cache_settings, save_plugin_cache_settings, AuthMethod,
+        BuilderStreamEvent, GeneratedPluginTool, PluginBuilderRequest, PluginCacheSettings,
+        RuntimeToolsCache, StoredChatMessage, StoredCredential, StreamEvent, KEYCHAIN_CACHE,
+        OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::json;
     use std::fs;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn packaged_paths_match_the_macos_bundle_layout() {
+        let executable = Path::new("/Applications/Raynard.app/Contents/MacOS/raynard");
+
+        assert_eq!(
+            packaged_runtime_scripts_dir_for(executable),
+            Some(PathBuf::from(
+                "/Applications/Raynard.app/Contents/Resources/agent-runtime/scripts"
+            ))
+        );
+        assert_eq!(
+            packaged_node_path_for(executable),
+            Some(PathBuf::from(
+                "/Applications/Raynard.app/Contents/MacOS/node"
+            ))
+        );
+    }
+
+    #[test]
+    fn packaged_paths_are_absent_for_a_rootless_executable() {
+        assert_eq!(packaged_runtime_scripts_dir_for(Path::new("raynard")), None);
+        assert_eq!(
+            packaged_node_path_for(Path::new("raynard")),
+            Some(PathBuf::from("node"))
+        );
+    }
 
     #[test]
     fn external_url_target_accepts_only_plain_http_urls() {
