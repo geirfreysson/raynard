@@ -4,6 +4,7 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import homepageCopy from '../content/homepage-copy.json';
+import shareConfig from '../../../share.config.json';
 import styles from './index.module.css';
 
 const extensionRowB = [...homepageCopy.extensions.items].reverse();
@@ -34,7 +35,8 @@ function Hero() {
         </p>
         <p className={styles.heroBody}>{hero.body}</p>
         <div className={styles.heroActions}>
-          <Link className={styles.primaryButton} to={hero.primaryAction.to}>{hero.primaryAction.label}</Link>
+          {/* The download URL is code-owned (share.config.json), not copy. */}
+          <Link className={styles.primaryButton} to={shareConfig.downloadUrl}>{hero.primaryAction.label}</Link>
           <Link className={styles.secondaryButton} to={hero.secondaryAction.to}>{hero.secondaryAction.label}</Link>
         </div>
 

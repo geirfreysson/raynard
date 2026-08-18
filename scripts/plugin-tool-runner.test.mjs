@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -98,6 +98,30 @@ describe('plugin tool runner integration', () => {
     expect(called.payload.result.references).toHaveLength(1);
   });
 
+  it('uses the runner-bundled SDK when the app-local SDK is stale', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'raynard-runner-stale-sdk-'));
+    const copiedPluginDir = join(root, basename(compactPluginDir));
+    const staleSdkDir = join(root, 'node_modules', '@raynard', 'plugin-sdk');
+    await cp(compactPluginDir, copiedPluginDir, { recursive: true });
+    await cp(join(scriptsDir, 'plugin-sdk'), staleSdkDir, { recursive: true });
+    const staleSdkPath = join(staleSdkDir, 'index.js');
+    const staleSdk = (await readFile(staleSdkPath, 'utf8'))
+      .replace('export function beginApiCacheTrace()', 'function beginApiCacheTrace()')
+      .replace('export function readApiCacheTrace()', 'function readApiCacheTrace()');
+    await writeFile(staleSdkPath, staleSdk, 'utf8');
+
+    try {
+      const called = await runToolAsync(
+        { toolName: 'compact_lookup', args: { id: 7 } },
+        copiedPluginDir
+      );
+      expect(called.status).toBe(0);
+      expect(called.payload.result.text).toBe('Record 7');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a registry that does not satisfy the SDK contract', () => {
     const listed = runTool({ listTools: true }, brokenPluginDir);
     expect(listed.status).toBe(1);
@@ -135,11 +159,13 @@ describe('plugin tool runner integration', () => {
     try {
       const first = await runToolAsync({ toolName: 'cached_lookup', args: { url } }, copiedPluginDir);
       expect(first.status).toBe(0);
+      expect(first.payload.result._raynard?.cacheHit).not.toBe(true);
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 
       const second = await runToolAsync({ toolName: 'cached_lookup', args: { url } }, copiedPluginDir);
       expect(second.status).toBe(0);
       expect(second.payload.result.data).toEqual({ value: 'cached response' });
+      expect(second.payload.result._raynard).toEqual({ cacheHit: true });
       expect(calls).toBe(1);
     } finally {
       if (server.listening) server.close();

@@ -1,0 +1,43 @@
+{
+  "id": "raynard.catalog.world-bank-data360",
+  "name": "World Bank Data360",
+  "description": "Search World Bank Data360 indicators and retrieve filtered development-data observations across countries and time.",
+  "category": "Economics",
+  "tags": [
+    "world-bank",
+    "development",
+    "economics",
+    "indicators",
+    "statistics"
+  ],
+  "icon": "database",
+  "author": "Raynard",
+  "homepage": "https://data360.worldbank.org/en/api",
+  "version": "1.0.0",
+  "sdkVersion": 1,
+  "status": "bundled",
+  "createdAt": "2026-08-16T00:00:00.000Z",
+  "samplePrompts": [
+    "Find Data360 indicators for total population and show Kenya's values since 2015.",
+    "Search for female labor force participation indicators, then fetch recent data for Bangladesh.",
+    "Which Data360 poverty indicators are available in World Development Indicators?"
+  ],
+  "sourceUrls": [
+    "https://data360.worldbank.org/en/api",
+    "https://raw.githubusercontent.com/worldbank/open-api-specs/refs/heads/main/Data360%20Open_API.json"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "data360_search_indicators",
+        "description": "Search the World Bank Data360 catalog for indicator data series and discover the exact databaseId and indicatorId required by data360_get_data. Use this first for topic, metric, or dataset questions; do not guess IDs. Returns indicator names, units, coverage, database names, available disaggregation dimensions, relevance, and each series data endpoint. Optionally restrict results to one known database ID and page with skip.",
+        "hasCard": true
+      },
+      {
+        "name": "data360_get_data",
+        "description": "Fetch actual World Bank Data360 observations from GET /data360/data using an exact databaseId and indicatorId returned by data360_search_indicators. Use after search for values, time series, country/economy comparisons, or dimension-specific observations. Supports area, time, sex, age, urbanisation, frequency, unit, and three indicator-specific breakdown filters. Observations are sorted by period, then by area. The API returns at most 1,000 rows per call; use skip for later pages and displayLimit to bound the model-visible text only — every fetched row stays in the result card.",
+        "hasCard": true
+      }
+    ]
+  }
+}

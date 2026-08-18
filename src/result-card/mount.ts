@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { ResultCardStack } from './ResultCardStack';
+import type { ResultArtifactLoader } from './artifacts';
 import type { StoredResultCard } from './types';
 import './theme.css';
 import './result-card.css';
@@ -10,6 +11,12 @@ import './result-card.css';
 // turn) doesn't tear down and rebuild the tree.
 
 const roots = new WeakMap<HTMLElement, Root>();
+let artifactLoader: ResultArtifactLoader | undefined;
+
+/** Installed once by the Tauri host; previews and unit tests can omit it. */
+export function configureResultArtifactLoader(loader: ResultArtifactLoader): void {
+  artifactLoader = loader;
+}
 
 /**
  * Render (or re-render) the given cards into a container under a message.
@@ -28,7 +35,11 @@ export function renderResultCards(
     roots.set(container, root);
   }
   root.render(
-    createElement(ResultCardStack, { cards: valid, collapsible: options.collapsible !== false })
+    createElement(ResultCardStack, {
+      cards: valid,
+      collapsible: options.collapsible !== false,
+      loadArtifact: artifactLoader
+    })
   );
 }
 

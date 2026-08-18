@@ -1,3 +1,9 @@
+mod extension_contribution;
+
+use extension_contribution::{
+    contribution_test_files, prepare_extension_contribution_in, ContributionMetadata,
+    ContributionTool, PreparedExtensionContribution,
+};
 use futures_util::StreamExt;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -16,11 +22,116 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "ai.raynard";
+const INLINE_RESULT_DATA_LIMIT_BYTES: usize = 128 * 1024;
+const CHAT_HISTORY_INDEX_VERSION: u32 = 1;
+static CHAT_HISTORY_INDEX_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Default)]
 struct StreamCancelState {
     canceled: Mutex<HashSet<String>>,
     process_ids: Mutex<HashMap<String, u32>>,
+}
+
+/// Share links arriving from the OS.
+///
+/// A cold launch delivers the URL before the webview exists, so URLs are
+/// buffered until the renderer subscribes and then drained in order. The URL is
+/// pushed over a `Channel` rather than the event system, so the app keeps its
+/// empty capability set — nothing here is invokable from the webview except
+/// `subscribe_deep_links` itself.
+#[derive(Default)]
+struct PendingDeepLinks {
+    buffered: Mutex<Vec<String>>,
+    channel: Mutex<Option<Channel<String>>>,
+}
+
+impl PendingDeepLinks {
+    /// Records a URL, returning the live channel when one is already listening.
+    fn push(&self, url: String) -> Option<Channel<String>> {
+        let channel = self.channel.lock().unwrap().clone();
+        match channel {
+            Some(channel) => Some(channel),
+            None => {
+                self.buffered.lock().unwrap().push(url);
+                None
+            }
+        }
+    }
+
+    /// Installs the renderer's channel and hands back anything that arrived first.
+    fn subscribe(&self, channel: Channel<String>) -> Vec<String> {
+        *self.channel.lock().unwrap() = Some(channel);
+        std::mem::take(&mut *self.buffered.lock().unwrap())
+    }
+}
+
+/// Accepts only `<scheme>://share/<base64url>`.
+///
+/// Everything else the OS might hand over is refused here rather than in the
+/// renderer, matching how `external_url_target` guards outbound URLs. The cap is
+/// a sanity bound, not the LaunchServices limit: macOS was measured delivering
+/// URLs past 262 000 characters, well beyond any payload this app builds.
+fn share_deep_link_payload<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+    const MAX_ENCODED_LENGTH: usize = 64 * 1024;
+
+    let trimmed = url.trim();
+    let prefix = format!("{scheme}://share/");
+    if trimmed.len() <= prefix.len() {
+        return None;
+    }
+    if !trimmed[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+        return None;
+    }
+
+    let encoded = trimmed[prefix.len()..].trim_end_matches('/');
+    if encoded.is_empty() || encoded.len() > MAX_ENCODED_LENGTH {
+        return None;
+    }
+    if !encoded
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(encoded)
+}
+
+/// The scheme declared in `tauri.conf.json` and in `share.config.json`.
+const APP_URL_SCHEME: &str = "raynard";
+
+#[tauri::command]
+fn subscribe_deep_links(
+    state: tauri::State<'_, PendingDeepLinks>,
+    on_url: Channel<String>,
+) -> Result<(), String> {
+    for url in state.subscribe(on_url.clone()) {
+        on_url
+            .send(url)
+            .map_err(|error| format!("Could not deliver a shared link: {error}"))?;
+    }
+    Ok(())
+}
+
+fn deliver_deep_links(state: &PendingDeepLinks, urls: Vec<String>) {
+    for url in urls {
+        if share_deep_link_payload(&url, APP_URL_SCHEME).is_none() {
+            continue;
+        }
+        if let Some(channel) = state.push(url.clone()) {
+            let _ = channel.send(url);
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct BookmarkStoreState {
+    cache: Arc<Mutex<Option<BookmarkCache>>>,
+}
+
+#[derive(Default)]
+struct BookmarkCache {
+    ordered: BTreeMap<String, StoredBookmark>,
+    locators: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -80,8 +191,17 @@ struct StoredChatMessage {
     model: Option<String>,
     status: Option<String>,
     error: Option<String>,
+    #[serde(rename = "modeStatus", default)]
+    mode_status: Option<bool>,
+    #[serde(rename = "modelFailure", default)]
+    model_failure: Option<Value>,
     #[serde(rename = "builderRun", default)]
     builder_run: Option<bool>,
+    /// This answer arrived through a share link rather than a live turn. Kept so
+    /// the "frozen snapshot" banner survives a reload, the same way builder runs
+    /// keep their transcript.
+    #[serde(rename = "sharedImport", default)]
+    shared_import: Option<bool>,
     #[serde(rename = "builderActivities", default)]
     builder_activities: Option<Value>,
     /// Result cards captured from storable tool calls during this turn.
@@ -97,6 +217,10 @@ struct StoredChatMessage {
     /// the prompt card survives navigation and restart. Names only, no values.
     #[serde(rename = "credentialRequest", default)]
     credential_request: Option<Value>,
+    /// An available catalog extension selected by the main agent. Persisted so
+    /// its inline Install action survives chat navigation and app restarts.
+    #[serde(rename = "extensionRecommendation", default)]
+    extension_recommendation: Option<Value>,
     /// Token counts for the turn that produced this message
     /// ({ input, output, cacheRead, cacheWrite, totalTokens, contextTokens,
     /// contextWindow }). Counts only — never text, ids, or headers.
@@ -121,7 +245,7 @@ struct ChatHistoryPayload {
     active_build_plugin: Option<Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChatHistoryRow {
     chat_id: String,
@@ -131,10 +255,37 @@ struct ChatHistoryRow {
     message_count: usize,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatHistoryIndex {
+    version: u32,
+    chats: Vec<ChatHistoryRow>,
+}
+
 #[derive(Serialize)]
 struct ChatHistoryList {
     folder: String,
     chats: Vec<ChatHistoryRow>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct StoredBookmark {
+    id: String,
+    message_key: String,
+    chat_id: String,
+    chat_name: String,
+    prompt: String,
+    answer: String,
+    message_timestamp: i64,
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BookmarkList {
+    bookmarks: Vec<StoredBookmark>,
+    total: usize,
 }
 
 #[derive(Deserialize)]
@@ -287,6 +438,45 @@ struct GeneratedPluginDetail {
     readme: String,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CatalogExtensionTool {
+    name: String,
+    description: String,
+    has_card: bool,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CatalogExtension {
+    slug: String,
+    id: String,
+    name: String,
+    description: String,
+    category: String,
+    icon: String,
+    author: String,
+    homepage: String,
+    version: String,
+    tools: Vec<CatalogExtensionTool>,
+    requires_key: bool,
+    installed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogExtensionList {
+    folder: String,
+    extensions: Vec<CatalogExtension>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogExtensionDetail {
+    extension: CatalogExtension,
+    detail: GeneratedPluginDetail,
+}
+
 #[tauri::command]
 fn load_llm_env_status(app: tauri::AppHandle) -> Result<LlmEnvStatus, String> {
     let config = resolve_model_config(Some(&app))?;
@@ -325,70 +515,146 @@ fn load_llm_env_status(app: tauri::AppHandle) -> Result<LlmEnvStatus, String> {
 }
 
 #[tauri::command]
-fn list_chat_history(app: tauri::AppHandle) -> Result<ChatHistoryList, String> {
-    let dir = chat_history_dir(&app)?;
-    ensure_dir(&dir)?;
-    let mut chats = Vec::new();
-
-    let entries =
-        fs::read_dir(&dir).map_err(|error| format!("Could not read chat history: {error}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("Could not read chat history entry: {error}"))?;
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let chat_id = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .map(normalize_chat_id)
-            .unwrap_or_else(|| format!("chat-{}", now_millis()));
-        let metadata = fs::metadata(&path).ok();
-        let fallback_time = metadata
-            .and_then(|meta| meta.modified().ok())
-            .and_then(system_time_to_iso)
-            .unwrap_or_else(now_iso);
-        let parsed = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<ChatHistoryPayload>(&raw).ok());
-        let row = if let Some(chat) = parsed {
-            ChatHistoryRow {
-                chat_id,
-                name: normalize_chat_name(&chat.name),
-                created_at: normalize_iso(&chat.created_at)
-                    .unwrap_or_else(|| fallback_time.clone()),
-                updated_at: normalize_iso(&chat.updated_at)
-                    .unwrap_or_else(|| fallback_time.clone()),
-                message_count: normalize_stored_messages(chat.messages).len(),
-            }
-        } else {
-            ChatHistoryRow {
-                chat_id,
-                name: "Untitled chat".to_string(),
-                created_at: fallback_time.clone(),
-                updated_at: fallback_time,
-                message_count: 0,
-            }
-        };
-        chats.push(row);
-    }
-
-    chats.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-
-    Ok(ChatHistoryList {
-        folder: dir.to_string_lossy().to_string(),
-        chats,
+async fn list_chat_history(app: tauri::AppHandle) -> Result<ChatHistoryList, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = chat_history_dir(&app)?;
+        let chats = load_or_rebuild_chat_history_index_in(&dir)?;
+        Ok(ChatHistoryList {
+            folder: dir.to_string_lossy().to_string(),
+            chats,
+        })
     })
+    .await
+    .map_err(|error| format!("Could not join chat history listing task: {error}"))?
 }
 
 #[tauri::command]
-fn read_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<ChatHistoryPayload, String> {
+async fn list_bookmarks(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<BookmarkList, String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = bookmarks_dir(&app)?;
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock bookmarks.".to_string())?;
+        if guard.is_none() {
+            *guard = Some(load_bookmark_cache_in(&root)?);
+        }
+        let cache = guard.as_ref().expect("bookmark cache initialized");
+        Ok(bookmark_page(
+            cache,
+            offset.unwrap_or(0),
+            limit.unwrap_or(50),
+        ))
+    })
+    .await
+    .map_err(|error| format!("Could not join bookmark listing task: {error}"))?
+}
+
+#[tauri::command]
+async fn list_chat_bookmarks(
+    app: tauri::AppHandle,
+    chat_id: String,
+) -> Result<Vec<StoredBookmark>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = bookmarks_dir(&app)?;
+        read_chat_bookmarks_in(&root, &chat_id)
+    })
+    .await
+    .map_err(|error| format!("Could not join chat bookmark listing task: {error}"))?
+}
+
+#[tauri::command]
+async fn save_bookmark(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    bookmark: StoredBookmark,
+) -> Result<StoredBookmark, String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bookmark = normalize_bookmark(bookmark)?;
+        if !chat_history_path(&app, &bookmark.chat_id)?.is_file() {
+            return Err("The source chat must be saved before it can be bookmarked.".to_string());
+        }
+        let root = bookmarks_dir(&app)?;
+        write_bookmark_in(&root, &bookmark)?;
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock bookmarks.".to_string())?;
+        if let Some(cache) = guard.as_mut() {
+            upsert_bookmark_cache(cache, bookmark.clone());
+        }
+        Ok(bookmark)
+    })
+    .await
+    .map_err(|error| format!("Could not join bookmark save task: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_bookmark(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    chat_id: String,
+    message_key: String,
+) -> Result<(), String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = bookmarks_dir(&app)?;
+        let safe_chat_id = normalize_chat_id(&chat_id);
+        let safe_message_key = normalize_bookmark_key(&message_key)?;
+        let path = bookmark_path_in(&root, &safe_chat_id, &safe_message_key);
+        if path.is_file() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("Could not remove bookmark: {error}"))?;
+        }
+        if let Some(parent) = path.parent() {
+            if parent.is_dir()
+                && fs::read_dir(parent)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(false)
+            {
+                fs::remove_dir(parent).ok();
+            }
+        }
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock bookmarks.".to_string())?;
+        if let Some(cache) = guard.as_mut() {
+            remove_bookmark_cache(cache, &safe_chat_id, &safe_message_key);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Could not join bookmark delete task: {error}"))?
+}
+
+#[tauri::command]
+async fn read_chat_history(
+    app: tauri::AppHandle,
+    chat_id: String,
+) -> Result<ChatHistoryPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || read_chat_history_sync(&app, &chat_id))
+        .await
+        .map_err(|error| format!("Could not join chat read task: {error}"))?
+}
+
+fn read_chat_history_sync(
+    app: &tauri::AppHandle,
+    chat_id: &str,
+) -> Result<ChatHistoryPayload, String> {
     let safe_chat_id = normalize_chat_id(&chat_id);
-    let path = chat_history_path(&app, &safe_chat_id)?;
+    let path = chat_history_path(app, &safe_chat_id)?;
     if !path.is_file() {
         return Err(format!("Chat not found: {safe_chat_id}"));
     }
-    let raw = fs::read_to_string(path).map_err(|error| format!("Could not read chat: {error}"))?;
+    let raw = fs::read_to_string(&path).map_err(|error| format!("Could not read chat: {error}"))?;
     let mut chat: ChatHistoryPayload =
         serde_json::from_str(&raw).map_err(|error| format!("Could not parse chat: {error}"))?;
     chat.chat_id = safe_chat_id;
@@ -396,33 +662,38 @@ fn read_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<ChatHisto
     chat.created_at = normalize_iso(&chat.created_at).unwrap_or_else(now_iso);
     chat.updated_at = normalize_iso(&chat.updated_at).unwrap_or_else(now_iso);
     chat.messages = normalize_stored_messages(chat.messages);
+    let artifact_dir = result_artifacts_dir(app)?;
+    if externalize_large_card_data_in(&artifact_dir, &chat.chat_id, &mut chat.messages)? {
+        write_chat_history_file(&path, &chat)?;
+    }
     Ok(chat)
 }
 
 #[tauri::command]
-fn save_chat_history(
+async fn save_chat_history(
     app: tauri::AppHandle,
     payload: ChatHistoryPayload,
 ) -> Result<ChatHistoryRow, String> {
+    tauri::async_runtime::spawn_blocking(move || save_chat_history_sync(&app, payload))
+        .await
+        .map_err(|error| format!("Could not join chat save task: {error}"))?
+}
+
+fn save_chat_history_sync(
+    app: &tauri::AppHandle,
+    payload: ChatHistoryPayload,
+) -> Result<ChatHistoryRow, String> {
     let safe_chat_id = normalize_chat_id(&payload.chat_id);
-    let path = chat_history_path(&app, &safe_chat_id)?;
+    let path = chat_history_path(app, &safe_chat_id)?;
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
 
-    let existing_created_at = if path.is_file() {
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<ChatHistoryPayload>(&raw).ok())
-            .and_then(|chat| normalize_iso(&chat.created_at))
-    } else {
-        None
-    };
-    let created_at = normalize_iso(&payload.created_at)
-        .or(existing_created_at)
-        .unwrap_or_else(now_iso);
+    let created_at = normalize_iso(&payload.created_at).unwrap_or_else(now_iso);
     let updated_at = normalize_iso(&payload.updated_at).unwrap_or_else(now_iso);
-    let messages = normalize_stored_messages(payload.messages);
+    let mut messages = normalize_stored_messages(payload.messages);
+    let artifact_dir = result_artifacts_dir(app)?;
+    externalize_large_card_data_in(&artifact_dir, &safe_chat_id, &mut messages)?;
     let normalized = ChatHistoryPayload {
         chat_id: safe_chat_id.clone(),
         name: normalize_chat_name(&payload.name),
@@ -431,18 +702,42 @@ fn save_chat_history(
         messages,
         active_build_plugin: payload.active_build_plugin,
     };
-    let raw = serde_json::to_string_pretty(&normalized)
-        .map_err(|error| format!("Could not serialize chat: {error}"))?;
-    fs::write(&path, format!("{raw}\n"))
-        .map_err(|error| format!("Could not save chat: {error}"))?;
+    write_chat_history_file(&path, &normalized)?;
 
-    Ok(ChatHistoryRow {
+    let row = ChatHistoryRow {
         chat_id: normalized.chat_id,
         name: normalized.name,
         created_at: normalized.created_at,
         updated_at: normalized.updated_at,
         message_count: normalized.messages.len(),
+    };
+    let history_dir = chat_history_dir(app)?;
+    upsert_chat_history_index_in(&history_dir, row.clone())?;
+    Ok(row)
+}
+
+fn write_chat_history_file(path: &Path, chat: &ChatHistoryPayload) -> Result<(), String> {
+    let raw =
+        serde_json::to_vec(chat).map_err(|error| format!("Could not serialize chat: {error}"))?;
+    fs::write(path, raw).map_err(|error| format!("Could not save chat: {error}"))
+}
+
+#[tauri::command]
+async fn read_result_artifact(
+    app: tauri::AppHandle,
+    chat_id: String,
+    artifact_id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = result_artifacts_dir(&app)?;
+        let path = result_artifact_path_in(&root, &chat_id, &artifact_id)?;
+        let raw = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read result artifact: {error}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|error| format!("Could not parse result artifact: {error}"))
     })
+    .await
+    .map_err(|error| format!("Could not join result artifact task: {error}"))?
 }
 
 #[tauri::command]
@@ -536,13 +831,39 @@ fn open_url_in_browser(url: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_chat_history(app: tauri::AppHandle, chat_id: String) -> Result<(), String> {
-    let safe_chat_id = normalize_chat_id(&chat_id);
-    let path = chat_history_path(&app, &safe_chat_id)?;
-    if path.is_file() {
-        fs::remove_file(path).map_err(|error| format!("Could not delete chat: {error}"))?;
-    }
-    Ok(())
+async fn delete_chat_history(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    chat_id: String,
+) -> Result<(), String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let safe_chat_id = normalize_chat_id(&chat_id);
+        let path = chat_history_path(&app, &safe_chat_id)?;
+        if path.is_file() {
+            fs::remove_file(path).map_err(|error| format!("Could not delete chat: {error}"))?;
+        }
+        let artifact_dir = result_artifacts_dir(&app)?.join(&safe_chat_id);
+        if artifact_dir.is_dir() {
+            fs::remove_dir_all(artifact_dir)
+                .map_err(|error| format!("Could not delete chat result artifacts: {error}"))?;
+        }
+        let bookmark_dir = bookmarks_dir(&app)?.join(&safe_chat_id);
+        if bookmark_dir.is_dir() {
+            fs::remove_dir_all(bookmark_dir)
+                .map_err(|error| format!("Could not delete chat bookmarks: {error}"))?;
+        }
+        if let Ok(mut guard) = store.cache.lock() {
+            if let Some(cache) = guard.as_mut() {
+                remove_chat_bookmarks_from_cache(cache, &safe_chat_id);
+            }
+        }
+        let history_dir = chat_history_dir(&app)?;
+        remove_chat_history_index_row_in(&history_dir, &safe_chat_id)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Could not join chat delete task: {error}"))?
 }
 
 #[tauri::command]
@@ -621,35 +942,161 @@ fn list_generated_plugins(app: tauri::AppHandle) -> Result<GeneratedPluginList, 
 }
 
 #[tauri::command]
+fn list_catalog_extensions(app: tauri::AppHandle) -> Result<CatalogExtensionList, String> {
+    let catalog_dir = catalog_extensions_dir(&app)?;
+    let installed_dir = generated_plugins_dir(&app)?;
+    ensure_dir(&installed_dir)?;
+    let extensions = read_catalog_extensions(&catalog_dir, &installed_dir)?;
+    Ok(CatalogExtensionList {
+        folder: catalog_dir.to_string_lossy().to_string(),
+        extensions,
+    })
+}
+
+#[tauri::command]
+fn install_catalog_extension(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<GeneratedPlugin, String> {
+    let catalog_dir = catalog_extensions_dir(&app)?;
+    let installed_dir = generated_plugins_dir(&app)?;
+    ensure_dir(&installed_dir)?;
+    ensure_shared_plugin_sdk(&installed_dir)?;
+
+    // Resolve through the static catalog first so a caller cannot install an
+    // unlisted directory even if it can guess a path under the resource root.
+    let listed = read_catalog_extensions(&catalog_dir, &installed_dir)?;
+    if !listed.iter().any(|extension| extension.slug == slug) {
+        return Err(format!("Catalog extension not found: {}", slug.trim()));
+    }
+
+    let target_dir = install_catalog_extension_from(&catalog_dir, &installed_dir, &slug)?;
+    let manifest_path = target_dir.join("plugin.json");
+    let mut plugin = read_generated_plugin_manifest(&target_dir, &manifest_path)
+        .ok_or_else(|| "The installed extension manifest could not be read.".to_string())?;
+    enrich_generated_plugin_tools_from_runtime(&mut plugin, &target_dir);
+    annotate_plugin_credentials(&mut plugin);
+    Ok(plugin)
+}
+
+#[tauri::command]
+fn read_catalog_extension(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<CatalogExtensionDetail, String> {
+    let catalog_dir = catalog_extensions_dir(&app)?;
+    let installed_dir = generated_plugins_dir(&app)?;
+    let mut result = read_catalog_extension_detail_from(&catalog_dir, &installed_dir, &slug)?;
+    // Runtime discovery supplies the same schemas and card previews shown on
+    // an installed extension's page, without executing any API request. Do not
+    // use the installed-plugin cache here: bundled resources are read-only.
+    if let Ok(tools) = read_generated_plugin_runtime_tools(&catalog_dir.join(&slug)) {
+        if !tools.is_empty() {
+            result.detail.plugin.tools = tools;
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 fn read_generated_plugin(
     app: tauri::AppHandle,
     plugin_id: String,
 ) -> Result<GeneratedPluginDetail, String> {
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
-    let manifest_path = plugin_dir.join("plugin.json");
-    let raw_manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
-    let mut manifest_json: Value = serde_json::from_str(&raw_manifest_text)
-        .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
-    if let Some(manifest) = manifest_json.as_object_mut() {
-        manifest.remove("samplePrompts");
-    }
-    let manifest_text =
-        serde_json::to_string_pretty(&manifest_json).unwrap_or_else(|_| raw_manifest_text.clone());
-    let mut plugin = read_generated_plugin_manifest(&plugin_dir, &manifest_path)
-        .ok_or_else(|| "Could not read generated plugin metadata.".to_string())?;
-    enrich_generated_plugin_tools_from_runtime(&mut plugin, &plugin_dir);
-    annotate_plugin_credentials(&mut plugin);
-    let code = fs::read_to_string(plugin_dir.join("tools.ts")).unwrap_or_default();
-    let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap_or_default();
+    let mut detail = read_plugin_detail_files(&plugin_dir)?;
+    enrich_generated_plugin_tools_from_runtime(&mut detail.plugin, &plugin_dir);
+    annotate_plugin_credentials(&mut detail.plugin);
+    Ok(detail)
+}
 
-    Ok(GeneratedPluginDetail {
-        plugin,
-        manifest_json,
-        manifest_text,
-        code,
-        readme,
-    })
+fn bounded_process_output(output: &std::process::Output) -> String {
+    const LIMIT: usize = 4_000;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let trimmed = combined.trim();
+    if trimmed.len() <= LIMIT {
+        return trimmed.to_string();
+    }
+    let mut start = trimmed.len() - LIMIT;
+    while !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &trimmed[start..])
+}
+
+#[tauri::command]
+fn prepare_extension_contribution(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    metadata: ContributionMetadata,
+) -> Result<PreparedExtensionContribution, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let test_files = contribution_test_files(&plugin_dir)?;
+    let output = Command::new(resolve_node_command())
+        .arg("--test")
+        .args(&test_files)
+        .current_dir(&plugin_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("Could not run extension tests: {error}"))?;
+    if !output.status.success() {
+        let details = bounded_process_output(&output);
+        return Err(if details.is_empty() {
+            format!("Extension tests failed with {}.", output.status)
+        } else {
+            format!("Extension tests failed.\n\n{details}")
+        });
+    }
+
+    let tools = read_generated_plugin_runtime_tools(&plugin_dir)?
+        .into_iter()
+        .map(|tool| ContributionTool {
+            name: tool.name,
+            description: tool.description,
+        })
+        .collect();
+    let output_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?
+        .join("extension-contributions");
+    prepare_extension_contribution_in(&plugin_dir, &output_root, metadata, tools)
+}
+
+#[tauri::command]
+fn open_extension_contribution_folder(app: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?
+        .join("extension-contributions");
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve contribution directory: {error}"))?;
+    let folder = PathBuf::from(folder.trim())
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve contribution folder: {error}"))?;
+    if folder == root || !folder.starts_with(&root) || !folder.is_dir() {
+        return Err("Only a prepared contribution folder can be opened.".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(&folder)
+        .spawn()
+        .map_err(|error| format!("Could not open contribution folder: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1807,6 +2254,9 @@ struct MainAgentReply {
     provider: String,
     model: String,
     build_request: Option<Value>,
+    /// Structured terminal outcome such as an available-extension
+    /// recommendation. Opaque JSON decoded defensively by the renderer.
+    result: Option<Value>,
     /// The turn's summed token usage. Delivered on the reply rather than only on
     /// the stream channel because `startAgentTurn` ignores channel events that
     /// land after the promise settles, and this has to reach the saved message.
@@ -1981,6 +2431,7 @@ async fn run_main_agent_stream(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, StreamCancelState>,
     stream_id: String,
+    chat_id: Option<String>,
     on_event: Channel<MainAgentStreamEvent>,
     messages: Vec<ChatMessage>,
     mode: String,
@@ -2019,6 +2470,11 @@ async fn run_main_agent_stream(
         attach_plugin_credential_values(&mut serialized, &plugin);
         plugins.push(serialized);
     }
+    let catalog_dir = catalog_extensions_dir(&app)?;
+    let available_extensions = read_catalog_extensions(&catalog_dir, &plugin_root)?
+        .into_iter()
+        .filter(|extension| !extension.installed)
+        .collect::<Vec<_>>();
     let sidecar_request = json!({
         "messages": messages
             .iter()
@@ -2030,7 +2486,10 @@ async fn run_main_agent_stream(
         "model": config.model,
         "apiKey": config.api_key,
         "pluginRunnerPath": plugin_runner_path.to_string_lossy().to_string(),
-        "plugins": plugins
+        "plugins": plugins,
+        // Kept out of the system prompt. The sidecar exposes this catalog only
+        // after the model calls its on-demand missing-capability search tool.
+        "availableExtensions": available_extensions
     });
 
     let mut child = Command::new(resolve_node_command())
@@ -2062,7 +2521,15 @@ async fn run_main_agent_stream(
     let reader = BufReader::new(stdout);
     let mut answer = String::new();
     let mut build_request = None;
+    let mut turn_result = None;
     let mut turn_usage: Option<Value> = None;
+    let artifact_root = result_artifacts_dir(&app)?;
+    let artifact_chat_id = chat_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_chat_id)
+        .unwrap_or_else(|| normalize_chat_id(&stream_id));
+    let mut result_artifact_index = 0usize;
 
     for line in reader.lines() {
         if is_stream_canceled(&cancel_state, &stream_id) {
@@ -2093,15 +2560,36 @@ async fn run_main_agent_stream(
                 provider: config.provider,
                 model: config.model,
                 build_request,
+                result: turn_result,
                 usage: turn_usage,
             });
         }
 
         let line = line.map_err(|error| format!("Main agent stream failed: {error}"))?;
-        let Ok(payload) = serde_json::from_str::<Value>(&line) else {
+        let Ok(mut payload) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if event_type == "tool_result" {
+            if let Some(result) = payload.get_mut("result") {
+                let artifact_id =
+                    format!("{}-{result_artifact_index}", normalize_chat_id(&stream_id));
+                if externalize_result_data_in(
+                    &artifact_root,
+                    &artifact_chat_id,
+                    &artifact_id,
+                    result,
+                )?
+                .is_some()
+                {
+                    result_artifact_index += 1;
+                }
+            }
+        }
         let delta = payload
             .get("delta")
             .and_then(Value::as_str)
@@ -2120,6 +2608,9 @@ async fn run_main_agent_stream(
         }
         if event_type == "build_request" {
             build_request = payload.get("buildRequest").cloned();
+        }
+        if event_type == "done" {
+            turn_result = payload.get("result").cloned();
         }
         // Both terminal events carry the turn's summed usage; a failed turn was
         // still billed for what it burned before it stopped. Recorded here
@@ -2162,7 +2653,7 @@ async fn run_main_agent_stream(
 
         let _ = on_event.send(MainAgentStreamEvent {
             stream_id: stream_id.clone(),
-            event_type: event_type.to_string(),
+            event_type: event_type.clone(),
             delta,
             text: payload
                 .get("text")
@@ -2223,6 +2714,7 @@ async fn run_main_agent_stream(
             provider: config.provider,
             model: config.model,
             build_request,
+            result: turn_result,
             usage: turn_usage,
         });
     }
@@ -2235,6 +2727,7 @@ async fn run_main_agent_stream(
         provider: config.provider,
         model: config.model,
         build_request,
+        result: turn_result,
         usage: turn_usage,
     })
 }
@@ -2799,6 +3292,290 @@ fn chat_history_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("chat-history"))
 }
 
+fn chat_history_index_path_in(dir: &Path) -> PathBuf {
+    dir.join("index.json")
+}
+
+fn sort_chat_history_rows(chats: &mut [ChatHistoryRow]) {
+    chats.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+}
+
+fn write_chat_history_index_in(dir: &Path, chats: &[ChatHistoryRow]) -> Result<(), String> {
+    ensure_dir(dir)?;
+    let payload = ChatHistoryIndex {
+        version: CHAT_HISTORY_INDEX_VERSION,
+        chats: chats.to_vec(),
+    };
+    let raw = serde_json::to_vec(&payload)
+        .map_err(|error| format!("Could not serialize chat history index: {error}"))?;
+    fs::write(chat_history_index_path_in(dir), raw)
+        .map_err(|error| format!("Could not save chat history index: {error}"))
+}
+
+fn read_chat_history_index_in(dir: &Path) -> Option<Vec<ChatHistoryRow>> {
+    let raw = fs::read_to_string(chat_history_index_path_in(dir)).ok()?;
+    let mut index = serde_json::from_str::<ChatHistoryIndex>(&raw).ok()?;
+    if index.version != CHAT_HISTORY_INDEX_VERSION {
+        return None;
+    }
+    sort_chat_history_rows(&mut index.chats);
+    Some(index.chats)
+}
+
+fn rebuild_chat_history_index_in(dir: &Path) -> Result<Vec<ChatHistoryRow>, String> {
+    ensure_dir(dir)?;
+    let mut chats = Vec::new();
+    let entries =
+        fs::read_dir(dir).map_err(|error| format!("Could not read chat history: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Could not read chat history entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_file()
+            || path.file_name().and_then(|value| value.to_str()) == Some("index.json")
+            || path.extension().and_then(|value| value.to_str()) != Some("json")
+        {
+            continue;
+        }
+        let chat_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(normalize_chat_id)
+            .unwrap_or_else(|| format!("chat-{}", now_millis()));
+        let metadata = fs::metadata(&path).ok();
+        let fallback_time = metadata
+            .and_then(|meta| meta.modified().ok())
+            .and_then(system_time_to_iso)
+            .unwrap_or_else(now_iso);
+        let parsed = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<ChatHistoryPayload>(&raw).ok());
+        let row = if let Some(chat) = parsed {
+            ChatHistoryRow {
+                chat_id,
+                name: normalize_chat_name(&chat.name),
+                created_at: normalize_iso(&chat.created_at)
+                    .unwrap_or_else(|| fallback_time.clone()),
+                updated_at: normalize_iso(&chat.updated_at)
+                    .unwrap_or_else(|| fallback_time.clone()),
+                message_count: normalize_stored_messages(chat.messages).len(),
+            }
+        } else {
+            ChatHistoryRow {
+                chat_id,
+                name: "Untitled chat".to_string(),
+                created_at: fallback_time.clone(),
+                updated_at: fallback_time,
+                message_count: 0,
+            }
+        };
+        chats.push(row);
+    }
+    sort_chat_history_rows(&mut chats);
+    write_chat_history_index_in(dir, &chats)?;
+    Ok(chats)
+}
+
+fn load_or_rebuild_chat_history_index_unlocked(dir: &Path) -> Result<Vec<ChatHistoryRow>, String> {
+    if let Some(chats) = read_chat_history_index_in(dir) {
+        return Ok(chats);
+    }
+    rebuild_chat_history_index_in(dir)
+}
+
+fn load_or_rebuild_chat_history_index_in(dir: &Path) -> Result<Vec<ChatHistoryRow>, String> {
+    let _guard = CHAT_HISTORY_INDEX_LOCK
+        .lock()
+        .map_err(|_| "Could not lock chat history index.".to_string())?;
+    load_or_rebuild_chat_history_index_unlocked(dir)
+}
+
+fn upsert_chat_history_index_in(dir: &Path, row: ChatHistoryRow) -> Result<(), String> {
+    let _guard = CHAT_HISTORY_INDEX_LOCK
+        .lock()
+        .map_err(|_| "Could not lock chat history index.".to_string())?;
+    let mut chats = load_or_rebuild_chat_history_index_unlocked(dir)?;
+    if let Some(existing) = chats.iter_mut().find(|chat| chat.chat_id == row.chat_id) {
+        *existing = row;
+    } else {
+        chats.push(row);
+    }
+    sort_chat_history_rows(&mut chats);
+    write_chat_history_index_in(dir, &chats)
+}
+
+fn remove_chat_history_index_row_in(dir: &Path, chat_id: &str) -> Result<(), String> {
+    let _guard = CHAT_HISTORY_INDEX_LOCK
+        .lock()
+        .map_err(|_| "Could not lock chat history index.".to_string())?;
+    let mut chats = load_or_rebuild_chat_history_index_unlocked(dir)?;
+    let safe_chat_id = normalize_chat_id(chat_id);
+    chats.retain(|chat| chat.chat_id != safe_chat_id);
+    write_chat_history_index_in(dir, &chats)
+}
+
+fn bookmarks_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("bookmarks"))
+}
+
+fn normalize_bookmark_key(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty()
+        || value.len() > 160
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Bookmark message key is invalid.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_bookmark(mut bookmark: StoredBookmark) -> Result<StoredBookmark, String> {
+    if bookmark.chat_id.trim().is_empty() || bookmark.message_timestamp <= 0 {
+        return Err("Bookmark source identity is required.".to_string());
+    }
+    bookmark.chat_id = normalize_chat_id(&bookmark.chat_id);
+    bookmark.message_key = normalize_bookmark_key(&bookmark.message_key)?;
+    bookmark.id = format!("{}:{}", bookmark.chat_id, bookmark.message_key);
+    bookmark.chat_name = normalize_chat_name(&bookmark.chat_name);
+    bookmark.prompt = bookmark.prompt.trim().to_string();
+    bookmark.answer = bookmark.answer.trim().to_string();
+    bookmark.created_at = if bookmark.created_at > 0 {
+        bookmark.created_at
+    } else {
+        now_millis()
+    };
+    if bookmark.prompt.is_empty() || bookmark.answer.is_empty() {
+        return Err("A bookmark requires both a prompt and an answer.".to_string());
+    }
+    Ok(bookmark)
+}
+
+fn bookmark_locator(chat_id: &str, message_key: &str) -> String {
+    format!("{chat_id}:{message_key}")
+}
+
+fn bookmark_sort_key(bookmark: &StoredBookmark) -> String {
+    let reverse_time = u64::MAX - bookmark.created_at.max(0) as u64;
+    format!("{reverse_time:020}-{}", bookmark.id)
+}
+
+fn bookmark_path_in(root: &Path, chat_id: &str, message_key: &str) -> PathBuf {
+    root.join(chat_id).join(format!("{message_key}.json"))
+}
+
+fn write_bookmark_in(root: &Path, bookmark: &StoredBookmark) -> Result<(), String> {
+    let chat_dir = root.join(&bookmark.chat_id);
+    ensure_dir(&chat_dir)?;
+    let path = bookmark_path_in(root, &bookmark.chat_id, &bookmark.message_key);
+    let raw = serde_json::to_vec(bookmark)
+        .map_err(|error| format!("Could not serialize bookmark: {error}"))?;
+    fs::write(path, raw).map_err(|error| format!("Could not save bookmark: {error}"))
+}
+
+fn read_chat_bookmarks_in(root: &Path, chat_id: &str) -> Result<Vec<StoredBookmark>, String> {
+    if chat_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let safe_chat_id = normalize_chat_id(chat_id);
+    let dir = root.join(&safe_chat_id);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut bookmarks = Vec::new();
+    let entries =
+        fs::read_dir(&dir).map_err(|error| format!("Could not read chat bookmarks: {error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(bookmark) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<StoredBookmark>(&raw).ok())
+            .and_then(|bookmark| normalize_bookmark(bookmark).ok())
+        else {
+            continue;
+        };
+        if bookmark.chat_id == safe_chat_id {
+            bookmarks.push(bookmark);
+        }
+    }
+    bookmarks.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(bookmarks)
+}
+
+fn load_bookmark_cache_in(root: &Path) -> Result<BookmarkCache, String> {
+    ensure_dir(root)?;
+    let mut cache = BookmarkCache::default();
+    let chat_dirs =
+        fs::read_dir(root).map_err(|error| format!("Could not read bookmarks: {error}"))?;
+    for chat_dir in chat_dirs.flatten() {
+        if !chat_dir.path().is_dir() {
+            continue;
+        }
+        let chat_id = chat_dir.file_name().to_string_lossy().to_string();
+        for bookmark in read_chat_bookmarks_in(root, &chat_id)? {
+            upsert_bookmark_cache(&mut cache, bookmark);
+        }
+    }
+    Ok(cache)
+}
+
+fn upsert_bookmark_cache(cache: &mut BookmarkCache, bookmark: StoredBookmark) {
+    let locator = bookmark_locator(&bookmark.chat_id, &bookmark.message_key);
+    if let Some(previous_sort_key) = cache.locators.remove(&locator) {
+        cache.ordered.remove(&previous_sort_key);
+    }
+    let sort_key = bookmark_sort_key(&bookmark);
+    cache.locators.insert(locator, sort_key.clone());
+    cache.ordered.insert(sort_key, bookmark);
+}
+
+fn remove_bookmark_cache(cache: &mut BookmarkCache, chat_id: &str, message_key: &str) {
+    let locator = bookmark_locator(chat_id, message_key);
+    if let Some(sort_key) = cache.locators.remove(&locator) {
+        cache.ordered.remove(&sort_key);
+    }
+}
+
+fn remove_chat_bookmarks_from_cache(cache: &mut BookmarkCache, chat_id: &str) {
+    let locators = cache
+        .locators
+        .keys()
+        .filter(|locator| locator.starts_with(&format!("{chat_id}:")))
+        .cloned()
+        .collect::<Vec<_>>();
+    for locator in locators {
+        if let Some(sort_key) = cache.locators.remove(&locator) {
+            cache.ordered.remove(&sort_key);
+        }
+    }
+}
+
+fn bookmark_page(cache: &BookmarkCache, offset: usize, limit: usize) -> BookmarkList {
+    let limit = limit.clamp(1, 100);
+    BookmarkList {
+        bookmarks: cache
+            .ordered
+            .values()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect(),
+        total: cache.ordered.len(),
+    }
+}
+
 fn chat_history_path(app: &tauri::AppHandle, chat_id: &str) -> Result<PathBuf, String> {
     let dir = chat_history_dir(app)?;
     let safe_chat_id = normalize_chat_id(chat_id);
@@ -2823,12 +3600,354 @@ fn agent_turn_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("agent-turn-logs"))
 }
 
+fn result_artifacts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("result-artifacts"))
+}
+
+fn result_artifact_path_in(
+    root: &Path,
+    chat_id: &str,
+    artifact_id: &str,
+) -> Result<PathBuf, String> {
+    let safe_chat_id = normalize_chat_id(chat_id);
+    let safe_artifact_id = normalize_chat_id(artifact_id);
+    if chat_id.trim().is_empty() || artifact_id.trim().is_empty() {
+        return Err("Result artifact identity is required.".to_string());
+    }
+    Ok(root
+        .join(safe_chat_id)
+        .join(format!("{safe_artifact_id}.json")))
+}
+
+fn write_result_artifact_in(
+    root: &Path,
+    chat_id: &str,
+    artifact_id: &str,
+    raw: &[u8],
+) -> Result<Value, String> {
+    let safe_chat_id = normalize_chat_id(chat_id);
+    let safe_artifact_id = normalize_chat_id(artifact_id);
+    let path = result_artifact_path_in(root, &safe_chat_id, &safe_artifact_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Result artifact path is invalid.".to_string())?;
+    ensure_dir(parent)?;
+    fs::write(path, raw).map_err(|error| format!("Could not save result artifact: {error}"))?;
+    Ok(json!({
+        "chatId": safe_chat_id,
+        "artifactId": safe_artifact_id,
+        "byteCount": raw.len()
+    }))
+}
+
+fn externalize_result_data_in(
+    root: &Path,
+    chat_id: &str,
+    artifact_id: &str,
+    result: &mut Value,
+) -> Result<Option<Value>, String> {
+    let Some(result_object) = result.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(data) = result_object.get("data") else {
+        return Ok(None);
+    };
+    let raw = serde_json::to_vec(data)
+        .map_err(|error| format!("Could not serialize result artifact: {error}"))?;
+    if raw.len() <= INLINE_RESULT_DATA_LIMIT_BYTES {
+        return Ok(None);
+    }
+    let reference = write_result_artifact_in(root, chat_id, artifact_id, &raw)?;
+    result_object.insert("data".to_string(), json!({}));
+    result_object.insert("dataArtifact".to_string(), reference.clone());
+    Ok(Some(reference))
+}
+
+fn externalize_large_card_data_in(
+    root: &Path,
+    chat_id: &str,
+    messages: &mut [StoredChatMessage],
+) -> Result<bool, String> {
+    let mut changed = false;
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        let Some(cards) = message.cards.as_mut().and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for (card_index, card) in cards.iter_mut().enumerate() {
+            let Some(card_object) = card.as_object_mut() else {
+                continue;
+            };
+            if card_object.get("artifact").is_some() {
+                continue;
+            }
+            let Some(data) = card_object.get("data") else {
+                continue;
+            };
+            let raw = serde_json::to_vec(data)
+                .map_err(|error| format!("Could not serialize card artifact: {error}"))?;
+            if raw.len() <= INLINE_RESULT_DATA_LIMIT_BYTES {
+                continue;
+            }
+            let artifact_id = format!("message-{message_index}-card-{card_index}");
+            let reference = write_result_artifact_in(root, chat_id, &artifact_id, &raw)?;
+            card_object.insert("data".to_string(), json!({}));
+            card_object.insert("artifact".to_string(), reference);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 fn generated_plugins_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_local_data_dir()
         .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
     Ok(dir.join("generated-plugins"))
+}
+
+fn catalog_extensions_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not resolve app resource directory: {error}"))?
+        .join("extensions");
+    if packaged.is_dir() {
+        return Ok(packaged);
+    }
+
+    // `tauri dev` does not copy bundle resources before starting the app.
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions");
+    if development.is_dir() {
+        return Ok(development);
+    }
+    Err("Could not find the bundled extension catalog.".to_string())
+}
+
+fn is_catalog_extension_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 64
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && !slug.contains("--")
+        && slug.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+fn catalog_manifest_string(manifest: &Value, field: &str, slug: &str) -> Result<String, String> {
+    manifest
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("Catalog extension {slug} is missing {field}."))
+}
+
+fn read_plugin_detail_files(plugin_dir: &Path) -> Result<GeneratedPluginDetail, String> {
+    let manifest_path = plugin_dir.join("plugin.json");
+    let raw_manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
+    let mut manifest_json: Value = serde_json::from_str(&raw_manifest_text)
+        .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
+    if let Some(manifest) = manifest_json.as_object_mut() {
+        manifest.remove("samplePrompts");
+    }
+    let manifest_text =
+        serde_json::to_string_pretty(&manifest_json).unwrap_or_else(|_| raw_manifest_text.clone());
+    let plugin = read_generated_plugin_manifest(plugin_dir, &manifest_path)
+        .ok_or_else(|| "Could not read extension metadata.".to_string())?;
+    let code = fs::read_to_string(plugin_dir.join("tools.ts")).unwrap_or_default();
+    let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap_or_default();
+    Ok(GeneratedPluginDetail {
+        plugin,
+        manifest_json,
+        manifest_text,
+        code,
+        readme,
+    })
+}
+
+fn read_catalog_extension_detail_from(
+    catalog_dir: &Path,
+    installed_dir: &Path,
+    slug: &str,
+) -> Result<CatalogExtensionDetail, String> {
+    let slug = slug.trim();
+    if !is_catalog_extension_slug(slug) {
+        return Err("Invalid catalog extension name.".to_string());
+    }
+    let extension = read_catalog_extensions(catalog_dir, installed_dir)?
+        .into_iter()
+        .find(|extension| extension.slug == slug)
+        .ok_or_else(|| format!("Catalog extension not found: {slug}"))?;
+    if extension.installed {
+        return Err(format!("{} is already installed.", extension.name));
+    }
+    let detail = read_plugin_detail_files(&catalog_dir.join(slug))?;
+    Ok(CatalogExtensionDetail { extension, detail })
+}
+
+fn read_catalog_extensions(
+    catalog_dir: &Path,
+    installed_dir: &Path,
+) -> Result<Vec<CatalogExtension>, String> {
+    let entries = fs::read_dir(catalog_dir)
+        .map_err(|error| format!("Could not read bundled extension catalog: {error}"))?;
+    let mut extensions = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Could not read catalog entry: {error}"))?;
+        let extension_dir = entry.path();
+        if !extension_dir.is_dir() || !extension_dir.join("plugin.json").is_file() {
+            continue;
+        }
+        let slug = extension_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !is_catalog_extension_slug(&slug) {
+            return Err(format!(
+                "Catalog extension has an invalid directory name: {slug}"
+            ));
+        }
+        let raw = fs::read_to_string(extension_dir.join("plugin.json"))
+            .map_err(|error| format!("Could not read catalog manifest for {slug}: {error}"))?;
+        let manifest: Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("Could not parse catalog manifest for {slug}: {error}"))?;
+        if manifest.get("sdkVersion").and_then(Value::as_u64) != Some(1) {
+            return Err(format!(
+                "Catalog extension {slug} does not use SDK version 1."
+            ));
+        }
+        let tools = manifest
+            .get("contributes")
+            .and_then(|value| value.get("tools"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("Catalog extension {slug} is missing contributes.tools."))?
+            .iter()
+            .map(|tool| {
+                Ok(CatalogExtensionTool {
+                    name: catalog_manifest_string(tool, "name", &slug)?,
+                    description: catalog_manifest_string(tool, "description", &slug)?,
+                    has_card: tool
+                        .get("hasCard")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if tools.is_empty() || tools.iter().any(|tool| !tool.has_card) {
+            return Err(format!(
+                "Catalog extension {slug} must declare at least one card-backed tool."
+            ));
+        }
+        extensions.push(CatalogExtension {
+            slug: slug.clone(),
+            id: catalog_manifest_string(&manifest, "id", &slug)?,
+            name: catalog_manifest_string(&manifest, "name", &slug)?,
+            description: catalog_manifest_string(&manifest, "description", &slug)?,
+            category: catalog_manifest_string(&manifest, "category", &slug)?,
+            icon: manifest
+                .get("icon")
+                .and_then(Value::as_str)
+                .unwrap_or("plug")
+                .trim()
+                .to_string(),
+            author: manifest
+                .get("author")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            homepage: manifest
+                .get("homepage")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            version: catalog_manifest_string(&manifest, "version", &slug)?,
+            requires_key: !read_plugin_credentials(&manifest).is_empty(),
+            installed: installed_dir.join(&slug).is_dir(),
+            tools,
+        });
+    }
+    extensions.sort_by(|left, right| {
+        left.category
+            .to_lowercase()
+            .cmp(&right.category.to_lowercase())
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(extensions)
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    ensure_dir(target)?;
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("Could not read extension directory: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("Could not read extension file: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect extension file: {error}"))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "Bundled extensions cannot contain symbolic links: {}",
+                entry.path().display()
+            ));
+        }
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &destination).map_err(|error| {
+                format!(
+                    "Could not copy bundled extension file {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn install_catalog_extension_from(
+    catalog_dir: &Path,
+    installed_dir: &Path,
+    raw_slug: &str,
+) -> Result<PathBuf, String> {
+    let slug = raw_slug.trim();
+    if !is_catalog_extension_slug(slug) {
+        return Err("Catalog extension id is invalid.".to_string());
+    }
+    let source = catalog_dir.join(slug);
+    if !source.is_dir() || !source.join("plugin.json").is_file() {
+        return Err(format!("Catalog extension not found: {slug}"));
+    }
+    let target = installed_dir.join(slug);
+    if target.exists() {
+        return Err(format!("Extension is already installed: {slug}"));
+    }
+    let temporary = installed_dir.join(format!(".tmp-catalog-{slug}-{}", now_millis()));
+    if temporary.exists() {
+        return Err("Could not allocate a temporary extension directory.".to_string());
+    }
+    let result = (|| -> Result<(), String> {
+        copy_dir_recursive(&source, &temporary)?;
+        fs::rename(&temporary, &target)
+            .map_err(|error| format!("Could not finish installing {slug}: {error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+    Ok(target)
 }
 
 fn plugin_data_dir(plugin_root: &Path, plugin_dir: &Path) -> Result<PathBuf, String> {
@@ -3573,11 +4692,15 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                     .error
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                mode_status: message.mode_status,
+                model_failure: message.model_failure,
                 builder_run: message.builder_run,
+                shared_import: message.shared_import,
                 builder_activities: message.builder_activities,
                 cards: message.cards,
                 sources: message.sources,
                 credential_request: message.credential_request,
+                extension_recommendation: message.extension_recommendation,
                 usage: message.usage,
             })
         })
@@ -4753,22 +5876,133 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        account_id_from_access_token, build_plugin_tools_stub, canonical_provider_id,
-        clear_plugin_api_cache, ensure_shared_plugin_sdk, external_url_target, format_quota_window,
-        generated_plugin_source_mtime_millis, load_generated_plugin_runtime_tools_cached,
-        merge_turn_usage, next_available_plugin_slug, normalize_plugin_slug,
-        normalize_stored_messages, now_millis, oauth_needs_refresh, packaged_node_path_for,
-        packaged_runtime_scripts_dir_for, parse_chatgpt_usage, parse_moonshot_balance,
-        parse_stored_credential, plugin_credential_account, provider_preset,
+        account_id_from_access_token, bookmark_page, build_plugin_tools_stub,
+        canonical_provider_id, clear_plugin_api_cache, ensure_shared_plugin_sdk,
+        external_url_target, externalize_large_card_data_in, externalize_result_data_in,
+        format_quota_window, generated_plugin_source_mtime_millis, install_catalog_extension_from,
+        load_bookmark_cache_in, load_generated_plugin_runtime_tools_cached,
+        load_or_rebuild_chat_history_index_in, merge_turn_usage, next_available_plugin_slug,
+        normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
+        packaged_node_path_for, packaged_runtime_scripts_dir_for, parse_chatgpt_usage,
+        parse_moonshot_balance, parse_stored_credential, plugin_credential_account,
+        provider_preset, read_catalog_extension_detail_from, read_catalog_extensions,
         read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
-        save_plugin_cache_settings, AuthMethod, BuilderStreamEvent, GeneratedPluginTool,
+        remove_chat_history_index_row_in, save_plugin_cache_settings, share_deep_link_payload,
+        upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in, AuthMethod,
+        BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
         PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
-        StoredChatMessage, StoredCredential, StreamEvent, UsageTotals, KEYCHAIN_CACHE,
-        OAUTH_REFRESH_MARGIN_MS,
+        StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
+        APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    /// A channel that records what it was sent, so buffering can be observed.
+    fn recording_channel() -> (tauri::ipc::Channel<String>, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let channel = tauri::ipc::Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(raw) = body {
+                if let Ok(value) = serde_json::from_str::<String>(&raw) {
+                    sink.lock().unwrap().push(value);
+                }
+            }
+            Ok(())
+        });
+        (channel, seen)
+    }
+
+    #[test]
+    fn deep_links_buffer_until_the_renderer_subscribes() {
+        let state = super::PendingDeepLinks::default();
+
+        // Nothing is listening yet: a cold-launch URL has to survive the wait.
+        assert!(state.push("raynard://share/AAA".to_string()).is_none());
+        assert!(state.push("raynard://share/BBB".to_string()).is_none());
+
+        let (channel, _seen) = recording_channel();
+        let drained = state.subscribe(channel);
+        assert_eq!(drained, vec!["raynard://share/AAA", "raynard://share/BBB"]);
+    }
+
+    #[test]
+    fn deep_links_go_straight_out_once_subscribed() {
+        let state = super::PendingDeepLinks::default();
+        let (channel, seen) = recording_channel();
+        assert!(state.subscribe(channel).is_empty());
+
+        let live = state.push("raynard://share/CCC".to_string());
+        assert!(
+            live.is_some(),
+            "a subscribed channel must be returned, not buffered"
+        );
+        live.unwrap()
+            .send("raynard://share/CCC".to_string())
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["raynard://share/CCC"]);
+    }
+
+    #[test]
+    fn subscribing_again_replaces_the_channel_without_replaying() {
+        let state = super::PendingDeepLinks::default();
+        state.push("raynard://share/AAA".to_string());
+
+        let (first, _first_seen) = recording_channel();
+        assert_eq!(state.subscribe(first).len(), 1);
+
+        // A reload must not receive the link a second time.
+        let (second, _second_seen) = recording_channel();
+        assert!(state.subscribe(second).is_empty());
+    }
+
+    #[test]
+    fn share_deep_links_accept_only_the_canonical_form() {
+        assert_eq!(
+            share_deep_link_payload("raynard://share/AbC-_123", APP_URL_SCHEME),
+            Some("AbC-_123")
+        );
+        // Handlers routinely lowercase the scheme and host.
+        assert_eq!(
+            share_deep_link_payload("Raynard://Share/AbC", APP_URL_SCHEME),
+            Some("AbC")
+        );
+        assert_eq!(
+            share_deep_link_payload("  raynard://share/AbC/  ", APP_URL_SCHEME),
+            Some("AbC")
+        );
+    }
+
+    #[test]
+    fn share_deep_links_refuse_anything_else() {
+        for url in [
+            "https://raynard.ai/s#AbC",
+            "raynard://open/AbC",
+            "raynard://share/",
+            "raynard://share/AbC+def=",
+            "raynard://share/../../etc/passwd",
+            "raynard://share/AbC?x=1",
+            "",
+            "raynard://",
+        ] {
+            assert!(
+                share_deep_link_payload(url, APP_URL_SCHEME).is_none(),
+                "should have refused {url}"
+            );
+        }
+
+        let huge = format!("raynard://share/{}", "A".repeat(70_000));
+        assert!(share_deep_link_payload(&huge, APP_URL_SCHEME).is_none());
+    }
+
+    #[test]
+    fn share_deep_links_accept_a_payload_far_larger_than_the_url_budget() {
+        // macOS was measured delivering 262 000+ character URLs, and the share
+        // budget is 8192, so the guard must not be the binding constraint.
+        let url = format!("raynard://share/{}", "A".repeat(32_768));
+        assert!(share_deep_link_payload(&url, APP_URL_SCHEME).is_some());
+    }
 
     #[test]
     fn packaged_paths_match_the_macos_bundle_layout() {
@@ -4795,6 +6029,216 @@ mod tests {
             packaged_node_path_for(Path::new("raynard")),
             Some(PathBuf::from("node"))
         );
+    }
+
+    #[test]
+    fn large_stream_result_data_moves_to_an_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "raynard-result-artifact-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let mut result = json!({
+            "text": "A bounded summary",
+            "data": { "rows": [{ "payload": "x".repeat(140_000) }] }
+        });
+
+        let reference = externalize_result_data_in(&root, "chat-one", "stream-one-0", &mut result)
+            .expect("large data should be externalized")
+            .expect("large data should return an artifact reference");
+
+        assert_eq!(result["data"], json!({}));
+        assert_eq!(result["dataArtifact"], reference);
+        let artifact_path = root.join("chat-one").join("stream-one-0.json");
+        let stored: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_path).expect("artifact should be written"),
+        )
+        .expect("artifact should contain JSON");
+        assert_eq!(
+            stored["rows"][0]["payload"].as_str().unwrap().len(),
+            140_000
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saving_a_legacy_chat_externalizes_large_inline_card_data() {
+        let root = std::env::temp_dir().join(format!(
+            "raynard-legacy-artifact-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let mut messages = vec![StoredChatMessage {
+            role: "assistant".to_string(),
+            text: "Answer".to_string(),
+            timestamp: 7,
+            thinking: None,
+            provider: None,
+            model: None,
+            status: Some("completed".to_string()),
+            error: None,
+            mode_status: None,
+            model_failure: None,
+            builder_run: None,
+            shared_import: None,
+            builder_activities: None,
+            cards: Some(json!([{
+                "toolName": "large_tool",
+                "template": { "name": { "singular": "row", "plural": "rows" }, "layout": [] },
+                "data": { "rows": [{ "payload": "x".repeat(140_000) }] }
+            }])),
+            sources: None,
+            credential_request: None,
+            extension_recommendation: None,
+            usage: None,
+        }];
+
+        assert!(
+            externalize_large_card_data_in(&root, "chat-one", &mut messages)
+                .expect("legacy cards should migrate")
+        );
+        let card = &messages[0].cards.as_ref().unwrap()[0];
+        assert_eq!(card["data"], json!({}));
+        assert_eq!(card["artifact"]["chatId"], "chat-one");
+        assert!(root
+            .join("chat-one")
+            .join("message-0-card-0.json")
+            .is_file());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn chat_history_index_rebuilds_once_then_avoids_reopening_chat_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "raynard-chat-index-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let chat_path = dir.join("chat-one.json");
+        fs::write(
+            &chat_path,
+            json!({
+                "chatId": "chat-one",
+                "name": "Indexed chat",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-02T00:00:00Z",
+                "messages": [{ "role": "user", "text": "Hello", "timestamp": 1 }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let first = load_or_rebuild_chat_history_index_in(&dir).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "Indexed chat");
+        assert_eq!(first[0].message_count, 1);
+        assert!(dir.join("index.json").is_file());
+
+        // Once the index exists, listing no longer needs to deserialize the
+        // individual chat. A damaged file is left for open-chat error handling.
+        fs::write(&chat_path, "not valid json").unwrap();
+        let indexed = load_or_rebuild_chat_history_index_in(&dir).unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].chat_id, "chat-one");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn chat_history_index_upserts_sorts_and_removes_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "raynard-chat-index-update-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let row = |chat_id: &str, updated_at: &str, message_count: usize| ChatHistoryRow {
+            chat_id: chat_id.to_string(),
+            name: chat_id.to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: updated_at.to_string(),
+            message_count,
+        };
+
+        upsert_chat_history_index_in(&dir, row("older", "2026-01-02T00:00:00Z", 1)).unwrap();
+        upsert_chat_history_index_in(&dir, row("newer", "2026-01-03T00:00:00Z", 2)).unwrap();
+        upsert_chat_history_index_in(&dir, row("older", "2026-01-04T00:00:00Z", 3)).unwrap();
+
+        let rows = load_or_rebuild_chat_history_index_in(&dir).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].chat_id, "older");
+        assert_eq!(rows[0].message_count, 3);
+
+        remove_chat_history_index_row_in(&dir, "older").unwrap();
+        let rows = load_or_rebuild_chat_history_index_in(&dir).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].chat_id, "newer");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn bookmark_store_is_lazy_ordered_and_paged() {
+        let dir = std::env::temp_dir().join(format!(
+            "raynard-bookmarks-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let bookmark = |chat_id: &str, key: &str, created_at: i64| StoredBookmark {
+            id: format!("{chat_id}:{key}"),
+            message_key: key.to_string(),
+            chat_id: chat_id.to_string(),
+            chat_name: format!("Chat {chat_id}"),
+            prompt: format!("Prompt {key}"),
+            answer: format!("Answer {key}"),
+            message_timestamp: created_at - 10,
+            created_at,
+        };
+
+        write_bookmark_in(&dir, &bookmark("chat-one", "old", 100)).unwrap();
+        write_bookmark_in(&dir, &bookmark("chat-two", "new", 300)).unwrap();
+        write_bookmark_in(&dir, &bookmark("chat-one", "middle", 200)).unwrap();
+
+        let cache = load_bookmark_cache_in(&dir).unwrap();
+        let first = bookmark_page(&cache, 0, 2);
+        assert_eq!(first.total, 3);
+        assert_eq!(first.bookmarks.len(), 2);
+        assert_eq!(first.bookmarks[0].message_key, "new");
+        assert_eq!(first.bookmarks[1].message_key, "middle");
+
+        let second = bookmark_page(&cache, 2, 2);
+        assert_eq!(second.bookmarks.len(), 1);
+        assert_eq!(second.bookmarks[0].message_key, "old");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn bookmark_pages_stay_bounded_for_large_collections() {
+        let mut cache = BookmarkCache::default();
+        for index in 0..10_000 {
+            upsert_bookmark_cache(
+                &mut cache,
+                StoredBookmark {
+                    id: format!("chat-one:key-{index}"),
+                    message_key: format!("key-{index}"),
+                    chat_id: "chat-one".to_string(),
+                    chat_name: "Large chat".to_string(),
+                    prompt: format!("Prompt {index}"),
+                    answer: format!("Answer {index}"),
+                    message_timestamp: index + 1,
+                    created_at: index + 1,
+                },
+            );
+        }
+
+        let page = bookmark_page(&cache, 0, 50);
+        assert_eq!(page.total, 10_000);
+        assert_eq!(page.bookmarks.len(), 50);
+        assert_eq!(page.bookmarks[0].message_key, "key-9999");
     }
 
     #[test]
@@ -5041,6 +6485,94 @@ mod tests {
     }
 
     #[test]
+    fn catalog_listing_reads_manifests_without_executing_extension_code() {
+        let root = std::env::temp_dir().join(format!("raynard-catalog-list-{}", now_millis()));
+        let catalog = root.join("catalog");
+        let installed = root.join("installed");
+        let extension = catalog.join("open-library");
+        fs::create_dir_all(&extension).expect("create catalog extension");
+        fs::create_dir_all(installed.join("open-library")).expect("mark extension installed");
+        fs::write(
+            extension.join("tools.ts"),
+            "throw new Error('must not execute');\n",
+        )
+        .expect("write inert source");
+        fs::write(extension.join("README.md"), "# Open Library\n").expect("write catalog readme");
+        fs::write(
+            extension.join("plugin.json"),
+            serde_json::to_string(&json!({
+                "id": "raynard.catalog.open-library",
+                "name": "Open Library",
+                "description": "Search books.",
+                "category": "Reference",
+                "icon": "book-open",
+                "version": "1.0.0",
+                "sdkVersion": 1,
+                "auth": {
+                    "credentials": [{
+                        "key": "OPEN_LIBRARY_API_KEY",
+                        "label": "Open Library API key",
+                        "signupUrl": "https://example.com/keys"
+                    }]
+                },
+                "contributes": {
+                    "tools": [{
+                        "name": "open_library_search",
+                        "description": "Search Open Library by title or author.",
+                        "hasCard": true
+                    }]
+                }
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let extensions = read_catalog_extensions(&catalog, &installed).expect("read catalog");
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].slug, "open-library");
+        assert_eq!(extensions[0].category, "Reference");
+        assert_eq!(extensions[0].tools.len(), 1);
+        assert!(extensions[0].requires_key);
+        assert!(extensions[0].installed);
+
+        fs::remove_dir_all(installed.join("open-library")).expect("mark extension available");
+        let detail = read_catalog_extension_detail_from(&catalog, &installed, "open-library")
+            .expect("read available extension detail");
+        assert_eq!(detail.extension.slug, "open-library");
+        assert_eq!(detail.detail.plugin.name, "Open Library");
+        assert_eq!(detail.detail.readme, "# Open Library\n");
+        assert!(
+            read_catalog_extension_detail_from(&catalog, &installed, "../open-library").is_err()
+        );
+
+        fs::remove_dir_all(root).expect("remove catalog fixture");
+    }
+
+    #[test]
+    fn catalog_install_copies_nested_author_files_and_rejects_unsafe_targets() {
+        let root = std::env::temp_dir().join(format!("raynard-catalog-install-{}", now_millis()));
+        let catalog = root.join("catalog");
+        let installed = root.join("installed");
+        let extension = catalog.join("open-library");
+        fs::create_dir_all(extension.join("lib")).expect("create nested source");
+        fs::create_dir_all(&installed).expect("create installed root");
+        fs::write(extension.join("plugin.json"), "{}\n").expect("write manifest");
+        fs::write(extension.join("tools.ts"), "export const tools = {};\n").expect("write tools");
+        fs::write(extension.join("lib/client.ts"), "export const value = 1;\n")
+            .expect("write nested module");
+
+        let target = install_catalog_extension_from(&catalog, &installed, "open-library")
+            .expect("install extension");
+        assert_eq!(target, installed.join("open-library"));
+        assert!(target.join("plugin.json").is_file());
+        assert!(target.join("lib/client.ts").is_file());
+        assert!(install_catalog_extension_from(&catalog, &installed, "open-library").is_err());
+        assert!(install_catalog_extension_from(&catalog, &installed, "../open-library").is_err());
+
+        fs::remove_dir_all(root).expect("remove install fixture");
+    }
+
+    #[test]
     fn generated_plugin_reads_three_manifest_sample_prompts() {
         let plugin_dir =
             std::env::temp_dir().join(format!("raynard-plugin-prompts-{}", now_millis()));
@@ -5136,11 +6668,15 @@ mod tests {
             model: None,
             status: Some("completed".to_string()),
             error: None,
+            mode_status: None,
+            model_failure: None,
             builder_run: Some(true),
+            shared_import: None,
             builder_activities: Some(activities.clone()),
             cards: None,
             sources: None,
             credential_request: None,
+            extension_recommendation: None,
             usage: None,
         }]);
 
@@ -5374,11 +6910,15 @@ mod tests {
             model: Some("claude-3-5-sonnet-latest".to_string()),
             status: Some("completed".to_string()),
             error: None,
+            mode_status: None,
+            model_failure: None,
             builder_run: None,
+            shared_import: None,
             builder_activities: None,
             cards: None,
             sources: None,
             credential_request: None,
+            extension_recommendation: None,
             usage: Some(usage.clone()),
         }]);
 
@@ -5386,10 +6926,40 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_eligibility_fields_survive_chat_normalization() {
+        let failure = json!({ "title": "Provider failed", "detail": "Unavailable" });
+        let normalized = normalize_stored_messages(vec![StoredChatMessage {
+            role: "assistant".to_string(),
+            text: "Build mode is active.".to_string(),
+            timestamp: 1,
+            thinking: None,
+            provider: None,
+            model: None,
+            status: Some("completed".to_string()),
+            error: None,
+            mode_status: Some(true),
+            model_failure: Some(failure.clone()),
+            builder_run: None,
+            shared_import: None,
+            builder_activities: None,
+            cards: None,
+            sources: None,
+            credential_request: None,
+            extension_recommendation: None,
+            usage: None,
+        }]);
+
+        assert_eq!(normalized[0].mode_status, Some(true));
+        assert_eq!(normalized[0].model_failure, Some(failure));
+    }
+
+    #[test]
     fn a_chat_saved_before_token_counting_still_loads() {
         let raw = r#"{"role":"assistant","text":"Older answer","timestamp":7}"#;
         let message: StoredChatMessage = serde_json::from_str(raw).expect("older chat must load");
         assert_eq!(message.usage, None);
+        assert_eq!(message.mode_status, None);
+        assert_eq!(message.model_failure, None);
     }
 
     #[test]
@@ -5595,6 +7165,12 @@ mod tests {
             "pluginName": "Open Weather",
             "credentials": [{ "key": "OPENWEATHER_API_KEY", "label": "OpenWeather API key" }]
         });
+        let recommendation = json!({
+            "slug": "open-library",
+            "name": "Open Library",
+            "description": "Search books and authors.",
+            "answer": "Open Library can answer that."
+        });
 
         let normalized = normalize_stored_messages(vec![
             StoredChatMessage {
@@ -5606,11 +7182,15 @@ mod tests {
                 model: None,
                 status: Some("completed".to_string()),
                 error: None,
+                mode_status: None,
+                model_failure: None,
                 builder_run: None,
+                shared_import: None,
                 builder_activities: None,
                 cards: None,
                 sources: None,
                 credential_request: Some(request.clone()),
+                extension_recommendation: Some(recommendation.clone()),
                 usage: None,
             },
             StoredChatMessage {
@@ -5622,17 +7202,22 @@ mod tests {
                 model: None,
                 status: None,
                 error: None,
+                mode_status: None,
+                model_failure: None,
                 builder_run: None,
+                shared_import: None,
                 builder_activities: None,
                 cards: None,
                 sources: None,
                 credential_request: Some(request.clone()),
+                extension_recommendation: Some(recommendation.clone()),
                 usage: None,
             },
         ]);
 
         assert_eq!(normalized.len(), 1);
         assert_eq!(normalized[0].credential_request, Some(request));
+        assert_eq!(normalized[0].extension_recommendation, Some(recommendation));
     }
 }
 
@@ -5642,10 +7227,39 @@ pub fn run() {
         .manage(StreamCancelState::default())
         .manage(OAuthLoginState::default())
         .manage(ProviderQuotaCache::default())
+        .manage(BookmarkStoreState::default())
+        .manage(PendingDeepLinks::default())
+        .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            use tauri_plugin_deep_link::DeepLinkExt;
+
+            // A cold launch has already consumed its URL by the time the plugin
+            // is up, so it is read back explicitly; everything after arrives
+            // through `on_open_url`. Both land in the same buffer.
+            let handle = app.handle().clone();
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                deliver_deep_links(
+                    &handle.state::<PendingDeepLinks>(),
+                    urls.into_iter().map(|url| url.to_string()).collect(),
+                );
+            }
+            app.deep_link().on_open_url(move |event| {
+                deliver_deep_links(
+                    &handle.state::<PendingDeepLinks>(),
+                    event
+                        .urls()
+                        .into_iter()
+                        .map(|url| url.to_string())
+                        .collect(),
+                );
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
             cancel_model_chat_stream,
             clear_generated_plugin_cache,
+            delete_bookmark,
             delete_chat_history,
             delete_generated_plugin,
             save_plugin_credential,
@@ -5655,16 +7269,25 @@ pub fn run() {
             get_plugin_scaffold_status,
             load_llm_env_status,
             open_external_url,
+            install_catalog_extension,
+            list_catalog_extensions,
+            list_bookmarks,
+            list_chat_bookmarks,
             list_generated_plugins,
             list_chat_history,
             list_model_providers,
+            open_extension_contribution_folder,
+            read_catalog_extension,
             read_generated_plugin,
             read_chat_history,
+            read_result_artifact,
             read_provider_quota,
             read_usage_totals,
+            prepare_extension_contribution,
             run_main_agent_stream,
             run_plugin_builder_stream,
             run_provider_oauth_login,
+            save_bookmark,
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,
@@ -5674,7 +7297,8 @@ pub fn run() {
             set_active_model_provider,
             set_active_provider,
             sign_out_provider,
-            submit_provider_oauth_code
+            submit_provider_oauth_code,
+            subscribe_deep_links
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

@@ -1,0 +1,77 @@
+{
+  "id": "raynard.catalog.dnd-5e-api",
+  "name": "D&D 5e",
+  "description": "Browse Dungeons & Dragons 5e SRD rules, spells, monsters, classes, equipment, and other resources through the 5e-bits API.",
+  "category": "Games",
+  "tags": [
+    "dungeons-and-dragons",
+    "dnd",
+    "srd",
+    "rules",
+    "rpg"
+  ],
+  "icon": "book-open",
+  "author": "Raynard",
+  "homepage": "https://5e-bits.github.io/docs/",
+  "version": "1.0.0",
+  "sdkVersion": 1,
+  "status": "bundled",
+  "createdAt": "2026-08-16T00:00:00.000Z",
+  "samplePrompts": [
+    "Show me the adult red dragon's stats, abilities, and actions.",
+    "Which 3rd-level evocation spells are available, and what are the full details for fireball?",
+    "What does a wizard gain at level 5, including spell slots and class features?"
+  ],
+  "sourceUrls": [
+    "https://5e-bits.github.io/docs/api/get-all-resource-ur-ls"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "dnd_list_endpoints",
+        "description": "Answers \"what D&D 5e data can I look up?\" Fetches the API root of the 5e-bits D&D 5e SRD API and lists every available resource endpoint (spells, monsters, equipment, magic-items, classes, subclasses, races, subraces, features, traits, conditions, damage-types, rules, rule-sections, and more) with its API path. Takes no arguments. Follow up with dnd_list_resources to browse one endpoint.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_list_resources",
+        "description": "Browses one D&D 5e resource endpoint and returns the matching resources with their index slugs, names, and API URLs. Optional server-side filters: name substring (most endpoints), spell level 0-9 and magic school (spells endpoint), exact challenge rating (monsters endpoint), level (features endpoint). Use dnd_list_endpoints to discover endpoint names; follow up with dnd_get_resource, dnd_get_spell, or dnd_get_monster for full detail on one result.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_resource",
+        "description": "Fetches the complete JSON record for any D&D 5e resource by endpoint + index slug, e.g. equipment \"longsword\", magic-items \"bag-of-holding\", classes \"wizard\", races \"elf\", conditions \"prone\", damage-types \"fire\", ability-scores \"str\", skills \"stealth\", traits \"darkvision\". Renders a readable summary and cites the full raw payload; the result card leads with type-specific highlights (cost, damage dice, armor class, rarity, hit die, …) and an illustration when the API provides one. Prefer dnd_get_spell or dnd_get_monster when the target is a spell or monster; find index slugs with dnd_list_resources.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_spell",
+        "description": "Fetches one D&D 5e spell by index slug and renders its level, magic school, casting time, range, components, duration, concentration/ritual flags, damage, full description, at-higher-levels text, and which classes/subclasses can cast it. Example indexes: \"acid-arrow\", \"fireball\", \"cure-wounds\". Find spell indexes with dnd_list_resources (endpoint \"spells\", optional level/school/name filters).",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_monster",
+        "description": "Fetches one D&D 5e monster stat block by index slug and renders size/type/alignment, armor class, hit points, speed, the six ability scores with modifiers, challenge rating and XP, senses, languages, special abilities, actions, and legendary actions. When the API provides one, the monster's illustration is rendered as an image on the right side of the result card, occupying 25% of its width. Example indexes: \"goblin\", \"adult-red-dragon\", \"tarrasque\". Find monster indexes with dnd_list_resources (endpoint \"monsters\", optional challenge_rating/name filters).",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_class_levels",
+        "description": "Fetches the level progression table for one D&D 5e class: proficiency bonus, class features gained per level, and spellcasting slot counts. Optionally narrow to a single level (1-20). Example class indexes: \"wizard\", \"fighter\", \"rogue\", \"cleric\". Answers questions like \"what does a wizard get at level 3?\" or \"how many spell slots does a level 5 cleric have?\". Follow up with dnd_get_resource (endpoint \"features\") for details on a named feature.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_list_rules",
+        "description": "Lists the top-level D&D 5e SRD rule chapters (Adventuring, Appendix, Combat, Equipment, Spellcasting, Using Ability Scores) with their index slugs. Answers \"what rules topics exist?\". Follow up with dnd_get_rule for a chapter's subsections, then dnd_get_rule_section for the full rules text.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_rule",
+        "description": "Fetches one top-level D&D 5e SRD rule chapter by index (adventuring, appendix, combat, equipment, spellcasting, using-ability-scores) and lists its subsections with their index slugs. Answers \"what does the combat chapter cover?\". Follow up with dnd_get_rule_section to read the full markdown text of any subsection.",
+        "hasCard": true
+      },
+      {
+        "name": "dnd_get_rule_section",
+        "description": "Fetches the full markdown rules text for one D&D 5e SRD rule subsection by index, e.g. \"time\", \"movement\", \"the-environment\", \"traps\", \"diseases\", \"madness\", \"resting\", \"making-an-attack\", \"spell-level\". Answers \"what are the exact rules for X?\". Find subsection indexes with dnd_get_rule. Long sections are truncated in the text output; the complete markdown is always in the citation payload.",
+        "hasCard": true
+      }
+    ]
+  }
+}

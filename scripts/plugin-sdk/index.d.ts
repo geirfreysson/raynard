@@ -93,6 +93,10 @@ export type ApiCacheOptions = {
 
 export function buildQuery(params?: Record<string, QueryValue>): string;
 export function configureApiCache(options: ApiCacheOptions): void;
+/** Host-only. Plugins never call this. */
+export function beginApiCacheTrace(): void;
+/** Host-only. Plugins never call this. */
+export function readApiCacheTrace(): { hits: number };
 export function apiGet<T>(url: string, options?: ApiGetOptions): Promise<T>;
 export function requireNonEmpty(value: unknown, label: string): string;
 export function requirePositiveInt(value: unknown, label: string): number;

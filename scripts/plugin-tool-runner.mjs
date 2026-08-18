@@ -90,8 +90,11 @@ async function preparePluginModuleDirectory(sourceDir, targetDir) {
 
 async function installSharedSdk(targetDir) {
   const candidates = [
-    join(dirname(pluginDir), 'node_modules', '@raynard', 'plugin-sdk'),
-    join(runnerDir, 'plugin-sdk')
+    // The SDK shipped beside this runner is its compatible runtime pair. The
+    // app-local SDK can lag behind while a development app process is still
+    // running, so use it only as a fallback.
+    join(runnerDir, 'plugin-sdk'),
+    join(dirname(pluginDir), 'node_modules', '@raynard', 'plugin-sdk')
   ];
   const source = candidates.find((candidate) => existsSync(join(candidate, 'package.json')));
   if (!source) return;
@@ -162,8 +165,15 @@ try {
       process.exit(1);
     }
 
+    if (typeof sdk.beginApiCacheTrace === 'function') sdk.beginApiCacheTrace();
     const result = sdk.assertToolResult(await tool.execute(args));
-    emit({ ok: true, result });
+    const cacheTrace =
+      typeof sdk.readApiCacheTrace === 'function' ? sdk.readApiCacheTrace() : { hits: 0 };
+    // This namespace is host-owned: discard anything a plugin supplied and
+    // add it only when the shared API client observed a real cache hit.
+    const { _raynard: _pluginMetadata, ...safeResult } = result;
+    if (cacheTrace.hits > 0) safeResult._raynard = { cacheHit: true };
+    emit({ ok: true, result: safeResult });
   }
 } catch (error) {
   const rawMessage = error && error.message ? error.message : String(error);

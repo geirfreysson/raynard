@@ -150,11 +150,23 @@ function ChartData({ spec }: { spec: ChartSpec }) {
 
 function ChartFigure({ spec }: { spec: ChartSpec }) {
   const showLegend = spec.series.length > 1;
+  const leftSeries = React.useMemo(
+    () => spec.series.filter((series) => series.axis !== 'right'),
+    [spec.series]
+  );
+  const rightSeries = React.useMemo(
+    () => spec.series.filter((series) => series.axis === 'right'),
+    [spec.series]
+  );
   // Raw ticks read as 1000000; the axis compacts them while the tooltip and the
   // Show data table keep the exact figure.
-  const formatTick = React.useMemo(
-    () => createAxisFormatter(spec.rows, spec.series),
-    [spec.rows, spec.series]
+  const formatLeftTick = React.useMemo(
+    () => createAxisFormatter(spec.rows, leftSeries),
+    [spec.rows, leftSeries]
+  );
+  const formatRightTick = React.useMemo(
+    () => createAxisFormatter(spec.rows, rightSeries),
+    [spec.rows, rightSeries]
   );
   // Recharts drops every other label once they collide, so rotate instead.
   const ticks = React.useMemo(() => xTickLayout(spec.rows, spec.x), [spec.rows, spec.x]);
@@ -179,14 +191,33 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
       label={spec.xLabel ? { value: spec.xLabel, position: 'insideBottom', offset: -12 } : undefined}
     />
   );
-  const yAxis = (
+  const leftYAxis = (
     <YAxis
+      yAxisId="left"
       {...axisProps}
       width={64}
-      tickFormatter={formatTick}
-      label={spec.yLabel ? { value: spec.yLabel, angle: -90, position: 'insideLeft' } : undefined}
+      tickFormatter={formatLeftTick}
+      label={
+        spec.yLabel
+          ? { value: spec.yLabel, angle: -90, position: 'insideLeft', textAnchor: 'middle' }
+          : undefined
+      }
     />
   );
+  const rightYAxis = rightSeries.length ? (
+    <YAxis
+      yAxisId="right"
+      orientation="right"
+      {...axisProps}
+      width={64}
+      tickFormatter={formatRightTick}
+      label={
+        spec.rightYLabel
+          ? { value: spec.rightYLabel, angle: 90, position: 'insideRight', textAnchor: 'middle' }
+          : undefined
+      }
+    />
+  ) : null;
   const tooltip = (
     <Tooltip
       formatter={(value: unknown) => formatFullNumber(value)}
@@ -217,7 +248,13 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
   // A line has no per-point fill to mute, so a highlighted category is marked
   // with a vertical rule instead.
   const categoryMarkers = [...highlight.categories].map((value) => (
-    <ReferenceLine key={value} x={value} stroke={seriesColor(0)} strokeDasharray="4 3" />
+    <ReferenceLine
+      key={value}
+      x={value}
+      yAxisId="left"
+      stroke={seriesColor(0)}
+      strokeDasharray="4 3"
+    />
   ));
 
   return (
@@ -226,7 +263,8 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
         <BarChart {...common}>
           {grid}
           {xAxis}
-          {yAxis}
+          {leftYAxis}
+          {rightYAxis}
           {tooltip}
           {legend}
           {spec.series.map((series, i) => {
@@ -237,6 +275,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
               <Bar
                 key={series.key}
                 dataKey={series.key}
+                yAxisId={series.axis ?? 'left'}
                 name={series.label}
                 fill={paint.color}
                 fillOpacity={paint.opacity}
@@ -263,7 +302,8 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
         <LineChart {...common}>
           {grid}
           {xAxis}
-          {yAxis}
+          {leftYAxis}
+          {rightYAxis}
           {tooltip}
           {legend}
           {categoryMarkers}
@@ -274,6 +314,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
                 key={series.key}
                 type="monotone"
                 dataKey={series.key}
+                yAxisId={series.axis ?? 'left'}
                 name={series.label}
                 stroke={paint.color}
                 strokeOpacity={paint.opacity}

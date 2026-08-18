@@ -114,18 +114,28 @@ test('tagged releases validate their version and publish the binary with its che
 });
 
 test('the docs homepage downloads the stable asset published by every latest release', async () => {
-  const [workflow, homepageCopy, docsConfig, gettingStarted] = await Promise.all([
+  const [workflow, shareConfigRaw, homepageCopy, docsConfig, gettingStarted] = await Promise.all([
     readFile(join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'), 'utf8'),
+    readFile(join(scriptsDir, '../share.config.json'), 'utf8'),
     readFile(join(scriptsDir, '../docs/src/content/homepage-copy.json'), 'utf8'),
     readFile(join(scriptsDir, '../docs/docusaurus.config.js'), 'utf8'),
     readFile(join(scriptsDir, '../docs/docs/getting-started.md'), 'utf8')
   ]);
-  const latestDownload =
-    'https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg';
 
-  expect(workflow).toContain('stable_artifact_name="Raynard-mac-arm64.dmg"');
-  expect(workflow).toContain('stable_checksum_name="Raynard-mac-arm64.dmg.sha256"');
-  expect(homepageCopy).toContain(latestDownload);
-  expect(docsConfig).toContain(latestDownload);
+  // The download URL now lives in share.config.json, which the app and the docs
+  // site both read. Deriving the asset name from it ties the link the docs
+  // publish to the artifact the release workflow actually uploads.
+  const latestDownload = JSON.parse(shareConfigRaw).downloadUrl;
+  const assetName = latestDownload.split('/').pop();
+
+  expect(workflow).toContain(`stable_artifact_name="${assetName}"`);
+  expect(workflow).toContain(`stable_checksum_name="${assetName}.sha256"`);
+
+  // Markdown cannot import the config, so this one is checked by equality.
   expect(gettingStarted).toContain(latestDownload);
+
+  // These two import it instead, and must not drift back to a literal.
+  expect(docsConfig).not.toContain(latestDownload);
+  expect(homepageCopy).not.toContain(latestDownload);
+  expect(docsConfig).toContain('share.config.json');
 });

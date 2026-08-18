@@ -11,6 +11,7 @@ const HOUR_MS = 60 * 60 * 1000;
 // blind substring redaction to be safe.
 const REDACTABLE_SECRET_LENGTH = 8;
 let apiCacheConfig = { enabled: false, ttlHours: 24, directory: '' };
+let apiCacheTrace = { hits: 0 };
 // Supplied by the host at execution time and never written to disk. The
 // runner configures this before importing the plugin module.
 let credentialValues = new Map();
@@ -72,6 +73,16 @@ export function configureApiCache(options = {}) {
     ttlHours: Number.isInteger(ttlHours) && ttlHours >= 1 && ttlHours <= 8760 ? ttlHours : 24,
     directory: typeof options.directory === 'string' ? options.directory.trim() : ''
   };
+}
+
+/** Host-only execution trace used to annotate tool results without changing plugin data. */
+export function beginApiCacheTrace() {
+  apiCacheTrace = { hits: 0 };
+}
+
+/** Host-only snapshot of cache activity for the current tool execution. */
+export function readApiCacheTrace() {
+  return { ...apiCacheTrace };
 }
 
 export function createApiReference(input) {
@@ -205,7 +216,10 @@ export async function apiGet(url, options = {}) {
   const cachePath = apiCacheEntryPath(target, options.headers);
   if (cachePath) {
     const cached = await readApiCacheEntry(cachePath);
-    if (cached.hit) return cached.payload;
+    if (cached.hit) {
+      apiCacheTrace.hits += 1;
+      return cached.payload;
+    }
   }
   const response = await fetch(target, { headers: options.headers });
   if (!response.ok) {

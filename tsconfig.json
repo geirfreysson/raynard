@@ -5,7 +5,11 @@
     "module": "ESNext",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "allowJs": false,
+    // The docs site's share-link decoder is plain JS (Docusaurus cannot import
+    // our TypeScript). `src/share/docs-parity.test.ts` imports it so the two
+    // decoders cannot drift; allowing JS means that boundary is type-checked
+    // rather than silently `any`. There are no other JS files under src/.
+    "allowJs": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,

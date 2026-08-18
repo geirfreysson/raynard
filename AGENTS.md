@@ -12,6 +12,9 @@ generated API plugins.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
+- `src/result-card/template-fields.ts`: the single walker over the `CardBlock` union; drives both example data and share-link projection.
+- `src/share/`: share-link payload, codec, degradation ladder, share sheet, and deep-link import.
+- `share.config.json`: share base URL, app URL scheme, and DMG download link, read by both the app and `docs/`.
 - `src/components/ui/`: shadcn-style primitives used by the host result-card renderer.
 - `src/styles.css`: global app, chat, sidebar, modal, and markdown styles.
 - `src/*.test.ts`: Vitest unit tests for frontend helpers/runtime behavior.
@@ -21,7 +24,9 @@ generated API plugins.
 - `scripts/plugin-builder-core.mjs`: testable coding-agent prompts and plugin validation rules.
 - `scripts/plugin-tool-runner.mjs`: isolated TypeScript plugin discovery and execution, including multi-file plugins.
 - `scripts/*.test.mjs`: sidecar, prompt, schema, and plugin-runner tests.
-- `src-tauri/src/lib.rs`: Rust Tauri commands for sidecar streaming, cancellation, keychain/config, chat history, logs, and generated-plugin files.
+- `extensions/`: bundled, pre-approved extension catalog installed through `/extensions`.
+- `docs/src/pages/s.js` + `docs/src/lib/share-link.js`: the share-link landing page and its decode-only copy of the codec.
+- `src-tauri/src/lib.rs`: Rust Tauri commands for sidecar streaming, cancellation, keychain/config, chat history, logs, generated-plugin files, and deep-link delivery.
 - `src-tauri/Cargo.toml`: Rust dependencies and Tauri crate configuration.
 - `dist/`: generated Vite build output; do not edit by hand.
 
@@ -32,6 +37,12 @@ generated API plugins.
   Chat actions; opening Chats or Plugins expands the secondary sidebar.
 - Utility icons come from Lucide. The Northfox fox is a local brand SVG, not a
   Lucide icon.
+- A finished assistant answer carries a hover action row (`.message-actions`)
+  with Bookmark and Share. Share opens a sheet that builds a link, names
+  anything the link had to trim, and refuses to show a link it knows is too
+  long. An answer opened from a share link is marked `sharedImport` and renders
+  a banner saying its results are a snapshot — a follow-up runs live, because
+  the model only ever sees the transcript text, never the imported card data.
 - An empty conversation shows the Northfox wordmark, three suggestion cards,
   and the composer. When generated plugins provide manifest `samplePrompts`, the
   suggestions are drawn round-robin across plugins before any plugin repeats.
@@ -53,6 +64,12 @@ generated API plugins.
 - The plugin sidebar lists generated plugins and opens a detail screen with
   metadata, runtime tools, card previews, README content, and selected source
   files. Splash prompts are intentionally not displayed on this screen.
+- `/extensions` opens a catalog with the user's installed extensions and the
+  pre-approved extensions bundled with the app. It separates locally coded
+  extensions (`Your extensions`), installed catalog entries (`Installed`), and
+  catalog entries not yet copied into app data (`Available`). Installing copies
+  a bundled folder into app-local `generated-plugins`, where it becomes an
+  ordinary, editable extension.
 - Builder turns render a live activity timeline with filesystem/test events,
   reasoning, heartbeat, and final summary. Runs belong to chats: multiple chats
   can work concurrently, navigation does not cancel them, and returning to a
@@ -118,6 +135,67 @@ receives `SIGTERM` and aborts that run. Runs are owned per chat, so other chats
 can continue concurrently. Navigating back to a busy chat reconnects the
 renderer to its in-memory messages and stream controls.
 
+## Sharing an Answer
+
+An assistant answer can be shared as a link. There is no server and no account:
+the whole payload rides in the URL **fragment**, which is never transmitted, so
+nothing is uploaded and nothing is stored anywhere.
+
+    https://<shareBaseUrl>/s#<base64url(deflate-raw(json))>
+
+1. The Share button on a message opens `src/share/share-modal.ts`. It hydrates
+   any artifact-backed cards (`read_result_artifact`), builds the payload, and
+   measures it.
+2. `src/share/payload.ts` carries the question, the answer markdown, its
+   `cards`, its `sources`, and the extensions behind them. It deliberately
+   leaves out `usage`, `provider`, `model`, `thinking`, builder activity,
+   credential requests, timestamps, the chat id, and the card `artifact` ref —
+   a local path that would leak a chat id. Nothing identifies the sender.
+3. `src/share/degrade.ts` encodes, measures, and degrades until the link fits
+   `SHARE_URL_BUDGET_CHARS` (8192). Rungs, in order: drop citation excerpts,
+   project card data, cap table rows at 100, then 25, then keep the first five
+   cards. Each rung is derived from the original payload, never from the
+   previous rung. If nothing fits, `degraded.overBudget` is set and the sheet
+   refuses to show a link rather than hand over a broken one. **Answer text is
+   never truncated.**
+4. Projection (`src/share/project.ts`) is the biggest lever and is lossless from
+   the reader's point of view: `src/result-card/resolve.ts` is the only
+   interpreter of card `data`, so a field the template never names cannot reach
+   the screen. That is why the share sheet reports trimmed rows and dropped
+   cards but stays silent about projection.
+5. `docs/src/pages/s.js` decodes the fragment in the browser and shows only a
+   teaser — the question, the card count, the extension. The app precomputes
+   those strings into `payload.teaser`, so the docs site needs no copy of the
+   card renderer. `src/share/docs-parity.test.ts` is what stops its duplicated
+   decoder from drifting.
+6. "Open in Raynard" opens `raynard://share/<encoded>`. Rust validates the URL
+   (`share_deep_link_payload`), buffers it if the webview is not up yet
+   (`PendingDeepLinks`), and pushes it over a `Channel` via
+   `subscribe_deep_links`. It is deliberately **not** `listen()` from
+   `@tauri-apps/api/event`: that would require the app's first capability file
+   and change the whole webview's permission posture.
+7. `openSharedAnswer` in `main.ts` opens a new chat holding the question and
+   answer. Viewing needs no credentials. An uninstalled bundled extension is
+   offered through the existing inline install card.
+
+Why 8192 when browsers allow far more: a fragment escapes every server
+request-line limit, but plaintext email hard-wraps at RFC 5322's 998 octets and
+can silently corrupt a long URL. Measured against 256 real answers, the ladder
+fits **99.2%** under that budget, and 210 of them need no degrading at all.
+
+**The macOS URL ceiling is not the constraint.** LaunchServices was measured
+delivering `raynard://` URLs of **262,166 characters** intact, cold and warm —
+32x the budget. No clipboard handoff or file fallback is needed.
+
+`CompressionStream('deflate-raw')` requires Safari 16.4, which is why
+`minimumSystemVersion` is `13.0`. The app is Apple-Silicon-only and every such
+Mac can run macOS 13+, so this costs no real users and avoids a Rust deflate
+dependency.
+
+Deep links cannot be registered at runtime on macOS, so `npm run tauri dev`
+never receives one. Load `http://127.0.0.1:1420/#share=<encoded>` instead — the
+dev backdoor in `src/share/deep-link.ts` runs the identical import path.
+
 ## Generated Plugin Contract
 
 Generated plugins live in the Tauri app-local-data `generated-plugins`
@@ -133,6 +211,48 @@ The host installs one shared, versioned `@raynard/plugin-sdk` under the
 generated-plugin root. It owns runtime helpers, tool/card/reference types, and
 mocked-test helpers. Plugins do not copy `index.ts`, `runtime.ts`, `testing.ts`,
 or `contract.test.ts`. Local supporting modules use explicit `.ts` ESM paths.
+
+Bundled extensions use the same runtime contract but live under the repository
+`extensions/` catalog. Their static `plugin.json` adds catalog metadata such as
+`category`, `icon`, and `contributes.tools`; listing never executes extension
+code. Catalog contract tests validate manifests, run mocked `node --test` tests,
+and perform runtime tool discovery before a contributed folder can ship.
+
+### Plugin locality and catalog promotion
+
+Plugins created through chat are local by default. They stay under the user's
+app-local `generated-plugins` directory and must not be copied into, committed
+to, or otherwise inferred as candidates for the repository `extensions/`
+catalog. A working local plugin is not automatically a bundled extension.
+
+Promotion is an explicit publishing action. Only promote a local plugin when
+the user specifically asks to make that named plugin central, bundled, or
+available in the repository catalog. Promotion should:
+
+1. Leave the app-local original in place and copy only the authored plugin
+   files into a new `extensions/<kebab-case-slug>/` directory.
+2. Exclude credentials, `.env` files, runtime caches, `.plugin-data`, build
+   output, and other machine-local files.
+3. Convert `plugin.json` into a static catalog manifest: use a stable
+   `raynard.catalog.<slug>` ID, `status: "bundled"`, catalog metadata
+   (`category`, `tags`, `icon`, `author`, and `homepage`), exactly three sample
+   prompts, source URLs, and a `contributes.tools` summary matching the exported
+   runtime tools. Never include secret values.
+4. Preserve the normal plugin contract: `@raynard/plugin-sdk`, declarative
+   cards, useful text and references, matching structured data, mocked tests,
+   and a README Endpoint Inventory.
+5. Run the focused catalog gate with
+   `npx vitest run scripts/extension-catalog.test.mjs`, then run
+   `npm test -- --run` and `npm run build` before committing.
+6. Commit the complete `extensions/<slug>/` folder. Merge/acceptance of that
+   repository change is the approval step; it ships in the bundled catalog with
+   the next packaged release.
+
+Removing an extension from the central catalog is the reverse publishing
+decision, not deletion of the user's plugin. Before removing
+`extensions/<slug>/`, verify the user has an app-local copy if they want to keep
+using it. Removing the repository folder stops bundling it in future releases;
+it must not delete or overwrite an already installed app-local copy.
 
 Each tool needs a specific routing description, an object JSON parameter
 schema, an async `execute(args)` implementation, a fixed declarative result
@@ -267,11 +387,15 @@ On macOS, Tauri data for this application is normally stored under:
 └── generated-plugins/
 ```
 
+`chat-history/index.json` is the persistent sidebar index, not a conversation.
+Conversation snapshots are named `chat-*.json`; always exclude the index when
+finding a recent chat.
+
 Find and inspect the latest saved conversation:
 
 ```bash
 APP_DATA="$HOME/Library/Application Support/ai.raynard"
-LATEST_CHAT="$(ls -1t "$APP_DATA/chat-history"/*.json 2>/dev/null | head -1)"
+LATEST_CHAT="$(find "$APP_DATA/chat-history" -maxdepth 1 -type f -name 'chat-*.json' -exec ls -1t {} + 2>/dev/null | head -1)"
 test -n "$LATEST_CHAT" || { echo "No saved chats found"; exit 1; }
 echo "$LATEST_CHAT"
 jq . "$LATEST_CHAT"
@@ -341,6 +465,8 @@ The runner prints one JSON object. Success requires `"ok": true`; inspect
 ## Commit & Pull Request Guidelines
 
 Current commits use short imperative summaries, for example `Initial Tauri chat app` and `Add chat history sidebar and markdown rendering`. Keep commits scoped and avoid mixing unrelated UI, backend, and documentation work unless they are part of one feature.
+
+Do not bypass, disable, replace, delete, modify, or otherwise override repository hooks or the configured hooks path without the user's explicit permission. If a hook blocks an operation, report the failure and ask how to proceed rather than working around it.
 
 Pull requests should describe the user-facing change, list verification commands run, and include screenshots or screen recordings for visual UI changes.
 

@@ -5,9 +5,11 @@ import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple, Type } from '@mariozechner/pi-ai';
 import {
   buildMainAgentSystemPrompt,
+  createAvailableExtensionSearchTool,
   defaultThinkingLevel,
   createBuildRequestTool,
   createDirectAnswerTool,
+  createExtensionRecommendationTool,
   createGeneratedPluginTools,
   createModel,
   createUsageTotal,
@@ -151,6 +153,7 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
 
 let buildRequest = null;
 let directAnswer = null;
+let extensionRecommendation = null;
 const buildRequestTool = createBuildRequestTool(
   Type,
   (nextRequest) => {
@@ -162,8 +165,30 @@ const buildRequestTool = createBuildRequestTool(
 const directAnswerTool = createDirectAnswerTool(Type, (answer) => {
   directAnswer = answer;
 });
-const tools = [...generatedTools, buildRequestTool, directAnswerTool];
-const internalToolNames = new Set([directAnswerTool.name]);
+const availableExtensionSearchTool = createAvailableExtensionSearchTool(
+  Type,
+  request.availableExtensions
+);
+const extensionRecommendationTool = createExtensionRecommendationTool(
+  Type,
+  request.availableExtensions,
+  (recommendation) => {
+    extensionRecommendation = recommendation;
+    emit({ type: 'extension_recommendation', result: recommendation });
+  }
+);
+const tools = [
+  ...generatedTools,
+  availableExtensionSearchTool,
+  extensionRecommendationTool,
+  buildRequestTool,
+  directAnswerTool
+];
+const internalToolNames = new Set([
+  availableExtensionSearchTool.name,
+  extensionRecommendationTool.name,
+  directAnswerTool.name
+]);
 
 // Built once so its resolved contextWindow — pi's catalog first, FALLBACK_LIMITS
 // second — is the same number both the agent runs against and /status divides by.
@@ -274,7 +299,13 @@ try {
   // Each of these ends the turn with no assistant text, so without this guard
   // the host would replace the prompt card with an error bubble.
   const failed = lastStopReason === 'error' || lastStopReason === 'aborted';
-  if (!directAnswer && !buildRequest && !credentialRequest && (failed || !lastMessageHadText)) {
+  if (
+    !directAnswer &&
+    !buildRequest &&
+    !credentialRequest &&
+    !extensionRecommendation &&
+    (failed || !lastMessageHadText)
+  ) {
     const reason =
       lastErrorMessage ||
       (lastStopReason === 'aborted'
@@ -301,9 +332,9 @@ try {
   }
   emit({
     type: 'done',
-    text: directAnswer || finalText,
+    text: directAnswer || extensionRecommendation?.answer || finalText,
     buildRequest,
-    result: credentialRequest || undefined,
+    result: extensionRecommendation || credentialRequest || undefined,
     stopReason: lastStopReason,
     usage: usageTotal.value()
   });

@@ -258,10 +258,10 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
-Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
+Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, search_available_extensions for a factual question no installed tool can answer, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
 1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
-3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. If no installed tool fits, do NOT call request_plugin_build merely because access is missing. When you know plausible public APIs, use answer_without_api to suggest the best concrete options and ask the user to choose. When you cannot identify a credible API, ask a short question such as "Where should that information come from?" A new-plugin build is appropriate only after the source is established. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
+3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. For a factual or data question that no installed tool can answer, call search_available_extensions with the user's needed capability before calling answer_without_api or proposing a new request_plugin_build. This on-demand check keeps the extension catalog out of the default context. If the result contains a clearly relevant extension, call recommend_available_extension with its exact slug and a concise answer; the host will attach its Install button. If no catalog entry clearly fits, use answer_without_api. In either response, end the offer with: "Or provide me with an API documentation site and I can build one." Do NOT call request_plugin_build merely because access is missing. A new-plugin build is appropriate only after the user supplies or confirms a credible official API documentation URL. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
 
 ${modePolicy}
 
@@ -285,6 +285,7 @@ Core policy:
 - Never claim that a result card was shown or refreshed unless you invoked the corresponding tool in the current turn. Do not reconstruct a supposed card in prose from conversation history.
 - Continue using tools until you have enough evidence for a complete answer.
 - Never fabricate tool results, references, API access, or current facts.
+- For a question no installed tool can answer, always call search_available_extensions before the fallback response. Catalog entries are deliberately available only through that on-demand tool; never claim an extension is available from memory.
 - If no installed tool provides required access and a concrete API with official documentation is established, call request_plugin_build with a useful plugin name, a complete capability description, why it is needed, and at least one real official API documentation URL.
 - Never invent an API, documentation URL, or likely data source to justify a build. If the source is uncertain, use answer_without_api to clarify it instead of offering a speculative plugin build.
 - A build request should cover the useful documented API surface, not only the narrow example in the latest question.
@@ -304,10 +305,12 @@ Presenting data (charts):
 - Shape:
 
 \`\`\`chart
-{"type":"line","title":"GDP per person employed (constant 2021 PPP$)","x":"year","yLabel":"PPP$","highlight":["UK"],"sources":[3],"series":[{"key":"UK","label":"UK"},{"key":"Germany","label":"Germany"}],"rows":[{"year":2010,"UK":100308,"Germany":115039},{"year":2023,"UK":107289,"Germany":123751}]}
+{"type":"line","title":"GDP per capita and export share","x":"year","yLabel":"International $","rightYLabel":"% of exports","sources":[3,4],"series":[{"key":"GDP","label":"GDP per capita"},{"key":"Exports","label":"Food exports (%)","axis":"right"}],"rows":[{"year":2010,"GDP":56212,"Exports":41.4},{"year":2023,"GDP":68118,"Exports":44.6}]}
 \`\`\`
 
-- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "series[].label", "stacked" (bar only), "highlight", and "sources".
+- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "rightYLabel", "series[].label", "series[].axis" ("left" or "right"), "stacked" (bar only), "highlight", and "sources". A series without an axis uses the left axis.
+- Keep "yLabel" and "rightYLabel" concise: prefer 2–5 words and aim for 30 characters or fewer. Include only the measure and unit; put additional context in the chart title or surrounding prose.
+- When one chart combines different units that cannot share a meaningful scale, such as currency and percentage values, keep the primary measure on the left, put every secondary-unit series on axis "right", and name both scales with "yLabel" and "rightYLabel". Keep series with compatible units on one axis. Never claim a chart has two axes by writing both scale names into "yLabel"; assign the series and emit the real right axis. Do not combine a right axis with a stacked bar chart.
 - "sources" is an array of the citation numbers whose observations you actually plotted, for example "sources":[7,9]. Use the numbers from the "Sources:" lists, without the brackets. Include only the calls the rows came from — never the searches, structure lookups, or codelist calls you made to find them. The app shows those references under the chart and names them on a copied image, so a number that did not supply a row is a false citation. Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
 - "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
 - The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
@@ -768,6 +771,131 @@ export function createDirectAnswerTool(Type, onDirectAnswer) {
   };
 }
 
+function normalizedAvailableExtensions(extensions) {
+  return (Array.isArray(extensions) ? extensions : [])
+    .filter((extension) => extension && extension.installed !== true)
+    .map((extension) => ({
+      slug: String(extension.slug || '').trim(),
+      name: String(extension.name || extension.slug || '').trim(),
+      description: String(extension.description || '').trim(),
+      category: String(extension.category || '').trim(),
+      tools: (Array.isArray(extension.tools) ? extension.tools : []).map((tool) => ({
+        name: String(tool?.name || '').trim(),
+        description: String(tool?.description || '').trim()
+      }))
+    }))
+    .filter((extension) => extension.slug && extension.name);
+}
+
+export function createAvailableExtensionSearchTool(Type, extensions) {
+  const available = normalizedAvailableExtensions(extensions);
+
+  return {
+    name: 'search_available_extensions',
+    label: 'Search Available Extensions',
+    description:
+      'Inspect the on-demand catalog of extensions that are available but not installed. Call this before answering any factual or data question that no installed API tool can answer. Do not call it for greetings, stable explanations, or explicit edits to an existing plugin.',
+    parameters: Type.Object({
+      query: Type.String({
+        description: 'A concise description of the missing data or capability the user needs.'
+      })
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const query = String(args?.query || '').trim().toLowerCase();
+      const tokens = [...new Set(query.match(/[a-z0-9]+/g) || [])].filter(
+        (token) => token.length > 2
+      );
+      const ranked = available
+        .map((extension, index) => {
+          const haystack = [
+            extension.name,
+            extension.description,
+            extension.category,
+            ...extension.tools.flatMap((tool) => [tool.name, tool.description])
+          ]
+            .join(' ')
+            .toLowerCase();
+          return {
+            extension,
+            index,
+            score: tokens.reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0)
+          };
+        })
+        .sort((left, right) => right.score - left.score || left.index - right.index)
+        .slice(0, 12)
+        .map(({ extension }) => extension);
+      const catalogText = ranked.length
+        ? ranked
+            .map((extension) => {
+              const tools = extension.tools
+                .map((tool) => `${tool.name}${tool.description ? ` — ${tool.description}` : ''}`)
+                .join('; ');
+              return `- ${extension.name} (${extension.slug})${extension.category ? ` [${extension.category}]` : ''}: ${extension.description}${tools ? ` Tools: ${tools}` : ''}`;
+            })
+            .join('\n')
+        : '(No extensions are currently available to install.)';
+      const text = `Available extensions, ordered by textual relevance to "${query || 'the requested capability'}":\n${catalogText}\n\nWhen one declared capability clearly fits, call recommend_available_extension with its exact slug so the host can render an Install button. Otherwise call answer_without_api. End the user-facing fallback with exactly: "Or provide me with an API documentation site and I can build one."`;
+      return {
+        content: [{ type: 'text', text }],
+        details: { type: 'available-extension-search', query, extensions: ranked }
+      };
+    }
+  };
+}
+
+export function createExtensionRecommendationTool(Type, extensions, onRecommendation) {
+  const available = normalizedAvailableExtensions(extensions);
+  const closingOffer = 'Or provide me with an API documentation site and I can build one.';
+  return {
+    name: 'recommend_available_extension',
+    label: 'Recommend Available Extension',
+    description:
+      'Finish a missing-capability turn by recommending one clearly relevant extension returned by search_available_extensions. The host renders an Install button for the validated catalog slug.',
+    parameters: Type.Object({
+      slug: Type.String({
+        description: 'Exact slug returned by search_available_extensions.'
+      }),
+      answer: Type.String({
+        description: 'Concise user-facing explanation of why this extension fits.'
+      })
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const slug = String(args?.slug || '').trim();
+      const extension = available.find((candidate) => candidate.slug === slug);
+      if (!extension) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'That slug is not an available catalog extension. Search the catalog again or use answer_without_api.'
+            }
+          ],
+          details: { type: 'extension-recommendation-rejected', slug },
+          terminate: false
+        };
+      }
+      const supplied = String(args?.answer || '').trim();
+      const answer = supplied.includes(closingOffer)
+        ? supplied
+        : `${supplied || `${extension.name} is available to install.`}\n\n${closingOffer}`;
+      const recommendation = {
+        slug: extension.slug,
+        name: extension.name,
+        description: extension.description,
+        answer
+      };
+      onRecommendation(recommendation);
+      return {
+        content: [{ type: 'text', text: answer }],
+        details: { type: 'extension-recommendation', ...recommendation },
+        terminate: true
+      };
+    }
+  };
+}
+
 /**
  * Advance notice that the plugin about to be built will need a key. It lets the
  * confirmation card send the user off to register while the build runs, instead
@@ -887,7 +1015,7 @@ export function createBuildRequestTool(Type, onBuildRequest, options = {}) {
             {
               type: 'text',
               text:
-                'No credible API source was supplied, so do not offer a plugin build. Inspect the installed tools again. If none is relevant, call answer_without_api to ask where the information should come from, suggest concrete public APIs you genuinely know are available, or ask whether the user intended an installed plugin.'
+                'No credible API source was supplied, so do not offer a plugin build. Inspect the installed tools again. For a factual question with no relevant installed tool, call search_available_extensions before answer_without_api. Recommend a clearly relevant available extension when one exists; otherwise ask the user to provide or confirm the source. Then offer: "Or provide me with an API documentation site and I can build one."'
             }
           ],
           details: {

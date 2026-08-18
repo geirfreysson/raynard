@@ -1,0 +1,31 @@
+{
+  "id": "raynard.catalog.open-library",
+  "name": "Open Library",
+  "description": "Search Open Library for books and authors using its public API.",
+  "category": "Reference",
+  "tags": ["books", "authors", "library", "search"],
+  "icon": "book-open",
+  "author": "Raynard",
+  "homepage": "https://openlibrary.org/developers/api",
+  "version": "1.0.0",
+  "sdkVersion": 1,
+  "status": "bundled",
+  "createdAt": "2026-08-15T00:00:00.000Z",
+  "samplePrompts": [
+    "Find books about Icelandic folklore.",
+    "Show me books written by Ursula K. Le Guin.",
+    "Search for books about building open source communities."
+  ],
+  "sourceUrls": [
+    "https://openlibrary.org/dev/docs/api/search"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "open_library_search_books",
+        "description": "Search Open Library by title, author, subject, ISBN, or general keywords and return a bounded list of matching books.",
+        "hasCard": true
+      }
+    ]
+  }
+}

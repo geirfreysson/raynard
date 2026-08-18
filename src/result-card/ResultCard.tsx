@@ -264,7 +264,15 @@ function Block({ block, data }: { block: CardBlock; data: unknown }) {
   }
 }
 
-export function ResultCard({ template, data }: { template: CardTemplate; data: unknown }) {
+export function ResultCard({
+  template,
+  data,
+  cached = false
+}: {
+  template: CardTemplate;
+  data: unknown;
+  cached?: boolean;
+}) {
   const layout = Array.isArray(template?.layout) ? template.layout : [];
   // Hoist the first top-level Image block into the header as an avatar.
   const headerImageIndex = layout.findIndex(
@@ -274,7 +282,7 @@ export function ResultCard({ template, data }: { template: CardTemplate; data: u
   const bodyBlocks = layout.filter((_, i) => i !== headerImageIndex);
   const title = template?.title ? interpolate(template.title, data) : '';
   const avatarAlt = headerImage?.alt ? interpolate(headerImage.alt, data) : title;
-  const hasHeader = Boolean(headerImage || title);
+  const hasHeader = Boolean(headerImage || title || cached);
 
   return (
     <div className="rc-scope">
@@ -287,7 +295,8 @@ export function ResultCard({ template, data }: { template: CardTemplate; data: u
                 <AvatarFallback>{initialsFrom(avatarAlt || title)}</AvatarFallback>
               </Avatar>
             )}
-            {title && <CardTitle>{title}</CardTitle>}
+            {title && <CardTitle className="min-w-0 flex-1">{title}</CardTitle>}
+            {cached && <Badge variant="secondary" className="ml-auto shrink-0">Cached</Badge>}
           </CardHeader>
         )}
         {bodyBlocks.length > 0 && (

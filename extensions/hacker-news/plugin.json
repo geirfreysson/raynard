@@ -1,0 +1,92 @@
+{
+  "id": "raynard.catalog.hacker-news",
+  "name": "Hacker News",
+  "description": "Browse live Hacker News stories, discussions, users, and site activity through the official API.",
+  "category": "News",
+  "tags": [
+    "hacker-news",
+    "technology",
+    "startups",
+    "news",
+    "discussion"
+  ],
+  "icon": "message-square",
+  "author": "Raynard",
+  "homepage": "https://github.com/HackerNews/API",
+  "version": "1.0.0",
+  "sdkVersion": 1,
+  "status": "bundled",
+  "createdAt": "2026-08-16T00:00:00.000Z",
+  "samplePrompts": [
+    "Who wrote the highest-scoring Hacker News story right now, and what is their karma?",
+    "Which three stories among the current Hacker News top 10 have the most comments?",
+    "Show me the latest Show HN projects and summarize the most discussed one."
+  ],
+  "sourceUrls": [
+    "https://github.com/hackernews/api"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "hn_list_top_stories",
+        "description": "List top stories from the official Hacker News API — the current front-page ranking on Hacker News. Fetches the /v0/topstories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_list_new_stories",
+        "description": "List newest stories from the official Hacker News API — the most recently submitted stories on Hacker News. Fetches the /v0/newstories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_list_best_stories",
+        "description": "List best stories from the official Hacker News API — the highest-voted recent stories on Hacker News. Fetches the /v0/beststories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_list_ask_stories",
+        "description": "List Ask HN stories from the official Hacker News API — the latest \"Ask HN\" question posts on Hacker News. Fetches the /v0/askstories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_list_show_stories",
+        "description": "List Show HN stories from the official Hacker News API — the latest \"Show HN\" project posts on Hacker News. Fetches the /v0/showstories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_list_job_stories",
+        "description": "List job postings from the official Hacker News API — the latest job postings on Hacker News (who is hiring). Fetches the /v0/jobstories.json id feed and then each story item. Optional limit (1-30, default 10). Returns each story's id, title, score, author and comment count; drill into one with hn_get_item, read its discussion with hn_get_item_comments, or filter by keyword/type/time with hn_search_stories.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_search_stories",
+        "description": "Search and filter Hacker News stories fetched from a live feed (top, new, best, ask, show or job). The official API has no server-side search, so this tool scans up to scanLimit recent feed items (default 100, max 500) and filters client-side by keyword (title, author, URL or text), item type (story/job/poll), and time period (period enum, or an explicit minTime/maxTime Unix-second window). Returns matching story ids, titles, scores and dates — use hn_get_item for full details on a match.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_get_item",
+        "description": "Fetch one Hacker News item by its numeric id — works for stories, comments, jobs, polls and poll options. Returns the title or text, type, author, score, comment count, URL, parent link and posting time, plus a result card. Use ids from hn_list_* or hn_search_stories; follow up with hn_get_item_comments for the discussion or hn_get_user for the author.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_get_item_comments",
+        "description": "Fetch the top-level comments of a Hacker News story, poll or comment by id. Returns each direct reply with its id, author and plain-text body (HTML stripped), plus a result card with a comments table. Optional limit (1-30, default 10). Use hn_get_item on a comment id to follow its own replies (kids).",
+        "hasCard": true
+      },
+      {
+        "name": "hn_get_user",
+        "description": "Fetch a Hacker News user profile by exact case-sensitive username. Returns karma, account creation date, the about text (HTML stripped) and total submission count, plus a result card. Use author names returned by hn_list_*, hn_search_stories or hn_get_item.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_get_max_item",
+        "description": "Get the current largest Hacker News item id from /v0/maxitem.json — a cheap activity heartbeat for the whole site. Every new story, comment, job or poll increments it, so it doubles as a \"how busy is HN right now\" metric. Use hn_get_item on nearby ids to inspect the newest content, or hn_get_live_updates for what changed.",
+        "hasCard": true
+      },
+      {
+        "name": "hn_get_live_updates",
+        "description": "Get the Hacker News live updates feed from /v0/updates.json: the item ids and profile names that changed most recently. Returns both counts and the raw id lists, plus a result card. Drill into changed items with hn_get_item and changed profiles with hn_get_user.",
+        "hasCard": true
+      }
+    ]
+  }
+}

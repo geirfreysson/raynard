@@ -2,6 +2,10 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { BuildRequestAuth } from './build-request-flow';
 import { decodeCredentialRequest } from './credential-request-flow';
 import type { CredentialRequest as AgentCredentialRequest } from './credential-request-flow';
+import {
+  decodeExtensionRecommendation,
+  type ExtensionRecommendation
+} from './extension-recommendation';
 
 export type { AgentCredentialRequest };
 
@@ -34,6 +38,7 @@ export type AgentReply = {
   provider?: string;
   model?: string;
   buildRequest?: AgentBuildRequest;
+  extensionRecommendation?: ExtensionRecommendation;
   usage?: TurnUsage;
 };
 
@@ -50,6 +55,7 @@ export type StreamPayload = {
     | 'tool_execution_end'
     | 'build_request'
     | 'credential_request'
+    | 'extension_recommendation'
     | 'done'
     | 'retry'
     | 'status'
@@ -149,6 +155,7 @@ export type AgentStreamHandlers = {
   onToolExecutionEnd?: (event: AgentToolExecutionEndEvent) => void;
   onBuildRequest?: (request: AgentBuildRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
+  onExtensionRecommendation?: (recommendation: ExtensionRecommendation) => void;
   /** A host-side build milestone (running tests, validation passed). */
   onStatus?: (status: string) => void;
   onRetry?: (event: AgentRetryEvent) => void;
@@ -177,7 +184,8 @@ export type PluginBuilderRequest = {
 export async function runMainAgentStream(
   messages: ChatMessage[],
   mode: 'explore' | 'build',
-  handlers: AgentStreamHandlers = {}
+  handlers: AgentStreamHandlers = {},
+  chatId?: string
 ): Promise<AgentReply> {
   const streamId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -200,11 +208,12 @@ export async function runMainAgentStream(
     }
   });
 
-  const reply = await invoke<AgentReply>('run_main_agent_stream', {
+  const reply = await invoke<AgentReply & { result?: unknown }>('run_main_agent_stream', {
     streamId,
     onEvent,
     messages,
-    mode
+    mode,
+    chatId
   });
 
   return {
@@ -212,6 +221,7 @@ export async function runMainAgentStream(
     provider: reply.provider ?? provider,
     model: reply.model ?? model,
     buildRequest: reply.buildRequest ?? buildRequest,
+    extensionRecommendation: decodeExtensionRecommendation(reply.result) ?? undefined,
     usage: reply.usage
   };
 }
@@ -344,6 +354,10 @@ export function applyStreamPayload(
     // new named column.
     const request = decodeCredentialRequest(payload.result);
     if (request) handlers.onCredentialRequest?.(request);
+  }
+  if (payload.event_type === 'extension_recommendation') {
+    const recommendation = decodeExtensionRecommendation(payload.result);
+    if (recommendation) handlers.onExtensionRecommendation?.(recommendation);
   }
 
   return nextState;

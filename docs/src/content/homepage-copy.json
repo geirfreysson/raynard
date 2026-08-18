@@ -12,8 +12,7 @@
     },
     "body": "Raynard connects to data APIs so you can ask questions in plain English—every number comes back with a reference you can check.",
     "primaryAction": {
-      "label": "Download for macOS",
-      "to": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg"
+      "label": "Download for macOS"
     },
     "secondaryAction": {
       "label": "Read the Docs",

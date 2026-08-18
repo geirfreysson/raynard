@@ -84,6 +84,12 @@ function barFills(container: HTMLElement): (string | null)[] {
   );
 }
 
+function curveYSpread(curve: Element): number {
+  const numbers = (curve.getAttribute('d')?.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+  const yCoordinates = numbers.filter((_, index) => index % 2 === 1);
+  return yCoordinates.length ? Math.max(...yCoordinates) - Math.min(...yCoordinates) : 0;
+}
+
 // ResponsiveContainer picks up its size in an effect, so the tree needs a flush
 // after render before the plotted series exist.
 async function mount(source: string): Promise<{ container: HTMLElement; root: Root }> {
@@ -112,6 +118,49 @@ describe('ChartBlock', () => {
     // Axis ticks come from the real data, not placeholders.
     expect(container.textContent).toContain('2010');
     expect(container.textContent).toContain('2023');
+
+    act(() => root.unmount());
+  });
+
+  it('uses independent scales for dollar and percentage series', async () => {
+    const { container, root } = await mount(
+      JSON.stringify({
+        type: 'line',
+        title: 'Iceland: GDP vs. export concentration',
+        x: 'year',
+        yLabel: 'International $',
+        rightYLabel: '% of exports',
+        series: [
+          { key: 'gdp', label: 'GDP per capita' },
+          { key: 'metals', label: 'Ores & metals exports', axis: 'right' },
+          { key: 'food', label: 'Food exports', axis: 'right' }
+        ],
+        rows: [
+          { year: 2005, gdp: 57512, metals: 19, food: 58.5 },
+          { year: 2010, gdp: 56212, metals: 42, food: 41.4 },
+          { year: 2020, gdp: 59544, metals: 36.1, food: 50.8 },
+          { year: 2024, gdp: 67310, metals: 34.3, food: 44 }
+        ]
+      })
+    );
+
+    expect(container.querySelectorAll('.recharts-yAxis')).toHaveLength(2);
+    expect(container.textContent).toContain('International $');
+    expect(container.textContent).toContain('% of exports');
+    const yLabels = [...container.querySelectorAll('.recharts-label')];
+    // A rotated label must be centred on the axis midpoint. Recharts' default
+    // inside-edge anchors make the text grow upward from the midpoint, which
+    // sends longer labels above the chart viewport.
+    expect(yLabels.map((label) => label.getAttribute('text-anchor'))).toEqual([
+      'middle',
+      'middle'
+    ]);
+    expect(axisText(container)).toMatch(/\d{2}K\b/);
+
+    const curves = [...container.querySelectorAll('.recharts-line-curve')];
+    expect(curves).toHaveLength(3);
+    expect(curveYSpread(curves[1])).toBeGreaterThan(20);
+    expect(curveYSpread(curves[2])).toBeGreaterThan(20);
 
     act(() => root.unmount());
   });

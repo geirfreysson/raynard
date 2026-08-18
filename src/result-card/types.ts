@@ -39,9 +39,19 @@ export type CardTemplate = {
   layout: CardBlock[];
 };
 
+/** App-local payload written outside chat history when card data is large. */
+export type ResultArtifactRef = {
+  chatId: string;
+  artifactId: string;
+  byteCount: number;
+};
+
 /** One card captured from a storable tool call and persisted on a message. */
 export type StoredResultCard = {
   toolName: string;
   template: CardTemplate;
   data: unknown;
+  /** True when at least one API request used to produce this card hit the cache. */
+  cached?: boolean;
+  artifact?: ResultArtifactRef;
 };

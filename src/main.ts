@@ -1,21 +1,46 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import {
   createElement as createLucideElement,
+  Bookmark,
+  BookOpen,
   Database,
   Ellipsis,
+  GitPullRequest,
   MessageSquare,
+  PackageMinus,
   PanelLeftClose,
   Plug,
   Plus,
+  Share2,
   Trash2,
   type IconNode
 } from 'lucide';
+import {
+  bookmarkMessageKey,
+  bookmarkPreview,
+  canBookmarkMessage,
+  promptForAssistant
+} from './bookmarks';
 import { getErrorMessage } from './errors';
+import { createCoalescedSaveQueue } from './chat-persistence';
+import type { ExtensionRecommendation } from './extension-recommendation';
+import {
+  catalogExtensionMatches,
+  extensionRemovalAction,
+  groupExtensions
+} from './extension-groups';
+import { shouldShowExtensionOnboarding } from './extension-launch';
+import {
+  extensionInstallActionLabel,
+  shortExtensionDescription,
+  toggleExtensionSelection
+} from './extension-onboarding';
 import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
 import { parseChartSpec } from './chart-spec';
 import { renderChart, unmountChart } from './chart-mount';
 import { wrapCopyable } from './copy-affordance';
+import { writeClipboard } from './clipboard';
 import { chartRootToPngBlob, chartSpecToMarkdown, tableToPngBlob } from './copy-export';
 import { chartSourceEntries, extractToolSource, type ChartSource } from './chart-sources';
 import {
@@ -87,8 +112,22 @@ import {
   type ProviderQuota,
   type UsageTotals
 } from './status-modal';
-import { renderResultCards } from './result-card/mount';
+import type { ResultArtifactLoader } from './result-card/artifacts';
+import { configureResultArtifactLoader, renderResultCards } from './result-card/mount';
+import { decodeSharePayload } from './share/codec';
+import { APP_SCHEME, SHARE_BASE_URL } from './share/config';
+import { readDevShareHash, subscribeDeepLinks } from './share/deep-link';
+import { messagesFromSharedPayload, recommendationForShare } from './share/import';
+import { canShareMessage } from './share/share-message';
+import { openShareModal } from './share/share-modal';
+import type { ShareExtension, SharedAnswerPayload } from './share/types';
 import { buildExampleData } from './result-card/example';
+import { resultWasCached } from './result-card/cache';
+import {
+  contributionDefaults,
+  parseContributionTags,
+  type ExtensionContributionMetadata
+} from './extension-contribution';
 import type { CardTemplate, StoredResultCard } from './result-card/types';
 import {
   buildMentionItems,
@@ -174,6 +213,8 @@ type StoredChatMessage = {
    */
   modelFailure?: { title: string; detail: string; raw: string };
   builderRun?: boolean;
+  /** Arrived through a share link, so the cards are a snapshot rather than live. */
+  sharedImport?: boolean;
   /** Tool calls and reasoning in the order they happened. */
   builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
@@ -188,6 +229,8 @@ type StoredChatMessage = {
    * key is configured is re-derived from the plugin list on every render.
    */
   credentialRequest?: StoredCredentialRequest;
+  /** Available catalog extension selected for an inline Install action. */
+  extensionRecommendation?: ExtensionRecommendation;
   /**
    * Token counts for the turn that produced this message. Counts only — the
    * source of the context meter and the per-chat figures in `/status`.
@@ -228,6 +271,22 @@ type ChatHistoryPayload = {
 type ChatHistoryList = {
   folder: string;
   chats: ChatHistoryRow[];
+};
+
+type StoredBookmark = {
+  id: string;
+  messageKey: string;
+  chatId: string;
+  chatName: string;
+  prompt: string;
+  answer: string;
+  messageTimestamp: number;
+  createdAt: number;
+};
+
+type BookmarkList = {
+  bookmarks: StoredBookmark[];
+  total: number;
 };
 
 type GeneratedPlugin = {
@@ -274,9 +333,53 @@ type GeneratedPluginDetail = {
   readme: string;
 };
 
+type CatalogExtensionTool = {
+  name: string;
+  description: string;
+  hasCard: boolean;
+};
+
+type CatalogExtension = {
+  slug: string;
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  icon: string;
+  author: string;
+  homepage: string;
+  version: string;
+  tools: CatalogExtensionTool[];
+  requiresKey: boolean;
+  installed: boolean;
+};
+
+type CatalogExtensionList = {
+  folder: string;
+  extensions: CatalogExtension[];
+};
+
+type CatalogExtensionDetail = {
+  extension: CatalogExtension;
+  detail: GeneratedPluginDetail;
+};
+
 type PluginCacheSettings = {
   enabled: boolean;
   ttlHours: number;
+};
+
+type PreparedExtensionContribution = {
+  folder: string;
+  extensionFolder: string;
+  patchPath: string;
+  promptPath: string;
+  prBodyPath: string;
+  title: string;
+  harnessPrompt: string;
+  prBody: string;
+  files: string[];
+  checks: string[];
 };
 
 type AppMode = 'explore' | 'build';
@@ -288,7 +391,7 @@ type PluginScaffoldStatus = {
   hasRuntimeTools: boolean;
   status: string;
 };
-type SidebarView = 'chats' | 'plugins';
+type SidebarView = 'chats' | 'plugins' | 'bookmarks';
 
 // The plugin a Build-mode chat is actively editing. Once set, later Build-mode
 // messages route straight to the coding agent for this plugin.
@@ -327,12 +430,17 @@ const DEFAULT_SPLASH_PROMPTS = [
   'Say hello and show the conversation view'
 ] as const;
 const appIcons: Record<string, IconNode> = {
+  bookmark: Bookmark,
+  'book-open': BookOpen,
   database: Database,
   ellipsis: Ellipsis,
+  'git-pull-request': GitPullRequest,
   'message-square': MessageSquare,
+  'package-minus': PackageMinus,
   plus: Plus,
   'panel-left-close': PanelLeftClose,
   plug: Plug,
+  'share-2': Share2,
   'trash-2': Trash2
 };
 
@@ -365,6 +473,9 @@ app.innerHTML = `
       <button id="pluginsToggle" class="sidebar-rail-btn" type="button" aria-label="Generated plugins" aria-pressed="false">
         ${iconSvg('plug')}
       </button>
+      <button id="bookmarksToggle" class="sidebar-rail-btn" type="button" aria-label="Bookmarks" aria-pressed="false">
+        ${iconSvg('bookmark')}
+      </button>
       <button id="newChatRail" class="sidebar-rail-btn" type="button" aria-label="New chat">
         ${iconSvg('plus')}
       </button>
@@ -381,6 +492,7 @@ app.innerHTML = `
       </button>
       <nav id="chatHistoryList" class="chat-history-list" aria-label="Chat history"></nav>
       <nav id="pluginList" class="chat-history-list is-hidden" aria-label="Generated plugins"></nav>
+      <nav id="bookmarkList" class="chat-history-list bookmark-list is-hidden" aria-label="Bookmarks"></nav>
       <p id="chatHistoryStatus" class="chat-history-status"></p>
     </aside>
 
@@ -450,6 +562,19 @@ app.innerHTML = `
         </div>
       </section>
 
+      <section id="extensionsModal" class="models-modal-overlay is-hidden" aria-hidden="true">
+        <div class="models-modal extensions-modal" role="dialog" aria-modal="true" aria-labelledby="extensionsModalTitle">
+          <header class="models-modal-header">
+            <div>
+              <h2 id="extensionsModalTitle">Extensions</h2>
+              <p id="extensionsModalHint">Installed and bundled extensions.</p>
+            </div>
+            <button id="extensionsModalClose" type="button" aria-label="Close extensions">x</button>
+          </header>
+          <div id="extensionsModalContent" class="models-modal-content extensions-modal-content"></div>
+        </div>
+      </section>
+
       <section id="extensionDeleteModal" class="extension-delete-modal-overlay is-hidden" aria-hidden="true">
         <div class="extension-delete-modal" role="dialog" aria-modal="true" aria-labelledby="extensionDeleteTitle">
           <header class="extension-delete-header">
@@ -490,6 +615,31 @@ app.innerHTML = `
           </div>
         </div>
       </section>
+
+      <section id="extensionContributionModal" class="extension-contribution-modal-overlay is-hidden" aria-hidden="true">
+        <form id="extensionContributionForm" class="extension-contribution-modal" role="dialog" aria-modal="true" aria-labelledby="extensionContributionTitle">
+          <header class="extension-contribution-header">
+            <h2 id="extensionContributionTitle">Prepare contribution</h2>
+            <p>Validate this extension and prepare a pull-request bundle. Raynard does not need your GitHub credentials.</p>
+          </header>
+          <div class="extension-contribution-fields">
+            <label><span>Category</span><input id="extensionContributionCategory" required maxlength="80"></label>
+            <label><span>Tags <small>comma-separated</small></span><input id="extensionContributionTags" required maxlength="300"></label>
+            <label><span>Icon <small>Lucide name</small></span><input id="extensionContributionIcon" required maxlength="64"></label>
+            <label><span>Author</span><input id="extensionContributionAuthor" required maxlength="120" autocomplete="name"></label>
+            <label class="is-wide"><span>Homepage</span><input id="extensionContributionHomepage" type="url" required maxlength="500" placeholder="https://…"></label>
+          </div>
+          <p class="extension-contribution-note">Only authored source, manifest, README, and test files are copied. Credentials, <code>.env</code>, <code>.runtime-tools.json</code>, caches, dependencies, and local data are excluded.</p>
+          <p id="extensionContributionStatus" class="extension-contribution-status" aria-live="polite"></p>
+          <section id="extensionContributionResult" class="extension-contribution-result is-hidden" aria-live="polite"></section>
+          <div class="extension-contribution-actions">
+            <button id="extensionContributionCancel" class="extension-delete-secondary" type="button">Cancel</button>
+            <button id="extensionContributionPrepare" class="extension-contribution-primary" type="submit">Prepare bundle</button>
+            <button id="extensionContributionCopy" class="is-hidden" type="button">Copy harness prompt</button>
+            <button id="extensionContributionReveal" class="is-hidden" type="button">Show folder</button>
+          </div>
+        </form>
+      </section>
     </section>
   </main>
 `;
@@ -497,12 +647,14 @@ app.innerHTML = `
 const shell = document.querySelector<HTMLElement>('.app-shell');
 const chatsToggle = document.querySelector<HTMLButtonElement>('#chatsToggle');
 const pluginsToggle = document.querySelector<HTMLButtonElement>('#pluginsToggle');
+const bookmarksToggle = document.querySelector<HTMLButtonElement>('#bookmarksToggle');
 const newChatRail = document.querySelector<HTMLButtonElement>('#newChatRail');
 const chatSidebar = document.querySelector<HTMLElement>('#chatSidebar');
 const sidebarClose = document.querySelector<HTMLButtonElement>('#sidebarClose');
 const newChatButton = document.querySelector<HTMLButtonElement>('#newChatButton');
 const chatHistoryList = document.querySelector<HTMLElement>('#chatHistoryList');
 const pluginList = document.querySelector<HTMLElement>('#pluginList');
+const bookmarkList = document.querySelector<HTMLElement>('#bookmarkList');
 const chatHistoryStatus = document.querySelector<HTMLElement>('#chatHistoryStatus');
 const introForm = document.querySelector<HTMLFormElement>('#introForm');
 const introInput = document.querySelector<HTMLTextAreaElement>('#introInput');
@@ -530,11 +682,17 @@ const modelsModalTitle = document.querySelector<HTMLElement>('#modelsModalTitle'
 const modelsModalHint = document.querySelector<HTMLElement>('#modelsModalHint');
 const modelsModalContent = document.querySelector<HTMLElement>('#modelsModalContent');
 const onboardingOverlay = document.querySelector<HTMLElement>('#onboardingOverlay');
+const onboardingPanel = document.querySelector<HTMLElement>('.onboarding-panel');
 const onboardingTitle = document.querySelector<HTMLElement>('#onboardingTitle');
 const onboardingHint = document.querySelector<HTMLElement>('#onboardingHint');
 const onboardingContent = document.querySelector<HTMLElement>('#onboardingContent');
 const modelsModalClose = document.querySelector<HTMLButtonElement>('#modelsModalClose');
+const extensionsModal = document.querySelector<HTMLElement>('#extensionsModal');
+const extensionsModalHint = document.querySelector<HTMLElement>('#extensionsModalHint');
+const extensionsModalContent = document.querySelector<HTMLElement>('#extensionsModalContent');
+const extensionsModalClose = document.querySelector<HTMLButtonElement>('#extensionsModalClose');
 const extensionDeleteModal = document.querySelector<HTMLElement>('#extensionDeleteModal');
+const extensionDeleteTitle = document.querySelector<HTMLElement>('#extensionDeleteTitle');
 const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
 const extensionDeleteCancel = document.querySelector<HTMLButtonElement>('#extensionDeleteCancel');
 const extensionDeleteConfirm = document.querySelector<HTMLButtonElement>('#extensionDeleteConfirm');
@@ -547,6 +705,20 @@ const pluginCacheStatus = document.querySelector<HTMLElement>('#pluginCacheStatu
 const pluginCacheClear = document.querySelector<HTMLButtonElement>('#pluginCacheClear');
 const pluginCacheCancel = document.querySelector<HTMLButtonElement>('#pluginCacheCancel');
 const pluginCacheSave = document.querySelector<HTMLButtonElement>('#pluginCacheSave');
+const extensionContributionModal = document.querySelector<HTMLElement>('#extensionContributionModal');
+const extensionContributionForm = document.querySelector<HTMLFormElement>('#extensionContributionForm');
+const extensionContributionTitle = document.querySelector<HTMLElement>('#extensionContributionTitle');
+const extensionContributionCategory = document.querySelector<HTMLInputElement>('#extensionContributionCategory');
+const extensionContributionTags = document.querySelector<HTMLInputElement>('#extensionContributionTags');
+const extensionContributionIcon = document.querySelector<HTMLInputElement>('#extensionContributionIcon');
+const extensionContributionAuthor = document.querySelector<HTMLInputElement>('#extensionContributionAuthor');
+const extensionContributionHomepage = document.querySelector<HTMLInputElement>('#extensionContributionHomepage');
+const extensionContributionStatus = document.querySelector<HTMLElement>('#extensionContributionStatus');
+const extensionContributionResult = document.querySelector<HTMLElement>('#extensionContributionResult');
+const extensionContributionCancel = document.querySelector<HTMLButtonElement>('#extensionContributionCancel');
+const extensionContributionPrepare = document.querySelector<HTMLButtonElement>('#extensionContributionPrepare');
+const extensionContributionCopy = document.querySelector<HTMLButtonElement>('#extensionContributionCopy');
+const extensionContributionReveal = document.querySelector<HTMLButtonElement>('#extensionContributionReveal');
 
 let activeSessionId = createSessionId();
 let activeChatMeta = createChatMeta(activeSessionId);
@@ -554,20 +726,46 @@ let chatMessages: ChatMessage[] = [];
 let storedMessages: StoredChatMessage[] = [];
 let chatHistoryRows: ChatHistoryRow[] = [];
 let generatedPlugins: GeneratedPlugin[] = [];
+let catalogExtensions: CatalogExtension[] = [];
+let bookmarkRows: StoredBookmark[] = [];
+let bookmarkTotal = 0;
+let bookmarkLoading = false;
+let bookmarkRefreshQueued = false;
+let activeBookmarks = new Map<string, StoredBookmark>();
 let selectedPluginId = '';
+let selectedCatalogExtensionSlug = '';
 let sidebarView: SidebarView = 'chats';
+const BOOKMARK_PAGE_SIZE = 50;
 const chatRuns = new ChatRunRegistry<ChatMeta, StoredChatMessage>();
 const renderedMessageArticles = new WeakMap<StoredChatMessage, HTMLElement>();
+const chatSnapshotSaves = createCoalescedSaveQueue<ChatHistoryPayload, ChatHistoryRow>((payload) =>
+  invoke<ChatHistoryRow>('save_chat_history', { payload })
+);
+/** Reads card data that was too large to inline into chat history. Shared with
+ *  the share sheet, which must re-inline that data before a card can travel. */
+const resultArtifactLoader: ResultArtifactLoader = (artifact) =>
+  invoke('read_result_artifact', {
+    chatId: artifact.chatId,
+    artifactId: artifact.artifactId
+  });
+configureResultArtifactLoader(resultArtifactLoader);
 let appMode: AppMode = loadAppMode();
 let modelProviders: ModelProvider[] = [];
 let llmEnvStatus: LlmEnvStatus | null = null;
 let mainViewRevision = 0;
+let initialExtensionsLoaded = false;
+let extensionOnboardingPending = true;
+let awaitingExtensionCatalogAfterProvider = false;
+let selectedOnboardingExtensionSlugs = new Set<string>();
 let pendingExtensionDelete:
   | {
       resolve: (confirmed: boolean) => void;
     }
   | null = null;
 let activePluginCache: { pluginId: string; label: string } | null = null;
+let activeExtensionContribution:
+  | { detail: GeneratedPluginDetail; prepared?: PreparedExtensionContribution }
+  | null = null;
 
 window.setTimeout(() => {
   shell?.classList.remove('is-booting');
@@ -584,6 +782,16 @@ initProviderOnboarding().catch(() => {
 void refreshChatHistory();
 void refreshGeneratedPlugins();
 syncModeControls();
+
+// Shared answers. The subscription drains anything the OS delivered before the
+// webview existed, so a cold-start deep link is not lost. The hash is the dev
+// path: macOS cannot register a URL scheme at runtime, so `tauri dev` never
+// receives a real deep link.
+void subscribeDeepLinks(APP_SCHEME, (encoded) => void openSharedAnswer(encoded)).catch(() => {
+  // An older host without the command simply has no share-link import.
+});
+const devShare = readDevShareHash(window.location.hash);
+if (devShare) void openSharedAnswer(devShare);
 
 introForm?.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -628,6 +836,7 @@ for (const input of [introInput, chatInput]) {
     if (event.key === 'Escape') {
       hideSlashMenu();
       closeModelsModal();
+      closeExtensionsModal();
       return;
     }
 
@@ -646,6 +855,10 @@ modelsModal?.addEventListener('click', (event) => {
     closeModelsModal();
   }
 });
+extensionsModalClose?.addEventListener('click', closeExtensionsModal);
+extensionsModal?.addEventListener('click', (event) => {
+  if (event.target === extensionsModal) closeExtensionsModal();
+});
 extensionDeleteCancel?.addEventListener('click', () => resolveExtensionDelete(false));
 extensionDeleteConfirm?.addEventListener('click', () => resolveExtensionDelete(true));
 extensionDeleteModal?.addEventListener('click', (event) => {
@@ -660,6 +873,16 @@ pluginCacheEnabled?.addEventListener('change', syncPluginCacheDurationState);
 pluginCacheModal?.addEventListener('click', (event) => {
   if (event.target === pluginCacheModal) closePluginCacheModal();
 });
+extensionContributionCancel?.addEventListener('click', closeExtensionContributionModal);
+extensionContributionForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void prepareActiveExtensionContribution();
+});
+extensionContributionCopy?.addEventListener('click', () => void copyExtensionContributionPrompt());
+extensionContributionReveal?.addEventListener('click', () => void revealExtensionContribution());
+extensionContributionModal?.addEventListener('click', (event) => {
+  if (event.target === extensionContributionModal) closeExtensionContributionModal();
+});
 document.addEventListener('click', (event) => {
   const target = event.target;
   if (target instanceof Element && !target.closest('.plugin-detail-actions')) {
@@ -668,8 +891,10 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  closeExtensionsModal();
   closePluginDetailMenu();
   if (activePluginCache) closePluginCacheModal();
+  if (activeExtensionContribution) closeExtensionContributionModal();
   if (pendingExtensionDelete) resolveExtensionDelete(false);
 });
 attachExternalLinkHandler(document, async (url) => {
@@ -694,6 +919,14 @@ pluginsToggle?.addEventListener('click', () => {
   if (sidebarView !== 'plugins') {
     setSidebarView('plugins');
     void refreshGeneratedPlugins();
+    return;
+  }
+  setSidebarOpen(!shell?.classList.contains('sidebar-open'));
+});
+bookmarksToggle?.addEventListener('click', () => {
+  if (sidebarView !== 'bookmarks') {
+    setSidebarView('bookmarks');
+    void refreshBookmarks(true);
     return;
   }
   setSidebarOpen(!shell?.classList.contains('sidebar-open'));
@@ -884,6 +1117,10 @@ async function runSlashCommand(typed: string, input: HTMLTextAreaElement | null)
   // Matched the same way the menu filters, so "/Status" runs rather than being
   // sent to the model as a question.
   const command = typed.trim().toLowerCase();
+  if (command === '/extensions') {
+    await openExtensionsCommandFlow(input);
+    return true;
+  }
   if (command === '/models') {
     await openModelsCommandFlow(input);
     return true;
@@ -1014,6 +1251,227 @@ async function openModelsCommandFlow(input: HTMLTextAreaElement | null) {
   }
 }
 
+async function openExtensionsCommandFlow(input: HTMLTextAreaElement | null) {
+  if (input) input.value = '';
+  hideSlashMenu();
+  closeModelsModal();
+  extensionsModal?.classList.remove('is-hidden');
+  extensionsModal?.setAttribute('aria-hidden', 'false');
+  if (extensionsModalHint) extensionsModalHint.textContent = 'Loading extensions...';
+  if (extensionsModalContent) {
+    extensionsModalContent.innerHTML = '<p class="models-modal-empty">Loading...</p>';
+  }
+  await loadExtensionsModal();
+}
+
+function closeExtensionsModal() {
+  extensionsModal?.classList.add('is-hidden');
+  extensionsModal?.setAttribute('aria-hidden', 'true');
+}
+
+async function loadExtensionsModal() {
+  try {
+    const [installed, catalog] = await Promise.all([
+      invoke<GeneratedPluginList>('list_generated_plugins'),
+      invoke<CatalogExtensionList>('list_catalog_extensions')
+    ]);
+    generatedPlugins = installed.plugins;
+    catalogExtensions = catalog.extensions;
+    renderSplashPrompts();
+    renderGeneratedPlugins();
+    renderExtensionsModal();
+  } catch (error) {
+    if (extensionsModalHint) {
+      extensionsModalHint.textContent = getErrorMessage(error, 'Could not load extensions.');
+    }
+    if (extensionsModalContent) extensionsModalContent.innerHTML = '';
+  }
+}
+
+function renderExtensionsModal() {
+  if (!extensionsModalContent) return;
+  const groups = groupExtensions(generatedPlugins, catalogExtensions);
+  if (extensionsModalHint) {
+    extensionsModalHint.textContent = `${groups.yourExtensions.length} yours · ${groups.installed.length} installed · ${groups.available.length} available`;
+  }
+  extensionsModalContent.innerHTML = '';
+
+  const yourSection = document.createElement('section');
+  yourSection.className = 'extensions-section';
+  const yourTitle = document.createElement('h3');
+  yourTitle.textContent = 'Your extensions';
+  yourSection.appendChild(yourTitle);
+  if (!groups.yourExtensions.length) {
+    const empty = document.createElement('p');
+    empty.className = 'extensions-empty';
+    empty.textContent = 'You have not coded any local extensions yet.';
+    yourSection.appendChild(empty);
+  } else {
+    for (const plugin of groups.yourExtensions) {
+      yourSection.appendChild(renderLocalExtensionRow(plugin));
+    }
+  }
+  extensionsModalContent.appendChild(yourSection);
+
+  const installedSection = document.createElement('section');
+  installedSection.className = 'extensions-section';
+  const installedTitle = document.createElement('h3');
+  installedTitle.textContent = 'Installed';
+  installedSection.appendChild(installedTitle);
+  if (!groups.installed.length) {
+    const empty = document.createElement('p');
+    empty.className = 'extensions-empty';
+    empty.textContent = 'No bundled extensions are installed.';
+    installedSection.appendChild(empty);
+  } else {
+    for (const extension of groups.installed) {
+      installedSection.appendChild(renderCatalogExtensionRow(extension, true));
+    }
+  }
+  extensionsModalContent.appendChild(installedSection);
+
+  const availableSection = document.createElement('section');
+  availableSection.className = 'extensions-section';
+  const availableTitle = document.createElement('h3');
+  availableTitle.textContent = 'Available';
+  availableSection.appendChild(availableTitle);
+  if (!groups.available.length) {
+    const empty = document.createElement('p');
+    empty.className = 'extensions-empty';
+    empty.textContent = catalogExtensions.length
+      ? 'All bundled extensions are installed.'
+      : 'No bundled extensions were found.';
+    availableSection.appendChild(empty);
+  } else {
+    for (const extension of groups.available) {
+      availableSection.appendChild(renderCatalogExtensionRow(extension, false));
+    }
+  }
+  extensionsModalContent.appendChild(availableSection);
+}
+
+function renderLocalExtensionRow(plugin: GeneratedPlugin) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'extensions-installed-row';
+  const icon = document.createElement('span');
+  icon.className = 'extensions-row-icon';
+  icon.innerHTML = iconSvg('plug');
+  const copy = document.createElement('span');
+  copy.className = 'extensions-row-copy';
+  const heading = document.createElement('span');
+  heading.className = 'extensions-row-heading';
+  const name = document.createElement('strong');
+  name.textContent = plugin.name;
+  heading.appendChild(name);
+  if (plugin.credentials.length) {
+    const key = document.createElement('span');
+    key.className = 'extension-key-pill';
+    key.textContent = 'Key';
+    heading.appendChild(key);
+  }
+  const meta = document.createElement('span');
+  meta.textContent = `${plugin.tools.length} ${plugin.tools.length === 1 ? 'tool' : 'tools'} · ${plugin.status || 'local'}`;
+  copy.append(heading, meta);
+  const disclosure = document.createElement('span');
+  disclosure.className = 'extensions-row-disclosure';
+  disclosure.textContent = '›';
+  row.append(icon, copy, disclosure);
+  row.addEventListener('click', () => {
+    closeExtensionsModal();
+    void openGeneratedPlugin(plugin.id);
+  });
+  return row;
+}
+
+function renderCatalogExtensionRow(extension: CatalogExtension, installed: boolean) {
+  const row = document.createElement('article');
+  row.className = 'extensions-catalog-row';
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'extensions-catalog-open';
+  const icon = document.createElement('span');
+  icon.className = 'extensions-row-icon';
+  icon.innerHTML = iconSvg(extension.icon || 'plug');
+  const copy = document.createElement('span');
+  copy.className = 'extensions-row-copy';
+  const heading = document.createElement('span');
+  heading.className = 'extensions-row-heading';
+  const name = document.createElement('strong');
+  name.textContent = extension.name;
+  heading.appendChild(name);
+  if (extension.requiresKey) {
+    const key = document.createElement('span');
+    key.className = 'extension-key-pill';
+    key.textContent = 'Key';
+    heading.appendChild(key);
+  }
+  const description = document.createElement('span');
+  description.textContent = extension.description;
+  const tools = document.createElement('span');
+  tools.className = 'extensions-tool-summary';
+  tools.textContent = extension.tools.map((tool) => tool.name).join(' · ');
+  copy.append(heading, description, tools);
+  open.append(icon, copy);
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'extensions-install-button';
+  action.textContent = installed ? 'Open' : 'Install';
+  if (installed) {
+    const plugin = generatedPlugins.find((candidate) =>
+      catalogExtensionMatches(candidate, extension)
+    );
+    action.disabled = !plugin;
+    open.disabled = !plugin;
+    open.addEventListener('click', () => {
+      if (!plugin) return;
+      closeExtensionsModal();
+      void openGeneratedPlugin(plugin.id);
+    });
+    action.addEventListener('click', () => {
+      if (!plugin) return;
+      closeExtensionsModal();
+      void openGeneratedPlugin(plugin.id);
+    });
+  } else {
+    open.addEventListener('click', () => {
+      closeExtensionsModal();
+      void openCatalogExtension(extension.slug);
+    });
+    action.addEventListener('click', () => void installCatalogExtension(extension, action));
+  }
+  row.append(open, action);
+  return row;
+}
+
+async function installCatalogExtension(
+  extension: CatalogExtension,
+  button: HTMLButtonElement
+) {
+  button.disabled = true;
+  button.textContent = 'Installing...';
+  if (extensionsModalHint) extensionsModalHint.textContent = `Installing ${extension.name}...`;
+  try {
+    const installed = await invoke<GeneratedPlugin>('install_catalog_extension', {
+      slug: extension.slug
+    });
+    await loadExtensionsModal();
+    button.textContent = 'Installed';
+    if (selectedCatalogExtensionSlug === extension.slug) {
+      await openGeneratedPlugin(installed.id);
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Install';
+    if (sidebarView === 'plugins' && chatHistoryStatus) {
+      chatHistoryStatus.textContent = getErrorMessage(error, `Could not install ${extension.name}.`);
+    }
+    if (extensionsModalHint) {
+      extensionsModalHint.textContent = getErrorMessage(error, `Could not install ${extension.name}.`);
+    }
+  }
+}
+
 /**
  * Sum this chat's saved turns. Context fill comes from the most recent turn that
  * reported it, because the window describes the conversation now — not the total
@@ -1072,6 +1530,7 @@ async function openStatusCommandFlow(input: HTMLTextAreaElement | null) {
 }
 
 function openModelsModal() {
+  closeExtensionsModal();
   modelsModal?.classList.remove('is-hidden');
   modelsModal?.setAttribute('aria-hidden', 'false');
 }
@@ -1108,7 +1567,11 @@ function renderModelsError(message: string) {
 async function initProviderOnboarding() {
   const result = await invoke<ModelProviderList>('list_model_providers');
   modelProviders = result.providers;
-  if (needsProviderOnboarding(modelProviders)) openOnboarding();
+  if (needsProviderOnboarding(modelProviders)) {
+    openOnboarding();
+  } else {
+    maybeShowExtensionOnboarding();
+  }
 }
 
 /** The first-run splash as a provider-flow surface. */
@@ -1123,7 +1586,14 @@ function onboardingHost(): ProviderFlowHost | null {
       if (onboardingHint) onboardingHint.textContent = text;
     },
     onBack: () => renderOnboardingChoice(),
-    onConnected: () => closeOnboarding()
+    onConnected: () => {
+      if (!initialExtensionsLoaded) {
+        awaitingExtensionCatalogAfterProvider = true;
+        renderExtensionOnboardingLoading();
+        return;
+      }
+      if (!maybeShowExtensionOnboarding()) closeOnboarding();
+    }
   };
 }
 
@@ -1136,7 +1606,164 @@ function openOnboarding() {
 function closeOnboarding() {
   onboardingOverlay?.classList.add('is-hidden');
   onboardingOverlay?.setAttribute('aria-hidden', 'true');
+  onboardingPanel?.classList.remove('is-extension-step');
+  onboardingContent?.classList.remove('extension-onboarding-content');
+  selectedOnboardingExtensionSlugs = new Set();
   introInput?.focus();
+}
+
+function renderExtensionOnboardingLoading() {
+  onboardingOverlay?.classList.remove('is-hidden');
+  onboardingOverlay?.setAttribute('aria-hidden', 'false');
+  onboardingPanel?.classList.add('is-extension-step');
+  onboardingContent?.classList.add('extension-onboarding-content');
+  if (onboardingTitle) onboardingTitle.textContent = 'Loading extensions';
+  if (onboardingHint) onboardingHint.textContent = 'Preparing the available data sources…';
+  if (onboardingContent) {
+    onboardingContent.innerHTML = '<p class="extension-onboarding-loading">Loading…</p>';
+  }
+}
+
+function renderExtensionOnboarding() {
+  if (!onboardingContent) return;
+  selectedOnboardingExtensionSlugs = new Set();
+  onboardingOverlay?.classList.remove('is-hidden');
+  onboardingOverlay?.setAttribute('aria-hidden', 'false');
+  onboardingPanel?.classList.add('is-extension-step');
+  onboardingContent.classList.add('extension-onboarding-content');
+  if (onboardingTitle) {
+    onboardingTitle.textContent = 'Please select what types of data to talk to';
+  }
+  if (onboardingHint) {
+    onboardingHint.textContent = 'Choose one or more extensions to get started.';
+  }
+  onboardingContent.innerHTML = '';
+
+  const available = catalogExtensions.filter((extension) => !extension.installed);
+  const grid = document.createElement('div');
+  grid.className = 'extension-onboarding-grid';
+
+  for (const extension of available) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'extension-onboarding-card';
+    card.dataset.extensionSlug = extension.slug;
+    card.setAttribute('aria-pressed', 'false');
+
+    const selectedMark = document.createElement('span');
+    selectedMark.className = 'extension-onboarding-selected-mark';
+    selectedMark.textContent = '✓';
+    selectedMark.setAttribute('aria-hidden', 'true');
+
+    const icon = document.createElement('span');
+    icon.className = 'extension-onboarding-icon';
+    icon.innerHTML = iconSvg(extension.icon || 'plug');
+
+    const name = document.createElement('strong');
+    name.textContent = extension.name;
+
+    const description = document.createElement('span');
+    description.className = 'extension-onboarding-description';
+    description.textContent = shortExtensionDescription(extension.description);
+
+    card.append(selectedMark, icon, name, description);
+    if (extension.requiresKey) {
+      const key = document.createElement('span');
+      key.className = 'extension-key-pill extension-onboarding-key-pill';
+      key.textContent = 'Key';
+      card.appendChild(key);
+    }
+    grid.appendChild(card);
+  }
+
+  if (!available.length) {
+    const empty = document.createElement('p');
+    empty.className = 'extension-onboarding-empty';
+    empty.textContent = 'No ready-made extensions are available yet.';
+    grid.appendChild(empty);
+  }
+
+  const footer = document.createElement('footer');
+  footer.className = 'extension-onboarding-footer';
+  const note = document.createElement('p');
+  note.className = 'extension-onboarding-note';
+  note.textContent = '(You can add your own with a prompt.)';
+
+  const actions = document.createElement('div');
+  actions.className = 'extension-onboarding-actions';
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.className = 'onboarding-secondary extension-onboarding-skip';
+  skip.textContent = 'Skip for now';
+  skip.addEventListener('click', closeOnboarding);
+  const install = document.createElement('button');
+  install.type = 'button';
+  install.className = 'onboarding-primary extension-onboarding-install';
+  install.textContent = extensionInstallActionLabel(0);
+  install.disabled = true;
+
+  const syncSelection = () => {
+    for (const tile of grid.querySelectorAll<HTMLButtonElement>('.extension-onboarding-card')) {
+      const selected = selectedOnboardingExtensionSlugs.has(tile.dataset.extensionSlug || '');
+      tile.classList.toggle('is-selected', selected);
+      tile.setAttribute('aria-pressed', String(selected));
+    }
+    install.disabled = selectedOnboardingExtensionSlugs.size === 0;
+    install.textContent = extensionInstallActionLabel(selectedOnboardingExtensionSlugs.size);
+  };
+
+  grid.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const card = target.closest<HTMLButtonElement>('.extension-onboarding-card');
+    const slug = card?.dataset.extensionSlug;
+    if (!slug || card.disabled) return;
+    selectedOnboardingExtensionSlugs = toggleExtensionSelection(
+      selectedOnboardingExtensionSlugs,
+      slug
+    );
+    syncSelection();
+  });
+  install.addEventListener('click', () => {
+    void installOnboardingExtensions(install, skip, grid);
+  });
+
+  actions.append(skip, install);
+  footer.append(note, actions);
+  onboardingContent.append(grid, footer);
+}
+
+async function installOnboardingExtensions(
+  install: HTMLButtonElement,
+  skip: HTMLButtonElement,
+  grid: HTMLElement
+) {
+  const selected = catalogExtensions.filter((extension) =>
+    selectedOnboardingExtensionSlugs.has(extension.slug)
+  );
+  if (!selected.length) return;
+
+  install.disabled = true;
+  skip.disabled = true;
+  for (const card of grid.querySelectorAll<HTMLButtonElement>('.extension-onboarding-card')) {
+    card.disabled = true;
+  }
+
+  try {
+    for (const [index, extension] of selected.entries()) {
+      if (onboardingHint) {
+        onboardingHint.textContent = `Installing ${index + 1} of ${selected.length}: ${extension.name}`;
+      }
+      await invoke<GeneratedPlugin>('install_catalog_extension', { slug: extension.slug });
+    }
+    await refreshGeneratedPlugins();
+    closeOnboarding();
+  } catch (error) {
+    const message = getErrorMessage(error, 'Could not install the selected extensions.');
+    await refreshGeneratedPlugins();
+    renderExtensionOnboarding();
+    if (onboardingHint) onboardingHint.textContent = message;
+  }
 }
 
 /**
@@ -1149,6 +1776,8 @@ function closeOnboarding() {
 function renderOnboardingChoice() {
   const host = onboardingHost();
   if (!host) return;
+  onboardingPanel?.classList.remove('is-extension-step');
+  onboardingContent?.classList.remove('extension-onboarding-content');
   host.setTitle('Please select your AI frontier model');
   host.setHint('Sign in with ChatGPT and start straight away.');
   host.content.innerHTML = '';
@@ -1702,7 +2331,12 @@ function ensureActiveChatMeta(seedPrompt = '') {
 function setSidebarOpen(open: boolean) {
   shell?.classList.toggle('sidebar-open', open);
   chatSidebar?.classList.toggle('is-open', open);
-  const activeToggle = sidebarView === 'plugins' ? pluginsToggle : chatsToggle;
+  const activeToggle =
+    sidebarView === 'plugins'
+      ? pluginsToggle
+      : sidebarView === 'bookmarks'
+        ? bookmarksToggle
+        : chatsToggle;
   activeToggle?.setAttribute('aria-pressed', String(open));
 }
 
@@ -1711,39 +2345,75 @@ function setSidebarView(view: SidebarView) {
   setSidebarOpen(true);
   chatsToggle?.classList.toggle('is-active', view === 'chats');
   pluginsToggle?.classList.toggle('is-active', view === 'plugins');
+  bookmarksToggle?.classList.toggle('is-active', view === 'bookmarks');
   chatsToggle?.setAttribute('aria-pressed', String(view === 'chats'));
   pluginsToggle?.setAttribute('aria-pressed', String(view === 'plugins'));
+  bookmarksToggle?.setAttribute('aria-pressed', String(view === 'bookmarks'));
   if (chatHistoryList) chatHistoryList.classList.toggle('is-hidden', view !== 'chats');
   if (pluginList) pluginList.classList.toggle('is-hidden', view !== 'plugins');
+  if (bookmarkList) bookmarkList.classList.toggle('is-hidden', view !== 'bookmarks');
   const title = chatSidebar?.querySelector('h2');
-  if (title) title.textContent = view === 'plugins' ? 'Generated Plugins' : 'Chats';
+  if (title) {
+    title.textContent =
+      view === 'plugins' ? 'Extensions' : view === 'bookmarks' ? 'Bookmarks' : 'Chats';
+  }
   newChatButton?.classList.toggle('is-hidden', view !== 'chats');
   if (chatHistoryStatus) {
-    chatHistoryStatus.textContent =
-      view === 'plugins'
-        ? generatedPlugins.length
-          ? ''
-          : 'No generated plugins yet.'
-        : chatHistoryRows.length
-          ? ''
-          : 'No saved chats yet.';
+    chatHistoryStatus.textContent = sidebarStatusText(view);
   }
+}
+
+function sidebarStatusText(view: SidebarView) {
+  if (view === 'plugins') return '';
+  if (view === 'bookmarks') {
+    if (bookmarkLoading && !bookmarkRows.length) return 'Loading bookmarks…';
+    return bookmarkTotal ? '' : 'No bookmarks yet.';
+  }
+  return chatHistoryRows.length ? '' : 'No saved chats yet.';
 }
 
 async function refreshGeneratedPlugins() {
   try {
-    const result = await invoke<GeneratedPluginList>('list_generated_plugins');
+    const [result, catalog] = await Promise.all([
+      invoke<GeneratedPluginList>('list_generated_plugins'),
+      invoke<CatalogExtensionList>('list_catalog_extensions')
+    ]);
     generatedPlugins = result.plugins;
+    catalogExtensions = catalog.extensions;
+    initialExtensionsLoaded = true;
     renderSplashPrompts();
     renderGeneratedPlugins();
+    const extensionOnboardingShown = maybeShowExtensionOnboarding();
+    if (awaitingExtensionCatalogAfterProvider) {
+      awaitingExtensionCatalogAfterProvider = false;
+      if (!extensionOnboardingShown) closeOnboarding();
+    }
     if (sidebarView === 'plugins' && chatHistoryStatus) {
-      chatHistoryStatus.textContent = generatedPlugins.length ? '' : 'No generated plugins yet.';
+      chatHistoryStatus.textContent = '';
     }
   } catch (error) {
+    if (awaitingExtensionCatalogAfterProvider) {
+      awaitingExtensionCatalogAfterProvider = false;
+      extensionOnboardingPending = false;
+      closeOnboarding();
+    }
     if (sidebarView === 'plugins' && chatHistoryStatus) {
       chatHistoryStatus.textContent = getErrorMessage(error, 'Could not load plugins.');
     }
   }
+}
+
+function maybeShowExtensionOnboarding(): boolean {
+  const providerConnected = !needsProviderOnboarding(modelProviders);
+  if (!extensionOnboardingPending || !initialExtensionsLoaded || !providerConnected) {
+    return false;
+  }
+  extensionOnboardingPending = false;
+  if (shouldShowExtensionOnboarding(providerConnected, generatedPlugins, catalogExtensions)) {
+    renderExtensionOnboarding();
+    return true;
+  }
+  return false;
 }
 
 function renderSplashPrompts() {
@@ -1759,42 +2429,108 @@ function renderSplashPrompts() {
 function renderGeneratedPlugins() {
   if (!pluginList) return;
   pluginList.innerHTML = '';
+  const groups = groupExtensions(generatedPlugins, catalogExtensions);
 
-  if (!generatedPlugins.length) {
+  appendPluginSidebarGroup('Your extensions', groups.yourExtensions, 'No local extensions yet.');
+
+  const installedPlugins = groups.installed
+    .map((extension) =>
+      generatedPlugins.find((plugin) => catalogExtensionMatches(plugin, extension))
+    )
+    .filter((plugin): plugin is GeneratedPlugin => Boolean(plugin));
+  appendPluginSidebarGroup('Installed', installedPlugins, 'No catalog extensions installed.');
+
+  const availableLabel = document.createElement('h3');
+  availableLabel.className = 'plugin-list-group-label';
+  availableLabel.textContent = 'Available';
+  pluginList.appendChild(availableLabel);
+  if (!groups.available.length) {
     const empty = document.createElement('p');
     empty.className = 'plugin-list-empty';
-    empty.textContent = 'No generated plugins yet.';
+    empty.textContent = catalogExtensions.length
+      ? 'All catalog extensions are installed.'
+      : 'No catalog extensions available.';
+    pluginList.appendChild(empty);
+  } else {
+    for (const extension of groups.available) {
+      pluginList.appendChild(renderAvailablePluginSidebarRow(extension));
+    }
+  }
+}
+
+function appendPluginSidebarGroup(
+  label: string,
+  plugins: GeneratedPlugin[],
+  emptyCopy: string
+) {
+  if (!pluginList) return;
+  const heading = document.createElement('h3');
+  heading.className = 'plugin-list-group-label';
+  heading.textContent = label;
+  pluginList.appendChild(heading);
+  if (!plugins.length) {
+    const empty = document.createElement('p');
+    empty.className = 'plugin-list-empty';
+    empty.textContent = emptyCopy;
     pluginList.appendChild(empty);
     return;
   }
+  for (const plugin of plugins) pluginList.appendChild(renderPluginSidebarRow(plugin));
+}
 
-  for (const plugin of generatedPlugins) {
-    const row = document.createElement('div');
-    row.className = `chat-history-row${plugin.id === selectedPluginId ? ' is-active' : ''}`;
+function renderPluginSidebarRow(plugin: GeneratedPlugin) {
+  const row = document.createElement('div');
+  row.className = `chat-history-row${plugin.id === selectedPluginId ? ' is-active' : ''}`;
 
-    const openButton = document.createElement('button');
-    openButton.type = 'button';
-    openButton.className = 'chat-history-open';
-    openButton.innerHTML = `
+  const openButton = document.createElement('button');
+  openButton.type = 'button';
+  openButton.className = 'chat-history-open';
+  openButton.innerHTML = `
       <span class="chat-history-title">${escapeHtml(plugin.name)}</span>
       <span class="chat-history-meta">${escapeHtml(plugin.status || 'plugin')} · ${plugin.tools.length} tools</span>
     `;
-    openButton.addEventListener('click', () => void openGeneratedPlugin(plugin.id));
-    row.appendChild(openButton);
+  openButton.addEventListener('click', () => void openGeneratedPlugin(plugin.id));
+  row.appendChild(openButton);
 
-    const deleteButton = document.createElement('button');
-    deleteButton.type = 'button';
-    deleteButton.className = 'chat-history-delete';
-    deleteButton.setAttribute('aria-label', `Delete ${plugin.name}`);
-    deleteButton.innerHTML = iconSvg('trash-2');
-    deleteButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      void deleteGeneratedPlugin(plugin.id);
-    });
-    row.appendChild(deleteButton);
+  const removalAction = extensionRemovalAction(plugin, catalogExtensions);
+  const removalLabel = removalAction === 'uninstall' ? 'Uninstall' : 'Delete';
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.className = 'chat-history-delete';
+  removeButton.setAttribute('aria-label', `${removalLabel} ${plugin.name}`);
+  removeButton.title = `${removalLabel} ${plugin.name}`;
+  removeButton.innerHTML = iconSvg(removalAction === 'uninstall' ? 'package-minus' : 'trash-2');
+  removeButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    void removeGeneratedPlugin(plugin.id);
+  });
+  row.appendChild(removeButton);
+  return row;
+}
 
-    pluginList.appendChild(row);
-  }
+function renderAvailablePluginSidebarRow(extension: CatalogExtension) {
+  const row = document.createElement('div');
+  row.className = `chat-history-row plugin-catalog-available-row${
+    extension.slug === selectedCatalogExtensionSlug ? ' is-active' : ''
+  }`;
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'chat-history-open plugin-catalog-summary';
+  const title = document.createElement('span');
+  title.className = 'chat-history-title';
+  title.textContent = extension.name;
+  const meta = document.createElement('span');
+  meta.className = 'chat-history-meta';
+  meta.textContent = `${extension.category} · ${extension.tools.length} ${extension.tools.length === 1 ? 'tool' : 'tools'}`;
+  summary.append(title, meta);
+  summary.addEventListener('click', () => void openCatalogExtension(extension.slug));
+  const install = document.createElement('button');
+  install.type = 'button';
+  install.className = 'plugin-sidebar-install';
+  install.textContent = 'Install';
+  install.addEventListener('click', () => void installCatalogExtension(extension, install));
+  row.append(summary, install);
+  return row;
 }
 
 async function openGeneratedPlugin(pluginId: string) {
@@ -1803,6 +2539,7 @@ async function openGeneratedPlugin(pluginId: string) {
   const detail = await invoke<GeneratedPluginDetail>('read_generated_plugin', { pluginId });
   if (viewRevision !== mainViewRevision) return;
   selectedPluginId = detail.plugin.id;
+  selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();
   renderPluginDetail(detail);
   shell?.classList.add('plugin-view');
@@ -1813,10 +2550,30 @@ async function openGeneratedPlugin(pluginId: string) {
   document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
 }
 
-async function deleteGeneratedPlugin(pluginId: string) {
+async function openCatalogExtension(slug: string) {
+  if (!pluginDetailView || !messages) return;
+  const viewRevision = ++mainViewRevision;
+  const result = await invoke<CatalogExtensionDetail>('read_catalog_extension', { slug });
+  if (viewRevision !== mainViewRevision) return;
+  selectedPluginId = '';
+  selectedCatalogExtensionSlug = result.extension.slug;
+  renderGeneratedPlugins();
+  renderPluginDetail(result.detail, { availableExtension: result.extension });
+  shell?.classList.add('plugin-view');
+  shell?.classList.remove('pre-chat');
+  pluginDetailView.classList.remove('is-hidden');
+  messages.classList.add('is-hidden');
+  chatForm?.classList.add('is-hidden');
+  document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
+}
+
+async function removeGeneratedPlugin(pluginId: string) {
   const plugin = generatedPlugins.find((item) => item.id === pluginId);
   const label = plugin?.name || pluginId;
-  const confirmed = await confirmExtensionDelete(label);
+  const removalAction = plugin
+    ? extensionRemovalAction(plugin, catalogExtensions)
+    : 'delete';
+  const confirmed = await confirmExtensionRemoval(label, removalAction);
   if (!confirmed) {
     return;
   }
@@ -1832,18 +2589,23 @@ async function deleteGeneratedPlugin(pluginId: string) {
   await refreshGeneratedPlugins();
 }
 
-function confirmExtensionDelete(label: string) {
+function confirmExtensionRemoval(label: string, removalAction: 'delete' | 'uninstall') {
+  const uninstalling = removalAction === 'uninstall';
+  const actionLabel = uninstalling ? 'Uninstall' : 'Delete';
+  const description = uninstalling
+    ? `Uninstall "${label}"? This removes the installed copy. You can install it again from Available.`
+    : `Delete "${label}"? This removes the locally authored extension files and cannot be undone.`;
   if (!extensionDeleteModal || !extensionDeleteText || !extensionDeleteConfirm) {
-    return Promise.resolve(
-      window.confirm(`Delete extension "${label}"? This removes its generated files.`)
-    );
+    return Promise.resolve(window.confirm(description));
   }
 
   if (pendingExtensionDelete) {
     pendingExtensionDelete.resolve(false);
   }
 
-  extensionDeleteText.textContent = `Delete "${label}"? This removes the generated extension files and cannot be undone.`;
+  if (extensionDeleteTitle) extensionDeleteTitle.textContent = `${actionLabel} Extension`;
+  extensionDeleteText.textContent = description;
+  extensionDeleteConfirm.textContent = actionLabel;
   extensionDeleteConfirm.disabled = false;
   extensionDeleteModal.classList.remove('is-hidden');
   extensionDeleteModal.setAttribute('aria-hidden', 'false');
@@ -1973,34 +2735,189 @@ async function clearActivePluginCache() {
   }
 }
 
-function renderPluginDetail(detail: GeneratedPluginDetail) {
+function openExtensionContributionModal(detail: GeneratedPluginDetail) {
+  if (
+    !extensionContributionModal ||
+    !extensionContributionCategory ||
+    !extensionContributionTags ||
+    !extensionContributionIcon ||
+    !extensionContributionAuthor ||
+    !extensionContributionHomepage ||
+    !extensionContributionStatus ||
+    !extensionContributionResult
+  ) {
+    return;
+  }
+  const defaults = contributionDefaults(detail.plugin, detail.manifestJson);
+  activeExtensionContribution = { detail };
+  if (extensionContributionTitle) {
+    extensionContributionTitle.textContent = `Contribute · ${detail.plugin.name}`;
+  }
+  extensionContributionCategory.value = defaults.category;
+  extensionContributionTags.value = defaults.tags.join(', ');
+  extensionContributionIcon.value = defaults.icon;
+  extensionContributionAuthor.value = defaults.author;
+  extensionContributionHomepage.value = defaults.homepage;
+  extensionContributionStatus.textContent = '';
+  extensionContributionResult.innerHTML = '';
+  extensionContributionResult.classList.add('is-hidden');
+  extensionContributionCopy?.classList.add('is-hidden');
+  extensionContributionReveal?.classList.add('is-hidden');
+  extensionContributionPrepare?.classList.remove('is-hidden');
+  setExtensionContributionBusy(false);
+  extensionContributionModal.classList.remove('is-hidden');
+  extensionContributionModal.setAttribute('aria-hidden', 'false');
+  extensionContributionAuthor.focus();
+}
+
+function closeExtensionContributionModal() {
+  activeExtensionContribution = null;
+  extensionContributionModal?.classList.add('is-hidden');
+  extensionContributionModal?.setAttribute('aria-hidden', 'true');
+  if (extensionContributionStatus) extensionContributionStatus.textContent = '';
+  pluginDetailView?.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle')?.focus();
+}
+
+function setExtensionContributionBusy(busy: boolean) {
+  extensionContributionModal?.setAttribute('aria-busy', String(busy));
+  for (const field of [
+    extensionContributionCategory,
+    extensionContributionTags,
+    extensionContributionIcon,
+    extensionContributionAuthor,
+    extensionContributionHomepage,
+    extensionContributionPrepare
+  ]) {
+    if (field) field.disabled = busy;
+  }
+}
+
+async function prepareActiveExtensionContribution() {
+  const active = activeExtensionContribution;
+  if (
+    !active ||
+    !extensionContributionCategory ||
+    !extensionContributionTags ||
+    !extensionContributionIcon ||
+    !extensionContributionAuthor ||
+    !extensionContributionHomepage ||
+    !extensionContributionStatus ||
+    !extensionContributionResult
+  ) {
+    return;
+  }
+  const metadata: ExtensionContributionMetadata = {
+    category: extensionContributionCategory.value,
+    tags: parseContributionTags(extensionContributionTags.value),
+    icon: extensionContributionIcon.value,
+    author: extensionContributionAuthor.value,
+    homepage: extensionContributionHomepage.value
+  };
+  setExtensionContributionBusy(true);
+  extensionContributionStatus.textContent = 'Running mocked tests and discovering runtime tools…';
+  try {
+    const prepared = await invoke<PreparedExtensionContribution>('prepare_extension_contribution', {
+      pluginId: active.detail.plugin.id,
+      metadata
+    });
+    if (activeExtensionContribution !== active) return;
+    active.prepared = prepared;
+    extensionContributionStatus.textContent = 'Contribution bundle is ready.';
+    extensionContributionResult.innerHTML = `
+      <strong>${escapeHtml(prepared.title)}</strong>
+      <p>${escapeHtml(prepared.folder)}</p>
+      <ul>${prepared.checks.map((check) => `<li>${escapeHtml(check)}</li>`).join('')}</ul>
+    `;
+    extensionContributionResult.classList.remove('is-hidden');
+    extensionContributionPrepare?.classList.add('is-hidden');
+    extensionContributionCopy?.classList.remove('is-hidden');
+    extensionContributionReveal?.classList.remove('is-hidden');
+  } catch (error) {
+    if (activeExtensionContribution !== active) return;
+    extensionContributionStatus.textContent = getErrorMessage(
+      error,
+      'Could not prepare the extension contribution.'
+    );
+  } finally {
+    if (activeExtensionContribution === active) setExtensionContributionBusy(false);
+  }
+}
+
+async function copyExtensionContributionPrompt() {
+  const prepared = activeExtensionContribution?.prepared;
+  if (!prepared || !extensionContributionStatus) return;
+  const copied = await writeClipboard({ text: prepared.harnessPrompt });
+  extensionContributionStatus.textContent = copied
+    ? 'Harness prompt copied. Paste it into your coding agent while the Raynard repository is open.'
+    : `Could not access the clipboard. Open ${prepared.promptPath} from the bundle instead.`;
+}
+
+async function revealExtensionContribution() {
+  const prepared = activeExtensionContribution?.prepared;
+  if (!prepared || !extensionContributionStatus) return;
+  try {
+    await invoke('open_extension_contribution_folder', { folder: prepared.folder });
+    extensionContributionStatus.textContent = 'Opened the prepared contribution folder.';
+  } catch (error) {
+    extensionContributionStatus.textContent = getErrorMessage(
+      error,
+      'Could not open the contribution folder.'
+    );
+  }
+}
+
+function renderPluginDetail(
+  detail: GeneratedPluginDetail,
+  options: { availableExtension?: CatalogExtension } = {}
+) {
   if (!pluginDetailView) return;
   const { plugin } = detail;
+  const availableExtension = options.availableExtension;
+  const requiresKey = availableExtension?.requiresKey ?? Boolean(plugin.credentials.length);
+  const removalAction = extensionRemovalAction(plugin, catalogExtensions);
+  const removalLabel = removalAction === 'uninstall' ? 'Uninstall' : 'Delete';
+  const kicker = availableExtension
+    ? 'Available Extension'
+    : removalAction === 'uninstall'
+      ? 'Installed Extension'
+      : 'Your Extension';
   pluginDetailView.innerHTML = '';
 
   const header = document.createElement('header');
   header.className = 'plugin-detail-header';
   header.innerHTML = `
     <div class="plugin-detail-title">
-      <span class="plugin-detail-kicker">Generated Plugin</span>
+      <span class="plugin-detail-kicker">${kicker}</span>
       <h1>${escapeHtml(plugin.name)}</h1>
       <p>${escapeHtml(plugin.description || 'No description provided.')}</p>
+      ${requiresKey ? '<span class="extension-requires-key-pill">Requires key</span>' : ''}
     </div>
-    <div class="plugin-detail-actions">
-      <button class="plugin-detail-menu-toggle" type="button" aria-label="Plugin options" aria-haspopup="menu" aria-expanded="false">
-        ${iconSvg('ellipsis')}
-      </button>
-      <div class="plugin-detail-menu is-hidden" role="menu">
-        <button type="button" role="menuitem" data-plugin-action="cache">
-          ${iconSvg('database')}
-          <span>Cache</span>
-        </button>
-        <button type="button" role="menuitem" class="is-danger" data-plugin-action="delete">
-          ${iconSvg('trash-2')}
-          <span>Delete</span>
-        </button>
-      </div>
-    </div>
+    ${availableExtension
+      ? `<div class="plugin-detail-actions plugin-detail-install-actions">
+          <button class="extensions-install-button plugin-detail-install" type="button">Install</button>
+          <span class="plugin-detail-install-status" aria-live="polite"></span>
+        </div>`
+      : `<div class="plugin-detail-actions">
+          <button class="plugin-detail-menu-toggle" type="button" aria-label="Plugin options" aria-haspopup="menu" aria-expanded="false">
+            ${iconSvg('ellipsis')}
+          </button>
+          <div class="plugin-detail-menu is-hidden" role="menu">
+            ${removalAction === 'delete'
+              ? `<button type="button" role="menuitem" data-plugin-action="contribute">
+                  ${iconSvg('git-pull-request')}
+                  <span>Prepare PR</span>
+                </button>`
+              : ''}
+            <button type="button" role="menuitem" data-plugin-action="cache">
+              ${iconSvg('database')}
+              <span>Cache</span>
+            </button>
+            <button type="button" role="menuitem" class="is-danger" data-plugin-action="remove">
+              ${iconSvg(removalAction === 'uninstall' ? 'package-minus' : 'trash-2')}
+              <span>${removalLabel}</span>
+            </button>
+          </div>
+        </div>`}
   `;
   const menuToggle = header.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
   const menu = header.querySelector<HTMLElement>('.plugin-detail-menu');
@@ -2013,9 +2930,39 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
     closePluginDetailMenu();
     void openPluginCacheModal(plugin.id, plugin.name);
   });
-  header.querySelector<HTMLButtonElement>('[data-plugin-action="delete"]')?.addEventListener('click', () => {
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="contribute"]')?.addEventListener('click', () => {
     closePluginDetailMenu();
-    void deleteGeneratedPlugin(plugin.id);
+    openExtensionContributionModal(detail);
+  });
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="remove"]')?.addEventListener('click', () => {
+    closePluginDetailMenu();
+    void removeGeneratedPlugin(plugin.id);
+  });
+  const install = header.querySelector<HTMLButtonElement>('.plugin-detail-install');
+  const installStatus = header.querySelector<HTMLElement>('.plugin-detail-install-status');
+  install?.addEventListener('click', () => {
+    if (!availableExtension) return;
+    install.disabled = true;
+    install.textContent = 'Installing...';
+    if (installStatus) installStatus.textContent = '';
+    void (async () => {
+      try {
+        const installed = await invoke<GeneratedPlugin>('install_catalog_extension', {
+          slug: availableExtension.slug
+        });
+        await refreshGeneratedPlugins();
+        await openGeneratedPlugin(installed.id);
+      } catch (error) {
+        install.disabled = false;
+        install.textContent = 'Install';
+        if (installStatus) {
+          installStatus.textContent = getErrorMessage(
+            error,
+            `Could not install ${availableExtension.name}.`
+          );
+        }
+      }
+    })();
   });
   pluginDetailView.appendChild(header);
 
@@ -2023,7 +2970,12 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   meta.className = 'plugin-detail-meta';
   appendPluginResultRow(meta, 'ID', plugin.id);
   appendPluginResultRow(meta, 'Version', plugin.version || 'n/a');
-  appendPluginResultRow(meta, 'Status', plugin.status || 'n/a');
+  appendPluginResultRow(meta, 'Status', availableExtension ? 'Available' : plugin.status || 'n/a');
+  if (availableExtension) {
+    appendPluginResultRow(meta, 'Category', availableExtension.category || 'n/a');
+    appendPluginResultRow(meta, 'Author', availableExtension.author || 'n/a');
+    appendPluginResultRow(meta, 'Homepage', availableExtension.homepage || 'n/a');
+  }
   appendPluginResultRow(meta, 'Created', plugin.createdAt || 'n/a');
   appendPluginResultRow(meta, 'Directory', plugin.directory);
   appendPluginResultRow(meta, 'Manifest', plugin.manifestPath);
@@ -2033,17 +2985,20 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   const tools = document.createElement('section');
   tools.className = 'plugin-detail-section';
   tools.innerHTML = '<h2>Tools</h2>';
-  if (plugin.tools.length) {
+  const detailTools = plugin.tools.length ? plugin.tools : availableExtension?.tools ?? [];
+  if (detailTools.length) {
     const list = document.createElement('div');
     list.className = 'plugin-tool-list';
-    for (const tool of plugin.tools) {
+    for (const tool of detailTools) {
       const item = document.createElement('div');
       item.className = 'plugin-tool-row';
       item.innerHTML = `
         <code>${escapeHtml(tool.name)}</code>
         <span>
           ${escapeHtml(tool.description || 'No description provided.')}
-          <small>${escapeHtml(stringifyPromptJson(tool.parameters || { type: 'object', properties: {} }))}</small>
+          ${'parameters' in tool
+            ? `<small>${escapeHtml(stringifyPromptJson(tool.parameters || { type: 'object', properties: {} }))}</small>`
+            : ''}
         </span>
       `;
       list.appendChild(item);
@@ -2057,7 +3012,7 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
   }
   pluginDetailView.appendChild(tools);
 
-  renderPluginCredentials(plugin);
+  renderPluginCredentials(plugin, { readOnly: Boolean(availableExtension) });
   renderPluginCardPreviews(plugin);
 
   if (detail.readme.trim()) {
@@ -2076,7 +3031,10 @@ function renderPluginDetail(detail: GeneratedPluginDetail) {
 }
 
 // Preview every plugin tool's result card using synthesized example data.
-function renderPluginCredentials(plugin: GeneratedPlugin) {
+function renderPluginCredentials(
+  plugin: GeneratedPlugin,
+  options: { readOnly?: boolean } = {}
+) {
   if (!pluginDetailView) return;
   const section = document.createElement('section');
   section.className = 'plugin-detail-section';
@@ -2104,8 +3062,12 @@ function renderPluginCredentials(plugin: GeneratedPlugin) {
     label.textContent = credential.label;
     heading.appendChild(label);
     const pill = document.createElement('span');
-    pill.className = `plugin-credential-pill${credential.configured ? ' is-configured' : ''}`;
-    pill.textContent = credential.configured ? 'Configured' : 'Not configured';
+    pill.className = `plugin-credential-pill${credential.configured && !options.readOnly ? ' is-configured' : ''}`;
+    pill.textContent = options.readOnly
+      ? 'Required after install'
+      : credential.configured
+        ? 'Configured'
+        : 'Not configured';
     heading.appendChild(pill);
     row.appendChild(heading);
 
@@ -2121,18 +3083,20 @@ function renderPluginCredentials(plugin: GeneratedPlugin) {
     const actions = document.createElement('div');
     actions.className = 'plugin-credential-actions';
 
-    const save = document.createElement('button');
-    save.type = 'button';
-    save.className = 'capability-primary-action';
-    save.textContent = credential.configured ? 'Replace' : 'Add key';
-    save.addEventListener('click', () => {
-      openPluginCredentialModal(plugin, [credential], () => {
-        void openGeneratedPlugin(plugin.id);
+    if (!options.readOnly) {
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'capability-primary-action';
+      save.textContent = credential.configured ? 'Replace' : 'Add key';
+      save.addEventListener('click', () => {
+        openPluginCredentialModal(plugin, [credential], () => {
+          void openGeneratedPlugin(plugin.id);
+        });
       });
-    });
-    actions.appendChild(save);
+      actions.appendChild(save);
+    }
 
-    if (credential.configured) {
+    if (credential.configured && !options.readOnly) {
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'capability-secondary-action';
@@ -2163,7 +3127,7 @@ function renderPluginCredentials(plugin: GeneratedPlugin) {
       actions.appendChild(link);
     }
 
-    row.appendChild(actions);
+    if (actions.childElementCount) row.appendChild(actions);
     list.appendChild(row);
   }
 
@@ -2240,12 +3204,110 @@ async function refreshChatHistory() {
     const result = await invoke<ChatHistoryList>('list_chat_history');
     chatHistoryRows = result.chats;
     renderChatHistory();
-    if (chatHistoryStatus) {
+    if (chatHistoryStatus && sidebarView === 'chats') {
       chatHistoryStatus.textContent = chatHistoryRows.length ? '' : 'No saved chats yet.';
     }
   } catch (error) {
-    if (chatHistoryStatus) {
+    if (chatHistoryStatus && sidebarView === 'chats') {
       chatHistoryStatus.textContent = getErrorMessage(error, 'Could not load chats.');
+    }
+  }
+}
+
+async function refreshBookmarks(reset: boolean) {
+  if (bookmarkLoading) {
+    bookmarkRefreshQueued ||= reset;
+    return;
+  }
+  bookmarkLoading = true;
+  if (reset) {
+    bookmarkRows = [];
+    bookmarkTotal = 0;
+  }
+  renderBookmarks();
+  if (chatHistoryStatus && sidebarView === 'bookmarks') {
+    chatHistoryStatus.textContent = sidebarStatusText('bookmarks');
+  }
+  let loadError = '';
+  try {
+    const result = await invoke<BookmarkList>('list_bookmarks', {
+      offset: reset ? 0 : bookmarkRows.length,
+      limit: BOOKMARK_PAGE_SIZE
+    });
+    bookmarkRows = reset ? result.bookmarks : [...bookmarkRows, ...result.bookmarks];
+    bookmarkTotal = result.total;
+    renderBookmarks();
+    if (chatHistoryStatus && sidebarView === 'bookmarks') {
+      chatHistoryStatus.textContent = sidebarStatusText('bookmarks');
+    }
+  } catch (error) {
+    loadError = getErrorMessage(error, 'Could not load bookmarks.');
+  } finally {
+    bookmarkLoading = false;
+    renderBookmarks();
+    if (chatHistoryStatus && sidebarView === 'bookmarks') {
+      chatHistoryStatus.textContent = loadError || sidebarStatusText('bookmarks');
+    }
+    if (bookmarkRefreshQueued) {
+      bookmarkRefreshQueued = false;
+      void refreshBookmarks(true);
+    }
+  }
+}
+
+function renderBookmarks() {
+  if (!bookmarkList) return;
+  bookmarkList.replaceChildren();
+  for (const bookmark of bookmarkRows) {
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'bookmark-row';
+    open.setAttribute('aria-label', `Open bookmarked answer for: ${bookmark.prompt}`);
+
+    const prompt = document.createElement('strong');
+    prompt.className = 'bookmark-row-prompt';
+    prompt.textContent = bookmarkPreview(bookmark.prompt, 100);
+    const answer = document.createElement('span');
+    answer.className = 'bookmark-row-answer';
+    answer.textContent = bookmarkPreview(bookmark.answer, 220);
+    const meta = document.createElement('span');
+    meta.className = 'bookmark-row-meta';
+    meta.textContent = `${bookmark.chatName} · ${formatChatDate(new Date(bookmark.createdAt).toISOString())}`;
+    open.append(prompt, answer, meta);
+    open.addEventListener('click', () => void openBookmarkedAnswer(bookmark));
+    bookmarkList.appendChild(open);
+  }
+
+  if (bookmarkRows.length < bookmarkTotal) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'bookmark-load-more';
+    more.textContent = bookmarkLoading ? 'Loading…' : `Load more (${bookmarkTotal - bookmarkRows.length})`;
+    more.disabled = bookmarkLoading;
+    more.addEventListener('click', () => void refreshBookmarks(false));
+    bookmarkList.appendChild(more);
+  }
+}
+
+async function loadChatBookmarks(chatId: string) {
+  const entries = await invoke<StoredBookmark[]>('list_chat_bookmarks', { chatId });
+  return new Map(entries.map((entry) => [entry.messageKey, entry]));
+}
+
+async function openBookmarkedAnswer(bookmark: StoredBookmark) {
+  try {
+    await openSavedChat(bookmark.chatId);
+    const record = storedMessages.find(
+      (message) =>
+        message.role === 'assistant' && bookmarkMessageKey(message) === bookmark.messageKey
+    );
+    const article = record ? renderedMessageArticles.get(record) : undefined;
+    article?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    article?.classList.add('bookmark-target');
+    if (article) window.setTimeout(() => article.classList.remove('bookmark-target'), 1200);
+  } catch (error) {
+    if (chatHistoryStatus && sidebarView === 'bookmarks') {
+      chatHistoryStatus.textContent = getErrorMessage(error, 'Could not open bookmarked chat.');
     }
   }
 }
@@ -2300,13 +3362,7 @@ function formatChatDate(value: string) {
 async function persistActiveChatHistory() {
   if (!storedMessages.length) return;
   const meta = ensureActiveChatMeta(storedMessages[0]?.text ?? '');
-  meta.updatedAt = new Date().toISOString();
-  await invoke<ChatHistoryRow>('save_chat_history', {
-    payload: {
-      ...meta,
-      messages: storedMessages
-    }
-  });
+  await persistChatSnapshot(meta, storedMessages);
 }
 
 // Persist a specific chat's snapshot (meta + messages) regardless of which chat
@@ -2315,9 +3371,7 @@ async function persistActiveChatHistory() {
 async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
   if (!meta || !stored.length) return;
   meta.updatedAt = new Date().toISOString();
-  await invoke<ChatHistoryRow>('save_chat_history', {
-    payload: { ...meta, messages: stored }
-  });
+  await chatSnapshotSaves.enqueue(meta.chatId, { ...meta, messages: stored });
 }
 
 function persistChatSnapshotQuietly(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
@@ -2337,7 +3391,7 @@ function scrollMessagesToBottom() {
   if (messages) messages.scrollTop = messages.scrollHeight;
 }
 
-function createTurnSnapshotPersister(persist: () => void, intervalMs = 450) {
+function createTurnSnapshotPersister(persist: () => void, intervalMs = 1500) {
   let lastPersistedAt = 0;
   let timer: number | undefined;
 
@@ -2406,6 +3460,8 @@ async function openSavedChat(chatId: string) {
 
   const liveRun = chatRuns.get(chatId);
   if (liveRun) {
+    activeBookmarks = await loadChatBookmarks(chatId).catch(() => new Map());
+    if (viewRevision !== mainViewRevision) return;
     bindChatState(liveRun.meta, liveRun.messages);
     renderStoredTranscript();
     showConversation();
@@ -2415,8 +3471,12 @@ async function openSavedChat(chatId: string) {
     return;
   }
 
-  const chat = await invoke<ChatHistoryPayload>('read_chat_history', { chatId });
+  const [chat, chatBookmarks] = await Promise.all([
+    invoke<ChatHistoryPayload>('read_chat_history', { chatId }),
+    loadChatBookmarks(chatId).catch(() => new Map<string, StoredBookmark>())
+  ]);
   if (viewRevision !== mainViewRevision) return;
+  activeBookmarks = chatBookmarks;
   const recovered = recoverInterruptedMessages(chat.messages);
   bindChatState({
     chatId: chat.chatId,
@@ -2473,6 +3533,88 @@ async function deleteSavedChat(chatId: string) {
     chatForm?.classList.remove('is-hidden');
   }
   await refreshChatHistory();
+  if (sidebarView === 'bookmarks') await refreshBookmarks(true);
+}
+
+/**
+ * The "this is a snapshot" line above an imported answer.
+ *
+ * It matters more than it looks. `renderStoredTranscript` rebuilds
+ * `chatMessages` as role/text only, so the model never sees the imported card
+ * data — a follow-up like "now break that out by region" runs a *live* query
+ * rather than slicing the frozen table. That is the right behaviour, but it has
+ * to be said out loud or the numbers could appear to change on their own.
+ */
+function renderSharedAnswerBanner(article: HTMLElement) {
+  article.querySelector<HTMLElement>(':scope > .shared-answer-banner')?.remove();
+
+  const banner = document.createElement('p');
+  banner.className = 'shared-answer-banner';
+  banner.textContent =
+    'Shared answer. The results below are a snapshot — ask a follow-up to run it live.';
+  article.prepend(banner);
+}
+
+function renderShareImportError(message: string) {
+  if (!messages) return;
+  const notice = document.createElement('article');
+  notice.className = 'message assistant';
+  const body = document.createElement('div');
+  body.className = 'message-text message-error';
+  body.textContent = message;
+  notice.appendChild(body);
+  messages.appendChild(notice);
+}
+
+/**
+ * Open a shared answer in a new chat.
+ *
+ * Viewing needs no credentials and no extensions: the cards render from the
+ * data embedded in the link and the citations resolve against it. What the
+ * recipient may be missing is the extension needed to ask a *follow-up*, so an
+ * uninstalled one is offered through the existing inline install card.
+ */
+async function openSharedAnswer(encoded: string) {
+  // A live turn owns the transcript; importing over it would clobber the run.
+  if (chatRuns.has(activeSessionId)) return;
+
+  let payload: SharedAnswerPayload;
+  try {
+    payload = await decodeSharePayload(encoded);
+  } catch (error) {
+    showConversation();
+    renderShareImportError(getErrorMessage(error, 'This share link could not be read.'));
+    return;
+  }
+
+  // A cold-start deep link beats the catalog load, and the nudge needs it.
+  if (!initialExtensionsLoaded) await refreshGeneratedPlugins();
+
+  await startNewConversation({ showPreChat: false });
+  ensureActiveChatMeta(payload.q);
+
+  const { user, assistant } = messagesFromSharedPayload(payload);
+  const assistantRecord: StoredChatMessage = { ...assistant, sharedImport: true };
+  const recommendation = recommendationForShare(
+    payload,
+    catalogExtensions.map((entry) => ({
+      slug: entry.slug,
+      name: entry.name,
+      description: entry.description,
+      installed: entry.installed
+    }))
+  );
+  if (recommendation) assistantRecord.extensionRecommendation = recommendation;
+
+  storedMessages.push(user as StoredChatMessage, assistantRecord);
+  renderStoredTranscript();
+
+  // The inline install card is the targeted nudge; the onboarding modal would
+  // compete with it for the same decision.
+  extensionOnboardingPending = false;
+
+  await persistActiveChatHistory();
+  await refreshChatHistory();
 }
 
 async function startNewConversation(options: { showPreChat: boolean }) {
@@ -2482,6 +3624,7 @@ async function startNewConversation(options: { showPreChat: boolean }) {
   messages?.replaceChildren();
   shell?.classList.remove('plugin-view');
   selectedPluginId = '';
+  selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();
   pluginDetailView?.classList.add('is-hidden');
   messages?.classList.remove('is-hidden');
@@ -2503,6 +3646,7 @@ function resetConversationState() {
   activeChatMeta = createChatMeta(activeSessionId);
   chatMessages = [];
   storedMessages = [];
+  activeBookmarks = new Map();
 }
 
 function renderStoredMessage(message: StoredChatMessage) {
@@ -2515,6 +3659,7 @@ function renderStoredMessage(message: StoredChatMessage) {
   );
   renderedMessageArticles.set(message, article);
   if (message.modeStatus) article.classList.add('mode-status-message');
+  if (message.sharedImport) renderSharedAnswerBanner(article);
   if (message.role === 'assistant' && message.builderRun) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) {
@@ -2525,6 +3670,9 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && message.credentialRequest) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderCredentialRequest(body, message);
+  }
+  if (message.role === 'assistant' && message.extensionRecommendation) {
+    renderExtensionRecommendation(article, message.extensionRecommendation);
   }
   if (message.role === 'assistant' && message.modelFailure) {
     const body = article.querySelector<HTMLElement>('.message-text');
@@ -2538,6 +3686,149 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && !message.builderRun && message.status === 'running') {
     const live = chatRuns.get(activeSessionId)?.kind === 'agent';
     setAgentActivity(article, agentActivityLabel({ running: live, streaming: false }));
+  }
+  syncMessageActions(article, message);
+}
+
+function syncMessageActions(article: HTMLElement, message: StoredChatMessage) {
+  const existing = article.querySelector<HTMLElement>(':scope > .message-actions');
+  if (!canBookmarkMessage(message)) {
+    existing?.remove();
+    return;
+  }
+
+  let actions = existing;
+  if (!actions) {
+    actions = document.createElement('div');
+    actions.className = 'message-actions';
+    article.appendChild(actions);
+  }
+
+  let bookmark = actions.querySelector<HTMLButtonElement>('[data-action="bookmark"]');
+  if (!bookmark) {
+    bookmark = document.createElement('button');
+    bookmark.type = 'button';
+    bookmark.dataset.action = 'bookmark';
+    bookmark.innerHTML = iconSvg('bookmark');
+    bookmark.addEventListener('click', () => void toggleMessageBookmark(article, message, bookmark!));
+    actions.appendChild(bookmark);
+  }
+  const bookmarked = activeBookmarks.has(bookmarkMessageKey(message));
+  bookmark.classList.toggle('is-bookmarked', bookmarked);
+  bookmark.setAttribute('aria-pressed', String(bookmarked));
+  bookmark.setAttribute('aria-label', bookmarked ? 'Remove bookmark' : 'Bookmark this response');
+  bookmark.title = bookmarked ? 'Remove bookmark' : 'Bookmark this response';
+
+  // Sharing is a narrower gate than bookmarking: a builder transcript can be
+  // bookmarked but has no answer to send anyone.
+  const share = actions.querySelector<HTMLButtonElement>('[data-action="share"]');
+  if (!canShareMessage(message)) {
+    share?.remove();
+    return;
+  }
+  if (!share) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.action = 'share';
+    button.innerHTML = iconSvg('share-2');
+    button.setAttribute('aria-label', 'Share this response');
+    button.title = 'Share this response';
+    button.addEventListener('click', () => shareMessage(message));
+    actions.appendChild(button);
+  }
+}
+
+/**
+ * Name the extensions behind an answer's cards.
+ *
+ * A bundled catalog extension carries a slug, which is what lets a recipient
+ * install it. A user-built plugin has none, so it is named but not offered —
+ * there is nothing on the recipient's machine to install it from.
+ */
+function shareExtensionsForCards(cards: StoredResultCard[]): ShareExtension[] {
+  const extensions: ShareExtension[] = [];
+  const seen = new Set<string>();
+
+  for (const card of cards) {
+    const catalog = catalogExtensions.find((entry) =>
+      entry.tools.some((tool) => tool.name === card.toolName)
+    );
+    if (catalog) {
+      if (seen.has(catalog.slug)) continue;
+      seen.add(catalog.slug);
+      extensions.push({
+        slug: catalog.slug,
+        name: catalog.name,
+        description: catalog.description
+      });
+      continue;
+    }
+
+    const local = pluginNameForTool(card.toolName);
+    if (local && !seen.has(local)) {
+      seen.add(local);
+      extensions.push({ name: local });
+    }
+  }
+
+  return extensions;
+}
+
+function shareMessage(message: StoredChatMessage) {
+  openShareModal({
+    question: promptForAssistant(storedMessages, message),
+    message: { text: message.text, cards: message.cards, sources: message.sources },
+    extensions: shareExtensionsForCards(message.cards ?? []),
+    loadArtifact: resultArtifactLoader,
+    baseUrl: SHARE_BASE_URL,
+    copy: (text) => writeClipboard({ text }),
+    openExternal: async (url) => {
+      await invoke('open_external_url', { url });
+    }
+  });
+}
+
+async function toggleMessageBookmark(
+  article: HTMLElement,
+  message: StoredChatMessage,
+  button: HTMLButtonElement
+) {
+  const messageKey = bookmarkMessageKey(message);
+  const chatId = activeSessionId;
+  const chatName = activeChatMeta.name;
+  const chatBookmarks = activeBookmarks;
+  const chatStoredMessages = storedMessages;
+  const existing = chatBookmarks.get(messageKey);
+  button.disabled = true;
+  try {
+    if (existing) {
+      await invoke('delete_bookmark', { chatId, messageKey });
+      chatBookmarks.delete(messageKey);
+    } else {
+      const prompt = promptForAssistant(chatStoredMessages, message);
+      if (!prompt) throw new Error('Could not find the prompt for this response.');
+      const bookmark = await invoke<StoredBookmark>('save_bookmark', {
+        bookmark: {
+          id: `${chatId}:${messageKey}`,
+          messageKey,
+          chatId,
+          chatName,
+          prompt,
+          answer: message.text,
+          messageTimestamp: message.timestamp,
+          createdAt: Date.now()
+        } satisfies StoredBookmark
+      });
+      chatBookmarks.set(messageKey, bookmark);
+    }
+    if (activeSessionId === chatId && activeBookmarks === chatBookmarks) {
+      syncMessageActions(article, message);
+    }
+    if (sidebarView === 'bookmarks') await refreshBookmarks(true);
+  } catch (error) {
+    button.title = getErrorMessage(error, 'Could not update bookmark.');
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2638,10 +3929,27 @@ function extractResultCard(event: { toolName: string; result: unknown }): Stored
   if (!card || typeof card !== 'object' || !Array.isArray((card as Record<string, unknown>).layout)) {
     return null;
   }
+  const rawArtifact = (result as Record<string, unknown>).dataArtifact;
+  const artifact =
+    rawArtifact && typeof rawArtifact === 'object'
+      ? (rawArtifact as Record<string, unknown>)
+      : null;
   return {
     toolName: event.toolName,
     template: card as StoredResultCard['template'],
-    data: (result as Record<string, unknown>).data ?? {}
+    data: (result as Record<string, unknown>).data ?? {},
+    cached: resultWasCached(result) || undefined,
+    artifact:
+      artifact &&
+      typeof artifact.chatId === 'string' &&
+      typeof artifact.artifactId === 'string' &&
+      typeof artifact.byteCount === 'number'
+        ? {
+            chatId: artifact.chatId,
+            artifactId: artifact.artifactId,
+            byteCount: artifact.byteCount
+          }
+        : undefined
   };
 }
 
@@ -2760,6 +4068,7 @@ async function startAgentTurn(content: string) {
   try {
     let requestedBuild: AgentBuildRequest | undefined;
     let requestedCredential: CredentialRequest | undefined;
+    let recommendedExtension: ExtensionRecommendation | undefined;
     /**
      * Set the moment the turn's reply is in hand.
      *
@@ -2823,7 +4132,7 @@ async function startAgentTurn(content: string) {
         assistantRecord.status = 'running';
         activeToolName = toolCall.toolName;
         refreshActivity();
-        snapshotPersister.schedule(true);
+        snapshotPersister.schedule();
         syncRemountedTurn();
         void logAgentTurnEvent('tool_call', {
           toolName: toolCall.toolName,
@@ -2851,7 +4160,7 @@ async function startAgentTurn(content: string) {
         // A citation opens the card this same call rendered.
         if (source && cardIndex !== undefined) source.cardIndex = cardIndex;
         if (source) (assistantRecord.sources ??= []).push(source);
-        snapshotPersister.schedule(true);
+        snapshotPersister.schedule();
         syncRemountedTurn();
         void logAgentTurnEvent('tool_result', {
           toolName: toolCall.toolName,
@@ -2883,6 +4192,14 @@ async function startAgentTurn(content: string) {
         requestedCredential = request;
         void logAgentTurnEvent('credential_request', { request, mode: turnMode }, turnSessionId);
       },
+      onExtensionRecommendation: (recommendation) => {
+        recommendedExtension = recommendation;
+        void logAgentTurnEvent(
+          'extension_recommendation',
+          { recommendation, mode: turnMode },
+          turnSessionId
+        );
+      },
       onRetry: (event) => {
         // The turn is deliberately idle for the length of the backoff. Saying so
         // is the difference between a visible wait and an app that looks hung.
@@ -2895,7 +4212,7 @@ async function startAgentTurn(content: string) {
       onError: (event) => {
         streamError = event;
       }
-    });
+    }, turnSessionId);
     settled = true;
     if (thinkingPreview.parentElement) {
       thinkingPreview.remove();
@@ -2933,12 +4250,17 @@ async function startAgentTurn(content: string) {
       return;
     }
 
+    recommendedExtension = reply.extensionRecommendation ?? recommendedExtension;
+
     const finalContent = reply.content || streamed || 'The model returned an empty response.';
     if (turnIsActive()) {
       if (pendingBody) {
         renderMessageText(pendingBody, finalContent, true, messageContext(assistantRecord));
       }
       pending.classList.remove('pending');
+      if (recommendedExtension) {
+        renderExtensionRecommendation(pending, recommendedExtension);
+      }
       turnChatMessages.push({ role: 'assistant', content: finalContent });
     }
     assistantRecord.text = finalContent;
@@ -2949,7 +4271,9 @@ async function startAgentTurn(content: string) {
     assistantRecord.usage = reply.usage;
     assistantRecord.status = 'completed';
     assistantRecord.error = undefined;
+    assistantRecord.extensionRecommendation = recommendedExtension;
     await persistChatSnapshot(turnMeta, turnStored);
+    if (turnIsActive()) syncMessageActions(pending, assistantRecord);
     void logAgentTurnEvent('turn_completed', {
       provider: reply.provider,
       model: reply.model,
@@ -3037,6 +4361,9 @@ function syncRemountedRun(
     } else if (body) {
       renderMessageText(body, record.text, record.role === 'assistant', messageContext(record));
       if (record.cards?.length) renderMessageCards(article, record.cards);
+      if (record.extensionRecommendation) {
+        renderExtensionRecommendation(article, record.extensionRecommendation);
+      }
     }
   } else {
     renderStoredTranscript();
@@ -3136,6 +4463,72 @@ function renderCapabilityConfirmation(request: CapabilityRequest) {
       messages: recentBuildConversation()
     });
   });
+}
+
+/** Inline action for an extension the main agent found in the bundled catalog. */
+function renderExtensionRecommendation(
+  article: HTMLElement,
+  recommendation: ExtensionRecommendation
+) {
+  article
+    .querySelector<HTMLElement>(':scope > .extension-recommendation')
+    ?.remove();
+
+  const extension = catalogExtensions.find(
+    (candidate) => candidate.slug === recommendation.slug
+  );
+  const panel = document.createElement('section');
+  panel.className = 'extension-recommendation';
+
+  const copy = document.createElement('div');
+  copy.className = 'extension-recommendation-copy';
+  const name = document.createElement('strong');
+  name.textContent = recommendation.name;
+  copy.appendChild(name);
+  if (recommendation.description) {
+    const description = document.createElement('span');
+    description.textContent = recommendation.description;
+    copy.appendChild(description);
+  }
+
+  const install = document.createElement('button');
+  install.type = 'button';
+  install.className = 'extensions-install-button extension-recommendation-install';
+  install.textContent = extension?.installed
+    ? 'Installed'
+    : `Install ${recommendation.name}`;
+  install.disabled = extension?.installed === true;
+
+  const status = document.createElement('span');
+  status.className = 'extension-recommendation-status';
+  status.setAttribute('aria-live', 'polite');
+
+  install.addEventListener('click', () => {
+    if (install.disabled) return;
+    install.disabled = true;
+    install.textContent = 'Installing...';
+    status.textContent = '';
+    void (async () => {
+      try {
+        await invoke<GeneratedPlugin>('install_catalog_extension', {
+          slug: recommendation.slug
+        });
+        await refreshGeneratedPlugins();
+        install.textContent = 'Installed';
+        status.textContent = `${recommendation.name} is ready. Ask your question again to use it.`;
+      } catch (error) {
+        install.disabled = false;
+        install.textContent = `Install ${recommendation.name}`;
+        status.textContent = getErrorMessage(
+          error,
+          `Could not install ${recommendation.name}.`
+        );
+      }
+    })();
+  });
+
+  panel.append(copy, install, status);
+  article.appendChild(panel);
 }
 
 /**
@@ -3454,6 +4847,13 @@ async function scaffoldAndRunPluginBuilder(
       turnIsActive
     });
     await persistChatSnapshot(turnMeta, turnStored);
+    if (turnIsActive() && builderRecord) {
+      const article = body.closest<HTMLElement>('article.message');
+      if (article) {
+        renderedMessageArticles.set(builderRecord, article);
+        syncMessageActions(article, builderRecord);
+      }
+    }
     syncRemountedTurn();
   } catch (error) {
     const errorMessage = getErrorMessage(error, 'Could not write plugin.');
@@ -4126,6 +5526,7 @@ function showConversation() {
   shell?.classList.remove('pre-chat');
   shell?.classList.remove('plugin-view');
   selectedPluginId = '';
+  selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();
   pluginDetailView?.classList.add('is-hidden');
   messages?.classList.remove('is-hidden');

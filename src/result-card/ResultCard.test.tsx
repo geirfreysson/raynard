@@ -4,11 +4,22 @@ import { createElement } from 'react';
 import { ResultCard, filterTableRows } from './ResultCard';
 import type { CardTemplate } from './types';
 
-function render(template: CardTemplate, data: unknown): string {
-  return renderToStaticMarkup(createElement(ResultCard, { template, data }));
+function render(template: CardTemplate, data: unknown, cached = false): string {
+  return renderToStaticMarkup(createElement(ResultCard, { template, data, cached }));
 }
 
 describe('ResultCard', () => {
+  it('shows a host-owned Cached badge only for cache hits', () => {
+    const template: CardTemplate = {
+      name: { singular: 'result', plural: 'results' },
+      title: '{{name}}',
+      layout: [{ component: 'Text', text: '{{value}}' }]
+    };
+
+    expect(render(template, { name: 'First result', value: 1 }, true)).toContain('>Cached<');
+    expect(render(template, { name: 'Second result', value: 1 })).not.toContain('>Cached<');
+  });
+
   it('interpolates the title and binds MetricRow / KeyValue fields', () => {
     const html = render(
       {

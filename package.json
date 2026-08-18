@@ -33,6 +33,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@raynard/plugin-sdk": "file:scripts/plugin-sdk",
     "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",

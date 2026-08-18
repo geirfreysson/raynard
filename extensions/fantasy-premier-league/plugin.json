@@ -1,0 +1,72 @@
+{
+  "id": "raynard.catalog.fantasy-premier-league",
+  "name": "Fantasy Premier League",
+  "description": "Explore current Fantasy Premier League players, fixtures, managers, squads, history, and classic league standings.",
+  "category": "Sports",
+  "tags": [
+    "football",
+    "soccer",
+    "fantasy",
+    "premier-league",
+    "statistics"
+  ],
+  "icon": "database",
+  "author": "Raynard",
+  "homepage": "https://fantasy.premierleague.com/",
+  "version": "1.0.0",
+  "sdkVersion": 1,
+  "status": "bundled",
+  "createdAt": "2026-08-16T00:00:00.000Z",
+  "samplePrompts": [
+    "Who are the highest-scoring midfielders in FPL right now, and what does Mohamed Salah's fixture run look like?",
+    "Show me the standings of my classic league 314 and tell me how the leader's gameweek 5 squad was set up.",
+    "How is FPL entry 12345 doing this season — current rank, points per gameweek, and which chips have they played?"
+  ],
+  "sourceUrls": [
+    "https://www.postman.com/fplassist/fpl-assist/collection/zqlmv01/fantasy-premier-league-api"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "fpl_get_game_overview",
+        "description": "Get the overall state of the Fantasy Premier League game: total player/team counts, the current and next gameweek with deadlines, and average scores. Use this first to discover which gameweek is live before calling gameweek-specific tools like fpl_list_fixtures or fpl_get_entry_picks.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_search_players",
+        "description": "Search FPL players by name and/or filter by team and position, sorted by total points. Returns a card with candidate player ids, prices, form and points — use the ids with fpl_get_player for full stats, fixtures and history.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_get_player",
+        "description": "Get a full profile for one FPL player: season stats (points, goals, assists, xG/xA, price, ownership), upcoming fixtures with difficulty ratings, recent gameweek-by-gameweek returns and past-season history. Find the player_id with fpl_search_players first.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_list_fixtures",
+        "description": "List Premier League fixtures for one gameweek (or every fixture when no gameweek is given), with a card showing scores, kickoff times and difficulty ratings. Returns fixture ids and team ids for follow-up calls. Use fpl_get_game_overview to find the current gameweek number.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_get_entry",
+        "description": "Get an FPL manager's team overview: team name, manager name, overall points and rank, latest gameweek points, squad value, bank balance and classic leagues entered. The entry_id is the number in a team's FPL URL, or found in league standings via fpl_get_league_standings.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_get_entry_history",
+        "description": "Get an FPL manager's season history: points, rank, squad value and transfers for every gameweek, plus past-season finishes and chips played. Use for rank-trajectory and chip-strategy questions about an entry_id (from fpl_get_entry or league standings).",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_get_entry_picks",
+        "description": "Get an FPL manager's squad for one gameweek: starting XI, bench order, captain and vice-captain (resolved to player names), active chip, points scored and transfer cost. Entry ids come from fpl_get_entry or fpl_get_league_standings; gameweeks from fpl_get_game_overview.",
+        "hasCard": true
+      },
+      {
+        "name": "fpl_get_league_standings",
+        "description": "Get the standings table for a classic FPL mini-league: rank, team name, manager, gameweek points and total points, 50 entries per page. Entry ids in the result feed fpl_get_entry, fpl_get_entry_history and fpl_get_entry_picks for head-to-head analysis.",
+        "hasCard": true
+      }
+    ]
+  }
+}

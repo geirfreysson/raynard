@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ResultCard } from './ResultCard';
+import { hydrateResultCards, type ResultArtifactLoader } from './artifacts';
 import { interpolate } from './resolve';
 import type { StoredResultCard } from './types';
 
@@ -63,7 +64,7 @@ function ResultCardDisclosure({ card, index }: { card: StoredResultCard; index: 
         </svg>
         <span>{label}</span>
       </button>
-      {open && <div className="mt-1"><ResultCard template={card.template} data={card.data} /></div>}
+      {open && <div className="mt-1"><ResultCard template={card.template} data={card.data} cached={card.cached} /></div>}
     </div>
   );
 }
@@ -83,25 +84,68 @@ export function ResultCardList({ cards }: { cards: StoredResultCard[] }) {
 // The plugin-detail preview passes collapsible={false} to always show them.
 export function ResultCardStack({
   cards,
-  collapsible = true
+  collapsible = true,
+  loadArtifact
 }: {
   cards: StoredResultCard[];
   collapsible?: boolean;
+  loadArtifact?: ResultArtifactLoader;
 }) {
   const [open, setOpen] = useState(false);
-  const valid = Array.isArray(cards) ? cards.filter((card) => card && card.template) : [];
+  const [hydrated, setHydrated] = useState(cards);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const shouldLoad = !collapsible || open;
+
+  useEffect(() => {
+    let active = true;
+    setHydrated(cards);
+    setLoadError('');
+    if (!shouldLoad || !loadArtifact || !cards.some((card) => card.artifact)) {
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+    setLoading(true);
+    void hydrateResultCards(cards, loadArtifact).then(
+      (next) => {
+        if (!active) return;
+        setHydrated(next);
+        setLoading(false);
+      },
+      (error) => {
+        if (!active) return;
+        setLoadError(error instanceof Error ? error.message : String(error));
+        setLoading(false);
+      }
+    );
+    return () => {
+      active = false;
+    };
+  }, [cards, cards.length, loadArtifact, shouldLoad]);
+
+  const valid = Array.isArray(hydrated)
+    ? hydrated.filter((card) => card && card.template)
+    : [];
   if (!valid.length) return null;
 
   const stack = (
     <div className="flex flex-col gap-2">
       {valid.map((card, i) => (
-        <ResultCard key={i} template={card.template} data={card.data} />
+        <ResultCard key={i} template={card.template} data={card.data} cached={card.cached} />
       ))}
     </div>
   );
 
   if (!collapsible) {
-    return <div className="rc-scope">{stack}</div>;
+    return (
+      <div className="rc-scope">
+        {loading ? <p className="text-sm text-muted-foreground">Loading result…</p> : null}
+        {loadError ? <p className="text-sm text-destructive">Could not load result.</p> : null}
+        {!loading && !loadError ? stack : null}
+      </div>
+    );
   }
 
   const label = cardCountLabel(valid);
@@ -127,7 +171,9 @@ export function ResultCardStack({
         </svg>
         <span>{label}</span>
       </button>
-      {open && <div className="mt-2"><ResultCardList cards={valid} /></div>}
+      {open && loading ? <p className="mt-2 text-sm text-muted-foreground">Loading results…</p> : null}
+      {open && loadError ? <p className="mt-2 text-sm text-destructive">Could not load results.</p> : null}
+      {open && !loading && !loadError ? <div className="mt-2"><ResultCardList cards={valid} /></div> : null}
     </div>
   );
 }

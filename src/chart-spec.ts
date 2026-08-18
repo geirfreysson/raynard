@@ -7,10 +7,13 @@
 // model's output.
 
 export type ChartKind = 'line' | 'bar';
+export type ChartAxis = 'left' | 'right';
 
 export type ChartSeries = {
   key: string;
   label: string;
+  /** Omitted means the primary, left-hand Y axis. */
+  axis?: ChartAxis;
 };
 
 export type ChartRow = Record<string, string | number | null>;
@@ -21,6 +24,7 @@ export type ChartSpec = {
   x: string;
   xLabel?: string;
   yLabel?: string;
+  rightYLabel?: string;
   stacked?: boolean;
   /** Series or category names the answer is about; the rest are drawn muted. */
   highlight?: string[];
@@ -70,8 +74,14 @@ function parseSeries(value: unknown): ChartSeries[] | null {
     const record = entry as Record<string, unknown>;
     const key = optionalText(record.key);
     if (!key || seen.has(key)) return null;
+    const axis = optionalText(record.axis);
+    if (axis && axis !== 'left' && axis !== 'right') return null;
     seen.add(key);
-    series.push({ key, label: optionalText(record.label) ?? key });
+    series.push({
+      key,
+      label: optionalText(record.label) ?? key,
+      ...(axis === 'right' ? { axis } : {})
+    });
   }
 
   return series.length ? series : null;
@@ -170,6 +180,11 @@ export function parseChartSpec(source: string): ChartSpec | null {
 
   const series = parseSeries(record.series);
   if (!series) return null;
+  const hasRightAxis = series.some((entry) => entry.axis === 'right');
+  const hasLeftAxis = series.some((entry) => entry.axis !== 'right');
+  // A secondary axis only makes sense alongside a primary one. Mixed-axis
+  // stacks are also visually ambiguous because their totals use two units.
+  if (hasRightAxis && (!hasLeftAxis || (type === 'bar' && record.stacked === true))) return null;
 
   const rows = parseRows(record.rows, x, series);
   if (!rows) return null;
@@ -180,6 +195,7 @@ export function parseChartSpec(source: string): ChartSpec | null {
     x,
     xLabel: optionalText(record.xLabel),
     yLabel: optionalText(record.yLabel),
+    rightYLabel: hasRightAxis ? optionalText(record.rightYLabel) : undefined,
     stacked: type === 'bar' && record.stacked === true ? true : undefined,
     highlight: parseHighlight(record.highlight),
     sources: parseSources(record.sources),

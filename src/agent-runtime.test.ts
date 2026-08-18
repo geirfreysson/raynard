@@ -103,6 +103,35 @@ describe('applyStreamPayload', () => {
     ]);
   });
 
+  it('forwards a validated available-extension recommendation', () => {
+    const recommendations: unknown[] = [];
+
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'extension_recommendation',
+        result: {
+          slug: 'open-library',
+          name: 'Open Library',
+          description: 'Search books and authors.',
+          answer: 'Open Library can answer that.'
+        }
+      },
+      'active',
+      { streamed: '' },
+      { onExtensionRecommendation: (recommendation) => recommendations.push(recommendation) }
+    );
+
+    expect(recommendations).toEqual([
+      {
+        slug: 'open-library',
+        name: 'Open Library',
+        description: 'Search books and authors.',
+        answer: 'Open Library can answer that.'
+      }
+    ]);
+  });
+
   it('forwards complete Pi coding-tool lifecycle events', () => {
     const events: unknown[] = [];
     const handlers = {

@@ -3,10 +3,12 @@ import {
   assignCitationNumbers,
   buildPiTypeFromSchema,
   buildMainAgentSystemPrompt,
+  createAvailableExtensionSearchTool,
   createBuildRequestTool,
   createCitationCounter,
   createDirectAnswerTool,
   createGeneratedPluginTools,
+  createExtensionRecommendationTool,
   createModel,
   createUsageTotal,
   addUsage,
@@ -157,6 +159,18 @@ describe('main agent core', () => {
     expect(explore).toMatch(/answer_without_api.*clarif/i);
   });
 
+  it('checks available extensions on demand without embedding their catalog in the default prompt', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: [],
+      plugins: []
+    });
+
+    expect(explore).toMatch(/call search_available_extensions.*before.*answer_without_api/is);
+    expect(explore).toContain('Or provide me with an API documentation site and I can build one.');
+    expect(explore).not.toContain('Open Library');
+  });
+
   it('teaches the agent that result cards are a built-in feature, not content to design', () => {
     const build = buildMainAgentSystemPrompt({ mode: 'build', toolNames: ['dnd_get_spell'] });
 
@@ -177,6 +191,11 @@ describe('main agent core', () => {
     expect(explore).toContain('```chart');
     expect(explore).toMatch(/"type"\s*,?.*"x".*"series".*"rows"/s);
     expect(explore).toContain('"stacked" (bar only)');
+    expect(explore).toContain('"rightYLabel"');
+    expect(explore).toContain('series[].axis');
+    expect(explore).toMatch(/different units.*currency.*percentage/is);
+    expect(explore).toMatch(/never claim.*two axes.*yLabel/is);
+    expect(explore).toMatch(/yLabel.*rightYLabel.*2.?5 words.*30 characters/is);
     // The highlight option and when to reach for it.
     expect(explore).toContain('"highlight"');
     expect(explore).toMatch(/everything else is drawn muted/i);
@@ -344,7 +363,8 @@ describe('main agent core', () => {
         return {
           text: 'Story one',
           references: [{ url: 'https://news.ycombinator.com/item?id=1' }],
-          data: { stories: [{ title: 'Story one' }] }
+          data: { stories: [{ title: 'Story one' }] },
+          _raynard: { cacheHit: true }
         };
       }
     });
@@ -363,6 +383,7 @@ describe('main agent core', () => {
     expect(result.content[0].text).toContain('Story one');
     expect(result.details.references).toHaveLength(1);
     expect(result.details.card.name.singular).toBe('story list');
+    expect(result.details._raynard).toEqual({ cacheHit: true });
   });
 
   it('numbers citations across every tool call in one turn, for the host too', async () => {
@@ -547,6 +568,73 @@ describe('main agent core', () => {
     ]);
     expect(result.terminate).toBe(true);
     expect(result.details.type).toBe('plugin-build-request');
+  });
+
+  it('searches only uninstalled catalog extensions after a missing-capability decision', async () => {
+    const tool = createAvailableExtensionSearchTool(Type, [
+      {
+        slug: 'open-library',
+        name: 'Open Library',
+        description: 'Search books and retrieve editions and authors.',
+        category: 'Books',
+        installed: false,
+        tools: [{ name: 'open_library_search_books', description: 'Search for books.' }]
+      },
+      {
+        slug: 'hacker-news',
+        name: 'Hacker News',
+        description: 'Read technology stories.',
+        category: 'News',
+        installed: true,
+        tools: [{ name: 'hn_top_stories', description: 'Read top stories.' }]
+      }
+    ]);
+
+    const result = await tool.execute('catalog-1', { query: 'find books by author' });
+
+    expect(tool.name).toBe('search_available_extensions');
+    expect(result.content[0].text).toContain('Open Library');
+    expect(result.content[0].text).toContain('open_library_search_books');
+    expect(result.content[0].text).not.toContain('Hacker News');
+    expect(result.content[0].text).toContain(
+      'Or provide me with an API documentation site and I can build one.'
+    );
+    expect(result.details.extensions.map((extension) => extension.slug)).toEqual([
+      'open-library'
+    ]);
+  });
+
+  it('turns a catalog choice into a structured install recommendation', async () => {
+    const emitted = [];
+    const tool = createExtensionRecommendationTool(
+      Type,
+      [
+        {
+          slug: 'open-library',
+          name: 'Open Library',
+          description: 'Search books and authors.',
+          installed: false
+        }
+      ],
+      (recommendation) => emitted.push(recommendation)
+    );
+
+    const result = await tool.execute('recommend-1', {
+      slug: 'open-library',
+      answer: 'The Open Library extension can search books and authors.'
+    });
+
+    expect(tool.name).toBe('recommend_available_extension');
+    expect(result.terminate).toBe(true);
+    expect(emitted).toEqual([
+      {
+        slug: 'open-library',
+        name: 'Open Library',
+        description: 'Search books and authors.',
+        answer:
+          'The Open Library extension can search books and authors.\n\nOr provide me with an API documentation site and I can build one.'
+      }
+    ]);
   });
 
   it('rejects a new-plugin proposal that has no credible API source', async () => {

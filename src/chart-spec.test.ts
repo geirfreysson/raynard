@@ -35,6 +35,51 @@ describe('parseChartSpec', () => {
     expect(spec?.rows[0]).toEqual({ year: 2010, UK: 100308, Germany: 115039 });
   });
 
+  it('parses a dual-axis chart while leaving ordinary series on the left axis', () => {
+    const spec = parseChartSpec(
+      JSON.stringify({
+        type: 'line',
+        x: 'year',
+        yLabel: 'International $',
+        rightYLabel: '% of exports',
+        series: [
+          { key: 'gdp', label: 'GDP per capita' },
+          { key: 'metals', label: 'Ores & metals exports', axis: 'right' },
+          { key: 'food', label: 'Food exports', axis: 'right' }
+        ],
+        rows: [{ year: 2024, gdp: 67310, metals: 34.3, food: 44 }]
+      })
+    );
+
+    expect(spec?.rightYLabel).toBe('% of exports');
+    expect(spec?.series).toEqual([
+      { key: 'gdp', label: 'GDP per capita' },
+      { key: 'metals', label: 'Ores & metals exports', axis: 'right' },
+      { key: 'food', label: 'Food exports', axis: 'right' }
+    ]);
+  });
+
+  it('rejects invalid or ambiguous dual-axis declarations', () => {
+    const base = {
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'gdp' }, { key: 'rate', axis: 'right' }],
+      rows: [{ year: 2024, gdp: 67310, rate: 44 }]
+    };
+
+    expect(
+      parseChartSpec(
+        JSON.stringify({ ...base, series: [{ key: 'gdp' }, { key: 'rate', axis: 'center' }] })
+      )
+    ).toBeNull();
+    expect(
+      parseChartSpec(
+        JSON.stringify({ ...base, series: [{ key: 'gdp', axis: 'right' }, { key: 'rate', axis: 'right' }] })
+      )
+    ).toBeNull();
+    expect(parseChartSpec(JSON.stringify({ ...base, type: 'bar', stacked: true }))).toBeNull();
+  });
+
   it('keeps stacked only for bar charts', () => {
     const bar = parseChartSpec(
       JSON.stringify({
