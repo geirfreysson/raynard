@@ -253,23 +253,28 @@ describe('main agent core', () => {
     expect(tool.description).toMatch(/installed (plugins|tools)/i);
   });
 
-  it('makes the agent disclose which data series it chose over which alternative', () => {
+  it('makes the agent disclose which candidate it chose over which alternative', () => {
     const explore = buildMainAgentSystemPrompt({
       mode: 'explore',
-      toolNames: ['data360_search_indicators', 'data360_get_data']
+      toolNames: ['data360_search_indicators', 'ol_search_editions']
     });
 
-    // A silent pick between plausible series reads as arbitrary: name the one
-    // used, why it won, and the closest one rejected.
-    expect(explore).toMatch(/several series that could plausibly have answered/i);
+    // A silent pick between plausible candidates reads as arbitrary: name the
+    // one used, why it won, and the closest one rejected.
+    expect(explore).toMatch(/several candidates that could each plausibly have answered/i);
     expect(explore).toMatch(/name the one you used, the reason it won, and the closest one you did not use/i);
     // Bounded output, so this stays a note rather than a section.
     expect(explore).toMatch(/one or two sentences at the end/i);
-    // The exemption is what keeps the note off ordinary single-series lookups.
-    expect(explore).toMatch(/only one was a real candidate, or when the user named the series/i);
+    // The exemption is what keeps the note off ordinary single-candidate lookups.
+    expect(explore).toMatch(/only one was a real candidate, or when the user named it/i);
     // Carve-out against the "no internal detail" rule: the identifier is the
-    // handle a reader needs to ask for the other series.
-    expect(explore).toMatch(/identifiers such as "SI\.POV\.GINI" are the source's own names, not internal detail/i);
+    // handle a reader needs to ask for the other candidate.
+    expect(explore).toMatch(/source's own identifier for a candidate is not internal detail/i);
+
+    // The rule must stay source-agnostic: no single extension's vocabulary
+    // baked into a prompt that also serves books, football, and monsters.
+    expect(explore).not.toMatch(/SI\.POV\.GINI|OECD_IDD|WB_WDI_/);
+    expect(explore).toMatch(/rival datasets, definitions, editions, or providers/i);
   });
 
   it('routes visual changes to existing cards through the plugin builder', () => {
