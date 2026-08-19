@@ -196,6 +196,7 @@ describe('main agent core', () => {
     expect(explore).toMatch(/different units.*currency.*percentage/is);
     expect(explore).toMatch(/never claim.*two axes.*yLabel/is);
     expect(explore).toMatch(/yLabel.*rightYLabel.*2.?5 words.*30 characters/is);
+    expect(explore).toMatch(/line charts.*data-relative.*bar charts.*zero baseline/is);
     // The highlight option and when to reach for it.
     expect(explore).toContain('"highlight"');
     expect(explore).toMatch(/everything else is drawn muted/i);
@@ -250,6 +251,25 @@ describe('main agent core', () => {
     expect(tool.description).toMatch(/clarif/i);
     expect(tool.description).toMatch(/data source|API source/i);
     expect(tool.description).toMatch(/installed (plugins|tools)/i);
+  });
+
+  it('makes the agent disclose which data series it chose over which alternative', () => {
+    const explore = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['data360_search_indicators', 'data360_get_data']
+    });
+
+    // A silent pick between plausible series reads as arbitrary: name the one
+    // used, why it won, and the closest one rejected.
+    expect(explore).toMatch(/several series that could plausibly have answered/i);
+    expect(explore).toMatch(/name the one you used, the reason it won, and the closest one you did not use/i);
+    // Bounded output, so this stays a note rather than a section.
+    expect(explore).toMatch(/one or two sentences at the end/i);
+    // The exemption is what keeps the note off ordinary single-series lookups.
+    expect(explore).toMatch(/only one was a real candidate, or when the user named the series/i);
+    // Carve-out against the "no internal detail" rule: the identifier is the
+    // handle a reader needs to ask for the other series.
+    expect(explore).toMatch(/identifiers such as "SI\.POV\.GINI" are the source's own names, not internal detail/i);
   });
 
   it('routes visual changes to existing cards through the plugin builder', () => {
