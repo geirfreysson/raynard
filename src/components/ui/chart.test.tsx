@@ -187,6 +187,29 @@ describe('ChartBlock', () => {
     act(() => root.unmount());
   });
 
+  it('uses a data-relative Y scale for lines but keeps a zero baseline for bars', async () => {
+    const rows = [
+      { year: 2021, value: 101 },
+      { year: 2022, value: 104 },
+      { year: 2023, value: 108 }
+    ];
+    const line = await mount(
+      JSON.stringify({ type: 'line', x: 'year', series: [{ key: 'value' }], rows })
+    );
+    const bar = await mount(
+      JSON.stringify({ type: 'bar', x: 'year', series: [{ key: 'value' }], rows })
+    );
+
+    const lineTicks = tickLabels(line.container);
+    const barTicks = tickLabels(bar.container);
+    expect(lineTicks).not.toContain('0');
+    expect(lineTicks.some((tick) => Number(tick.replace(/,/g, '')) >= 100)).toBe(true);
+    expect(barTicks).toContain('0');
+
+    act(() => line.root.unmount());
+    act(() => bar.root.unmount());
+  });
+
   it('compacts large Y-axis ticks but keeps them exact in the data table', async () => {
     const { container, root } = await mount(
       JSON.stringify({

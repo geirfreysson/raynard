@@ -195,6 +195,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
     <YAxis
       yAxisId="left"
       {...axisProps}
+      domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatLeftTick}
       label={
@@ -209,6 +210,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
       yAxisId="right"
       orientation="right"
       {...axisProps}
+      domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatRightTick}
       label={
