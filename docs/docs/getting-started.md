@@ -4,39 +4,72 @@ sidebar_position: 2
 
 # Getting started
 
-## Download Raynard
+## Install Raynard
 
-[Download the latest Apple Silicon macOS installer](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg),
-or select **Download for macOS** on the Raynard website. The link always follows
-the newest published release.
+### macOS
 
-## Install and run Raynard
+[Download the Apple Silicon DMG](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg),
+open it, and move Raynard into Applications.
 
-1. Open the downloaded installer.
-2. Move Raynard into your Applications folder if macOS asks you to.
-3. Open Raynard from Applications.
-4. If macOS displays a first-launch security prompt, confirm that you want to
-   open the app.
+### Linux
+
+The recommended installation is rootless and takes one command:
+
+```sh
+curl -fsSL https://github.com/geirfreysson/raynard/releases/latest/download/install.sh | sh
+```
+
+The script verifies the downloaded AppImage, installs it for your user, adds
+Raynard to the application menu, creates the `raynard` terminal command, and
+launches the app.
+
+For a manual or package-managed installation, use the
+[x86_64 AppImage](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-x86_64.AppImage)
+or [amd64 Debian package](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-amd64.deb).
+Make an AppImage executable with `chmod +x Raynard-linux-x86_64.AppImage`, or
+install the Debian package with `sudo apt install ./Raynard-linux-amd64.deb`.
+
+### Windows
+
+[Download the x64 installer](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-windows-x64-setup.exe)
+and open it, or install and launch Raynard from PowerShell:
+
+```powershell
+irm https://github.com/geirfreysson/raynard/releases/latest/download/install.ps1 | iex
+```
+
+Windows may show a warning because this preview has not been signed yet. That
+does not necessarily mean anything is wrong with the app—it means Windows is
+asking you to confirm that you trust the download. If you downloaded Raynard
+from the official link above, choose **More info**, then **Run anyway** to
+continue. Windows signing is planned for a future release.
 
 Raynard starts with a short splash and then opens an empty conversation with
 suggested questions and the message composer.
 
 ## Configure a model
 
-Type `/models` in the composer. Chat/Explore and Coding/Build models are
-configured independently. API keys entered there are stored in the operating
-system keychain rather than in the app configuration file.
+On your first run, Raynard asks you to connect a provider. Sign in with ChatGPT,
+or choose **Other** to connect a provider with an API key. You can change the
+provider later by typing `/models` in the composer.
 
-The supported providers are:
+One provider powers both Explore and Build. Raynard uses that provider's
+default model, so there is no separate model to choose for each mode. API keys
+are stored securely in the operating system credential store.
 
-- OpenAI
+The main provider choices are:
+
+- ChatGPT
 - Claude
-- Moonshot / Kimi
+- Kimi
+
+If you already use an OpenAI API key, that option is also available from the
+provider screen.
 
 ## Start a conversation
 
 Choose a suggestion or enter a question. Raynard streams the answer and may
-call an installed generated plugin when one matches the request.
+use an installed extension when one matches the request.
 
-Use the **Stop** control to cancel the active run. Runs belong to individual
-chats, so another chat can continue working in the background.
+Use **Stop** to cancel the current answer. Other chats can continue working in
+the background.

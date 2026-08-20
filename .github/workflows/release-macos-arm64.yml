@@ -1,4 +1,4 @@
-name: Release macOS Apple Silicon
+name: Release desktop apps
 
 on:
   push:
@@ -16,6 +16,7 @@ jobs:
     env:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+      RAYNARD_RUNTIME_TARGET: aarch64-apple-darwin
 
     steps:
       - name: Check out source
@@ -42,6 +43,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          key: macos-arm64
 
       - name: Cache the pinned embedded Node runtime
         uses: actions/cache@v4
@@ -49,7 +51,7 @@ jobs:
           path: |
             src-tauri/.standalone-runtime-cache
             scripts/standalone-runtime/node_modules
-          key: standalone-runtime-${{ runner.os }}-${{ hashFiles('scripts/standalone-runtime.mjs', 'scripts/standalone-runtime/package-lock.json') }}
+          key: standalone-runtime-macos-arm64-${{ hashFiles('scripts/standalone-runtime.mjs', 'scripts/standalone-runtime/package-lock.json') }}
 
       - name: Install application dependencies
         run: npm ci
@@ -60,7 +62,6 @@ jobs:
       - name: Run deterministic tests
         run: |
           npm test -- --run
-          npm run test:runtime
           cargo test --manifest-path src-tauri/Cargo.toml --lib
           cargo check --manifest-path src-tauri/Cargo.toml
 
@@ -164,15 +165,10 @@ jobs:
           hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
           trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true' EXIT
           app_path="$mount_dir/Raynard.app"
-          node scripts/verify-standalone-macos.mjs "$app_path"
+          node scripts/verify-standalone-bundle.mjs macos "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
 
-          # The embedded Node ships from nodejs.org already signed, carrying the
-          # debug entitlement `get-task-allow` that Apple's notary rejects. Tauri
-          # re-signs it with this app's Entitlements.plist, which drops that key
-          # and keeps the JIT entitlements V8 needs under the hardened runtime.
-          # Assert the re-sign happened rather than trusting it silently.
           node_entitlements="$(codesign -d --entitlements - "$app_path/Contents/MacOS/node" 2>/dev/null)"
           if grep -q "get-task-allow" <<<"$node_entitlements"; then
             echo "Embedded Node still carries com.apple.security.get-task-allow; notarization would reject it." >&2
@@ -184,39 +180,248 @@ jobs:
           hdiutil detach "$mount_dir"
           trap - EXIT
 
-      - name: Stage release download
-        id: artifact
+      - name: Stage macOS release assets
         shell: bash
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           source_dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
-          release_dir="$RUNNER_TEMP/release"
-          artifact_name="Raynard-${version}-mac-arm64.dmg"
-          checksum_name="Raynard-${version}-mac-arm64.dmg.sha256"
-          stable_artifact_name="Raynard-mac-arm64.dmg"
-          stable_checksum_name="Raynard-mac-arm64.dmg.sha256"
-          mkdir -p "$release_dir"
-          cp "$source_dmg" "$release_dir/$artifact_name"
-          cp "$source_dmg" "$release_dir/$stable_artifact_name"
+          mkdir -p release-assets
+          cp "$source_dmg" "release-assets/Raynard-${version}-mac-arm64.dmg"
+          cp "$source_dmg" "release-assets/Raynard-mac-arm64.dmg"
           (
-            cd "$release_dir"
-            shasum -a 256 "$artifact_name" > "$checksum_name"
-            shasum -a 256 "$stable_artifact_name" > "$stable_checksum_name"
+            cd release-assets
+            shasum -a 256 "Raynard-${version}-mac-arm64.dmg" > "Raynard-${version}-mac-arm64.dmg.sha256"
+            shasum -a 256 "Raynard-mac-arm64.dmg" > "Raynard-mac-arm64.dmg.sha256"
           )
-          echo "release_dir=$release_dir" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
-      - name: Upload workflow artifact
+      - name: Upload macOS release assets
         uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64
-          path: ${{ steps.artifact.outputs.release_dir }}/*
+          name: desktop-macos-arm64
+          path: release-assets/*
           if-no-files-found: error
 
-      - name: Publish tagged GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+  release-linux-x64:
+    name: Build Linux x64 packages
+    runs-on: ubuntu-22.04
+    env:
+      RAYNARD_RUNTIME_TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+
+      - name: Validate release version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: node scripts/validate-release-version.mjs "$RELEASE_TAG"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: linux-x64
+
+      - name: Cache the pinned embedded Node runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/.standalone-runtime-cache
+            scripts/standalone-runtime/node_modules
+          key: standalone-runtime-linux-x64-${{ hashFiles('scripts/standalone-runtime.mjs', 'scripts/standalone-runtime/package-lock.json') }}
+
+      - name: Install application dependencies
+        run: npm ci
+
+      - name: Prepare standalone runtime
+        run: npm run runtime:prepare:linux-x64
+
+      - name: Run deterministic tests
+        run: |
+          npm test -- --run
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build AppImage and Debian package
+        run: npm run tauri:build -- --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
+
+      - name: Verify Linux standalone runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          extract_dir="$(mktemp -d)"
+          (
+            cd "$extract_dir"
+            "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          )
+          node scripts/verify-standalone-bundle.mjs linux "$extract_dir/squashfs-root"
+
+      - name: Stage Linux release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          source_appimage="$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          source_deb="$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$source_appimage"
+          test -n "$source_deb"
+          mkdir -p release-assets
+          cp "$source_appimage" "release-assets/Raynard-${version}-linux-x86_64.AppImage"
+          cp "$source_appimage" "release-assets/Raynard-linux-x86_64.AppImage"
+          cp "$source_deb" "release-assets/Raynard-${version}-linux-amd64.deb"
+          cp "$source_deb" "release-assets/Raynard-linux-amd64.deb"
+          (
+            cd release-assets
+            sha256sum * > checksums.tmp
+            while read -r checksum name; do
+              printf '%s  %s\n' "$checksum" "$name" > "$name.sha256"
+            done < checksums.tmp
+            rm checksums.tmp
+          )
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  release-windows-x64:
+    name: Build unsigned Windows x64 installer
+    runs-on: windows-latest
+    env:
+      RAYNARD_RUNTIME_TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+
+      - name: Validate release version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: node scripts/validate-release-version.mjs $env:RELEASE_TAG
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: windows-x64
+
+      - name: Cache the pinned embedded Node runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/.standalone-runtime-cache
+            scripts/standalone-runtime/node_modules
+          key: standalone-runtime-windows-x64-${{ hashFiles('scripts/standalone-runtime.mjs', 'scripts/standalone-runtime/package-lock.json') }}
+
+      - name: Install application dependencies
+        run: npm ci
+
+      - name: Prepare standalone runtime
+        run: npm run runtime:prepare:windows-x64
+
+      - name: Run deterministic tests
+        run: |
+          npm test -- --run
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build NSIS installer
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis --ci
+
+      - name: Install and verify Windows standalone runtime
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'The NSIS installer was not produced.' }
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'raynard-bundle-verification'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDirectory") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS exited with code $($process.ExitCode)." }
+          node scripts/verify-standalone-bundle.mjs windows $installDirectory
+
+      - name: Stage Windows release assets
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $sourceInstaller = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $sourceInstaller) { throw 'The NSIS installer was not produced.' }
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $versionedName = "Raynard-$version-windows-x64-setup.exe"
+          $stableName = 'Raynard-windows-x64-setup.exe'
+          Copy-Item $sourceInstaller.FullName (Join-Path release-assets $versionedName)
+          Copy-Item $sourceInstaller.FullName (Join-Path release-assets $stableName)
+          foreach ($name in @($versionedName, $stableName)) {
+            $hash = (Get-FileHash -Algorithm SHA256 (Join-Path release-assets $name)).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText((Join-Path release-assets "$name.sha256"), "$hash  $name`n")
+          }
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - release-macos-arm64
+      - release-linux-x64
+      - release-windows-x64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download native release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Include terminal installers
+        run: |
+          cp docs/static/install.sh release-assets/install.sh
+          cp docs/static/install.ps1 release-assets/install.ps1
+
+      - name: Publish tagged GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -232,5 +437,5 @@ jobs:
               --title "Raynard $GITHUB_REF_NAME" \
               --notes-file release-draft.md
           fi
-          gh release upload "$GITHUB_REF_NAME" "${{ steps.artifact.outputs.release_dir }}"/* --clobber
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

@@ -6,27 +6,25 @@ sidebar_position: 3
 
 ## Explore mode
 
-Every ordinary message starts in Explore mode and uses the selected Chat model.
-The main agent can reason, call installed plugin tools, return cited answers,
-and ask to build a missing capability.
+Every ordinary message starts in Explore mode. Raynard can answer directly, use
+an installed extension, cite its sources, or offer to create a connection it is
+missing.
 
-Explore and Build are host-owned states. They are displayed in the composer but
-cannot be switched manually.
+The composer shows the current mode. You do not need to switch modes yourself.
 
 ## Build mode
 
-Build mode begins only after you confirm a plugin-writing request. A separate
-coding agent uses the selected Coding model and is scoped to the target
-generated-plugin directory.
+Build mode begins only after you approve a request to create or change an
+extension. Raynard then makes the requested change and shows its progress.
 
-Each confirmation authorizes one editing pass. Later ordinary messages return
-to Explore mode, even when the chat remembers which plugin was edited.
+Once the change is finished, the next ordinary message returns to Explore. A
+later extension change requires your approval again.
 
 ## Result cards
 
-Some plugin tools return a declarative result-card template with structured
-data. Raynard renders these cards below the assistant response. Cards are
-collapsed by default and use the plugin's own singular and plural labels.
+Some extensions add result cards below an answer. Cards are collapsed by
+default; open one to inspect the figures, records, or other details behind the
+answer.
 
 ## Sharing an answer
 
@@ -34,9 +32,8 @@ Hover an assistant answer and click Share to turn it into a link you can paste
 into Slack, email, or a message. The link carries the question, the answer, its
 result cards, and every source it cited.
 
-Nothing is uploaded. The shared answer is compressed into the part of the URL
-after the `#`, which browsers never send to a server — so there is no copy of
-your data anywhere, and no account or sign-in involved.
+Raynard does not upload or store a copy of the answer. The answer is contained
+in the link itself, and sharing does not require an account or sign-in.
 
 Opening the link shows a short summary of what was shared and offers to open it
 in Raynard, or to download Raynard if the recipient does not have it yet. The
@@ -53,12 +50,12 @@ offered to copy its text instead.
 Anyone with the link can read the answer, so treat it like any other
 unlisted URL: it is convenient, not confidential.
 
-## Chat history and concurrent runs
+## Working across chats
 
-Chats are persisted locally. Each chat owns its current main-agent or builder
-run, which means:
+Raynard saves your chats on your Mac. While an answer or extension build is in
+progress:
 
 - navigating away does not cancel the run;
 - multiple chats can work concurrently;
 - returning to a busy chat reconnects its live state;
-- Stop affects only the selected chat.
+- **Stop** affects only the chat you are viewing.

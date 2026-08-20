@@ -12,11 +12,14 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "build:desktop": "npm run build && npm run runtime:prepare:macos-arm64",
+    "build:desktop": "npm run build && npm run runtime:prepare",
     "release:validate": "node scripts/validate-release-version.mjs",
-    "runtime:prepare:macos-arm64": "node scripts/standalone-runtime.mjs",
+    "runtime:prepare": "node scripts/standalone-runtime.mjs",
+    "runtime:prepare:macos-arm64": "node scripts/standalone-runtime.mjs --target aarch64-apple-darwin",
+    "runtime:prepare:linux-x64": "node scripts/standalone-runtime.mjs --target x86_64-unknown-linux-gnu",
+    "runtime:prepare:windows-x64": "node scripts/standalone-runtime.mjs --target x86_64-pc-windows-msvc",
     "test:runtime": "vitest run scripts/standalone-runtime.test.mjs",
-    "verify:macos:bundle": "node scripts/verify-standalone-macos.mjs src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Raynard.app"
+    "verify:macos:bundle": "node scripts/verify-standalone-bundle.mjs macos src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Raynard.app"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.73.1",

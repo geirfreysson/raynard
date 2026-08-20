@@ -56,6 +56,7 @@ export type StreamPayload = {
     | 'build_request'
     | 'credential_request'
     | 'extension_recommendation'
+    | 'steering_applied'
     | 'done'
     | 'retry'
     | 'status'
@@ -156,6 +157,12 @@ export type AgentStreamHandlers = {
   onBuildRequest?: (request: AgentBuildRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
   onExtensionRecommendation?: (recommendation: ExtensionRecommendation) => void;
+  /**
+   * A message the user typed mid-run has just been injected into the agent's
+   * transcript. The answer so far is final; everything after it is a new
+   * assistant message.
+   */
+  onSteeringApplied?: (text: string) => void;
   /** A host-side build milestone (running tests, validation passed). */
   onStatus?: (status: string) => void;
   onRetry?: (event: AgentRetryEvent) => void;
@@ -224,6 +231,31 @@ export async function runMainAgentStream(
     extensionRecommendation: decodeExtensionRecommendation(reply.result) ?? undefined,
     usage: reply.usage
   };
+}
+
+/**
+ * When a message typed mid-run reaches the agent.
+ *
+ * `steer` is injected at the next tool-round boundary, so the agent can change
+ * course inside the turn it is already running. `followUp` waits until the
+ * agent would otherwise stop.
+ */
+export type SteerDelivery = 'steer' | 'followUp';
+
+/** Rejects when the turn finished between typing and sending. */
+export async function steerAgentTurn(
+  streamId: string,
+  text: string,
+  delivery: SteerDelivery = 'steer'
+): Promise<void> {
+  const normalized = streamId.trim();
+  const message = text.trim();
+  if (!normalized || !message) return;
+  await invoke('steer_main_agent_stream', {
+    streamId: normalized,
+    text: message,
+    delivery: delivery === 'followUp' ? 'follow_up' : 'steer'
+  });
 }
 
 export async function cancelAgentTurnStream(streamId: string): Promise<void> {
@@ -358,6 +390,10 @@ export function applyStreamPayload(
   if (payload.event_type === 'extension_recommendation') {
     const recommendation = decodeExtensionRecommendation(payload.result);
     if (recommendation) handlers.onExtensionRecommendation?.(recommendation);
+  }
+  if (payload.event_type === 'steering_applied') {
+    const steered = payload.text?.trim() || '';
+    if (steered) handlers.onSteeringApplied?.(steered);
   }
 
   return nextState;

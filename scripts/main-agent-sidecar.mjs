@@ -22,25 +22,75 @@ function emit(event) {
   output.write(`${JSON.stringify(event)}\n`);
 }
 
-function readRequest() {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    const reader = createInterface({ input, terminal: false });
-    reader.on('line', (line) => {
-      body += line;
-    });
-    reader.on('close', () => {
-      try {
-        resolve(JSON.parse(body || '{}'));
-      } catch (error) {
-        reject(error);
-      }
-    });
-    reader.on('error', reject);
-  });
+/**
+ * Newline-delimited JSON both ways. Unlike the builder sidecar this keeps
+ * reading stdin after the request, so a message typed while the agent is
+ * working can be steered into the run:
+ *
+ *   in   {...request...}                           first line, required
+ *   in   {"type":"steer","text":"..."}             later, optional
+ *   in   {"type":"follow_up","text":"..."}         later, optional
+ *   out  {"type":"steering_applied","text":"..."}  a queued message just went in
+ *
+ * Because stdin stays open the process no longer exits on EOF; the terminal
+ * paths below close the reader explicitly.
+ */
+const reader = createInterface({ input, terminal: false });
+let resolveRequest;
+const requestPromise = new Promise((resolve) => {
+  resolveRequest = resolve;
+});
+/** Commands that arrived before the Agent existed. Flushed once it does. */
+const bufferedCommands = [];
+/**
+ * Mirror of the texts we have handed to the Agent's queues. The loop emits a
+ * plain user `message_start` when it injects one, and the initial prompt looks
+ * exactly the same, so matching on this array is what tells them apart.
+ */
+const queuedTexts = [];
+let applyCommand = (command) => {
+  bufferedCommands.push(command);
+};
+
+reader.on('line', (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let message;
+  try {
+    message = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  if (resolveRequest) {
+    const resolve = resolveRequest;
+    resolveRequest = null;
+    resolve(message);
+    return;
+  }
+  if (message?.type !== 'steer' && message?.type !== 'follow_up') return;
+  const text = String(message.text || '').trim();
+  if (!text) return;
+  applyCommand({ type: message.type, text });
+});
+
+/** Stop holding the event loop open once the turn has its terminal event. */
+function closeInput() {
+  reader.close();
+  input.pause();
 }
 
-const request = await readRequest();
+/** Steering messages carry a content array; history entries carry a string. */
+function userMessageText(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block) => block?.type === 'text')
+    .map((block) => block.text || '')
+    .join('');
+}
+
+const request = await requestPromise;
 const apiKey = String(request.apiKey || '').trim();
 const messages = Array.isArray(request.messages) ? request.messages : [];
 const currentMessage = messages.at(-1);
@@ -213,7 +263,27 @@ const agent = new Agent({
   streamFn: (model, context, options) =>
     streamSimple(model, context, { ...options, apiKey, maxRetries: 4, maxRetryDelayMs: 30_000 }),
   toolExecution: 'sequential'
+  // steeringMode/followUpMode stay at pi's "one-at-a-time" default: one queued
+  // message per turn, so a burst of typing does not land as a single wall of
+  // text in the middle of the agent's work.
 });
+
+// The queues only exist once the Agent does, so anything typed while the model
+// config was still resolving is replayed here.
+applyCommand = (command) => {
+  const message = {
+    role: 'user',
+    content: [{ type: 'text', text: command.text }],
+    timestamp: Date.now()
+  };
+  queuedTexts.push(command.text);
+  if (command.type === 'follow_up') {
+    agent.followUp(message);
+  } else {
+    agent.steer(message);
+  }
+};
+for (const command of bufferedCommands.splice(0)) applyCommand(command);
 
 process.once('SIGTERM', () => {
   agent.abort();
@@ -235,11 +305,45 @@ let lastMessageHadText = false;
 // rounds replayed after a transient failure, so usage accumulates and is never
 // cleared by resetRound.
 const usageTotal = createUsageTotal(agentModel.contextWindow);
+// Pi reports contentIndex for semantic text blocks. Preserve that boundary in
+// the live stream too, so interrupted/cancelled snapshots cannot glue a fence
+// or a word to narration from an earlier tool round.
+let streamedTextIndex;
+let streamedTextMessage = 0;
+let currentTextMessage = 0;
 const unsubscribe = agent.subscribe((event) => {
+  if (event.type === 'message_start' && event.message?.role === 'user') {
+    // A user message inside a running loop is either the turn's own prompt or a
+    // message we queued. Only the queued ones are in queuedTexts.
+    const text = userMessageText(event.message);
+    const index = queuedTexts.indexOf(text);
+    if (index !== -1) {
+      queuedTexts.splice(index, 1);
+      // The host opens a fresh assistant bubble here, so the message-boundary
+      // separator below would only pad it with blank lines.
+      streamedTextMessage = 0;
+      streamedTextIndex = undefined;
+      emit({ type: 'steering_applied', text });
+    }
+    return;
+  }
+  if (event.type === 'message_start' && event.message?.role === 'assistant') {
+    currentTextMessage += 1;
+    streamedTextIndex = undefined;
+    return;
+  }
   if (event.type === 'message_update') {
     const update = event.assistantMessageEvent;
     if (update?.type === 'text_delta' && update.delta) {
+      if (
+        streamedTextMessage > 0 &&
+        (streamedTextMessage !== currentTextMessage || streamedTextIndex !== update.contentIndex)
+      ) {
+        emit({ type: 'delta', delta: '\n\n' });
+      }
       emit({ type: 'delta', delta: update.delta });
+      streamedTextMessage = currentTextMessage;
+      streamedTextIndex = update.contentIndex;
     }
     if (update?.type === 'thinking_delta' && update.delta) {
       emit({ type: 'thinking_delta', delta: update.delta });
@@ -293,6 +397,25 @@ try {
       lastMessageHadText = false;
     }
   });
+  // A build request, a credential prompt, a direct answer, or an extension
+  // recommendation ends the turn in a card of its own; continuing past one would
+  // answer a question the host has already replaced with something else. The
+  // host hands the undelivered text back to the composer instead.
+  const endsInACard = Boolean(
+    buildRequest || credentialRequest || directAnswer || extensionRecommendation
+  );
+  // Otherwise a message queued between the loop's last steering poll and
+  // agent_end would die with the process. continue() drains both queues itself
+  // when the transcript ends on an assistant message.
+  while (
+    !endsInACard &&
+    lastStopReason !== 'error' &&
+    lastStopReason !== 'aborted' &&
+    agent.hasQueuedMessages()
+  ) {
+    lastMessageHadText = false;
+    await agent.continue();
+  }
   unsubscribe();
   // A direct answer, a build request, or a credential request is a legitimate
   // terminal outcome even when the underlying round reports a stop reason.
@@ -338,6 +461,7 @@ try {
     stopReason: lastStopReason,
     usage: usageTotal.value()
   });
+  closeInput();
 } catch (error) {
   unsubscribe();
   const message = error?.message || String(error);

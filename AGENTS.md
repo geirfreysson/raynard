@@ -70,6 +70,15 @@ generated API plugins.
   catalog entries not yet copied into app data (`Available`). Installing copies
   a bundled folder into app-local `generated-plugins`, where it becomes an
   ordinary, editable extension.
+- The composer stays live while an Explore turn is working. Enter queues what
+  you type as a **steering** message the agent picks up at its next tool-round
+  boundary; Alt+Enter queues a **follow-up** that waits until the agent would
+  otherwise stop. Queued text sits in a dim strip above the composer, never in
+  the transcript, until the agent actually takes it — at which point the answer
+  so far is closed off, the message becomes a real user bubble, and a new
+  assistant bubble opens under it. Stopping the turn, or its ending first, hands
+  anything undelivered back to the composer. A builder turn has no steering
+  channel and still locks the composer.
 - Builder turns render a live activity timeline with filesystem/test events,
   reasoning, heartbeat, and final summary. Runs belong to chats: multiple chats
   can work concurrently, navigation does not cancel them, and returning to a
@@ -121,6 +130,41 @@ active chat path.
 10. Every generated API tool carries a fixed declarative result-`card` (+
     `data`) rendered by the host as a React/shadcn card, including list/search
     tools. The builder only authors the declarative template — never React.
+
+## Steering a Running Turn
+
+Typing during an Explore turn does not start a second one. `submitMessage` in
+`src/main.ts` routes the text to `steer_main_agent_stream` instead, and the
+message joins pi's own queue inside the running sidecar.
+
+1. `run_main_agent_stream` keeps the sidecar's `ChildStdin` instead of dropping
+   it, parked in `AgentSteerState` under the run's `stream_id`. A `Drop` guard
+   removes it however the command returns. This mirrors `OAuthLoginState` and
+   `submit_provider_oauth_code`, which do the same for a pasted sign-in code.
+2. `scripts/main-agent-sidecar.mjs` therefore reads stdin as newline-delimited
+   JSON for the whole turn: the first line is the request, later
+   `{"type":"steer"|"follow_up","text":...}` lines are commands. Because stdin
+   no longer closes, the sidecar closes its own reader once the turn is done.
+3. A command calls `agent.steer(...)` or `agent.followUp(...)` on the Pi
+   `Agent`. Both queues stay at pi's `one-at-a-time` default. `agent-loop`
+   drains steering after every `turn_end` — after that round's tool results are
+   in the transcript, before the next model request — and drains follow-ups only
+   when the agent would otherwise stop.
+4. The sidecar mirrors the texts it queued so it can recognise a delivery: the
+   loop emits a plain user `message_start` for an injected message, and the
+   turn's own prompt looks identical. On a match it emits `steering_applied`.
+5. The host answers that event by closing the current assistant record and
+   opening a new one, with the steered message as a real user record between
+   them. This is not decoration: the sidecar's final `text` is only the last
+   assistant message, so one record per turn would discard everything written
+   before the steer.
+6. Undelivered messages live on the run in `ChatRunRegistry`, so navigating away
+   from a busy chat and back does not lose them, and Stop returns them to the
+   composer rather than dropping them with the process.
+
+The plugin builder is deliberately not steerable: its turn is several prompt
+phases plus a validation gate, and an injected message landing in a repair pass
+is worse than waiting.
 
 Every ordinary user message switches to Explore and uses the selected
 Chat/Explore model. The Pi coding agent uses the separately selected
@@ -188,9 +232,9 @@ delivering `raynard://` URLs of **262,166 characters** intact, cold and warm —
 32x the budget. No clipboard handoff or file fallback is needed.
 
 `CompressionStream('deflate-raw')` requires Safari 16.4, which is why
-`minimumSystemVersion` is `13.0`. The app is Apple-Silicon-only and every such
-Mac can run macOS 13+, so this costs no real users and avoids a Rust deflate
-dependency.
+`minimumSystemVersion` is `13.0`. The macOS distribution is Apple-Silicon-only
+and every such Mac can run macOS 13+, so this costs no macOS users and avoids a
+Rust deflate dependency.
 
 Deep links cannot be registered at runtime on macOS, so `npm run tauri dev`
 never receives one. Load `http://127.0.0.1:1420/#share=<encoded>` instead — the
@@ -276,18 +320,20 @@ Do not start `npm run dev` or `npm run tauri dev` when the user asks for
 documentation-only work or explicitly wants the current application process
 left undisturbed.
 
-## Packaged macOS Release
+## Packaged Desktop Releases
 
 A shipped app cannot rely on the developer's machine, so the desktop bundle
 embeds its own Node runtime. `scripts/standalone-runtime.mjs` downloads the
-checksum-pinned Node for `aarch64-apple-darwin` and stages two build outputs,
-both gitignored:
+checksum-pinned Node for `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, or `x86_64-pc-windows-msvc` and stages two build
+outputs, both gitignored:
 
-- `src-tauri/binaries/node-aarch64-apple-darwin`, declared as `externalBin`, so
-  Tauri places it at `Raynard.app/Contents/MacOS/node`.
+- `src-tauri/binaries/node-<target-triple>` (plus `.exe` on Windows), declared
+  as `externalBin`, so Tauri places the renamed `node` executable beside the
+  packaged Raynard executable.
 - `src-tauri/runtime/agent-runtime`, declared as a bundle `resources` entry, so
-  it lands at `Raynard.app/Contents/Resources/agent-runtime` with `scripts/`,
-  `plugin-sdk/`, and the locked `node_modules`.
+  it lands under Tauri's platform resource directory with `scripts/`,
+  `plugin-sdk/`, and the target-native locked `node_modules`.
 
 `beforeBuildCommand` is `npm run build:desktop`, which stages that runtime
 before the Rust build. `RUNTIME_SCRIPTS` in `standalone-runtime.mjs` must hold
@@ -295,10 +341,10 @@ the full relative-import closure of the four sidecar entry points; a test in
 `scripts/standalone-runtime.test.mjs` derives that closure and fails when a new
 `./*.mjs` import is not packaged.
 
-Rust resolves those paths from `env::current_exe()` first and falls back to the
-directory-relative `scripts/` candidates for `tauri dev` and tests. A packaged
-app is launched with `/` as its current directory, so CWD-relative lookups and a
-bare `Command::new("node")` only ever work in development.
+Rust resolves scripts from Tauri's platform-aware resource directory and Node
+from `env::current_exe()`, then falls back to the directory-relative `scripts/`
+candidates and system Node for `tauri dev` and tests. Packaged apps cannot rely
+on their current working directory or a user-installed Node.
 
 The embedded Node arrives from nodejs.org already signed and carrying
 `com.apple.security.get-task-allow`, which Apple's notary rejects. Tauri
@@ -307,11 +353,17 @@ the `allow-jit` and `allow-unsigned-executable-memory` entitlements V8 needs
 under the hardened runtime. `.github/workflows/release-macos-arm64.yml` asserts
 this rather than assuming it.
 
-`scripts/verify-standalone-macos.mjs` is the gate that matters: it runs the
-bundled Node, syntax-checks every script the manifest claims to package, drives
-both sidecars to their "model API key is required" error, and executes a real
-tool through the packaged runner. Run it against a local build with
-`npm run verify:macos:bundle`.
+`scripts/verify-standalone-bundle.mjs` is the cross-platform gate that matters:
+it runs the bundled Node, syntax-checks every script the manifest claims to
+package, drives both sidecars to their "model API key is required" error, and
+executes a real tool through the packaged runner. Run the macOS wrapper against
+a local build with `npm run verify:macos:bundle`.
+
+Linux releases contain an x86_64 AppImage and amd64 Debian package. Windows
+releases contain an unsigned x64 NSIS installer; SmartScreen warnings are
+expected until Windows signing is introduced. `docs/static/install.sh` and
+`install.ps1` provide checksum-verified, per-user terminal installation and are
+uploaded as stable release assets.
 
 Release builds are tag-triggered (`v*`) or manual, and require these repository
 secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY_BASE64`,
@@ -350,11 +402,11 @@ secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY_BASE64`,
   tag points at the release commit, and the release workflow still validates
   the version before building.
 - The pushed tag triggers `.github/workflows/release-macos-arm64.yml`. A
-  successful workflow must build, sign, notarize, and verify the Apple Silicon
-  app; publish a non-draft GitHub release; and attach both
-  `Raynard-<version>-mac-arm64.dmg` and its SHA-256 checksum. It must also attach
-  the stable `Raynard-mac-arm64.dmg` alias used by the docs homepage's
-  `/releases/latest/download/` link.
+  successful workflow must build and verify the native macOS arm64, Linux x64,
+  and Windows x64 packages; sign and notarize the macOS app; publish one
+  non-draft GitHub release; and attach versioned artifacts, stable aliases, and
+  SHA-256 checksums for every platform. The final publishing job must wait for
+  every native job and must also attach `install.sh` and `install.ps1`.
 - After pushing, report the exact release commit and tag and tell the user that
   GitHub Actions is producing the release binary. If possible, check the
   workflow run and report its final result rather than assuming it succeeded.
@@ -417,8 +469,12 @@ tail -n 100 "$TURN_LOG" | jq .
 ```
 
 Useful event types are `turn_start`, `stream_id`, `thinking_delta`,
-`tool_call`, `tool_result`, `tool_error`, `build_request`, `turn_completed`,
-`turn_error`, and `persist_error`.
+`tool_call`, `tool_result`, `tool_error`, `build_request`, `steer_queued`,
+`steer_applied`, `turn_completed`, `turn_error`, and `persist_error`.
+
+A `steer_queued` with no matching `steer_applied` means the message reached the
+sidecar's queue but the turn ended before the loop drained it; the host will have
+put the text back in the composer.
 
 Quick diagnosis:
 

@@ -14,7 +14,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -25,6 +25,7 @@ const KEYRING_SERVICE: &str = "ai.raynard";
 const INLINE_RESULT_DATA_LIMIT_BYTES: usize = 128 * 1024;
 const CHAT_HISTORY_INDEX_VERSION: u32 = 1;
 static CHAT_HISTORY_INDEX_LOCK: Mutex<()> = Mutex::new(());
+static BUNDLED_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Default)]
 struct StreamCancelState {
@@ -1987,6 +1988,80 @@ struct OAuthLoginState {
     stdin: Mutex<HashMap<String, std::process::ChildStdin>>,
 }
 
+/// Live main-agent runs, so a message typed while the agent works can reach it.
+#[derive(Default)]
+struct AgentSteerState {
+    stdin: Mutex<HashMap<String, std::process::ChildStdin>>,
+}
+
+/// Drops a run's stdin handle however `run_main_agent_stream` returns.
+///
+/// That command leaves through cancellation, a stream error, a non-zero exit,
+/// or success. Hand-placing cleanup on each is how a dead sidecar's pipe ends up
+/// parked in the map, making a later turn look steerable when it is gone.
+struct SteerHandleGuard<'a> {
+    state: &'a AgentSteerState,
+    stream_id: String,
+}
+
+impl Drop for SteerHandleGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut handles) = self.state.stdin.lock() {
+            handles.remove(&self.stream_id);
+        }
+    }
+}
+
+const STEER_RUN_ENDED: &str = "That turn is no longer running.";
+
+/// Anything that is not an explicit follow-up steers.
+fn steer_command_type(delivery: &str) -> &'static str {
+    let delivery = delivery.trim();
+    if delivery.eq_ignore_ascii_case("follow_up") || delivery.eq_ignore_ascii_case("followup") {
+        "follow_up"
+    } else {
+        "steer"
+    }
+}
+
+/// Hands a message typed mid-run to the working main agent.
+///
+/// The sidecar keeps reading stdin for the life of the turn, so this arrives as
+/// a queued steering or follow-up message rather than as a new turn. Pi injects
+/// a steering message at the next tool-round boundary; a follow-up waits until
+/// the agent would otherwise stop.
+#[tauri::command]
+fn steer_main_agent_stream(
+    steer_state: tauri::State<'_, AgentSteerState>,
+    stream_id: String,
+    text: String,
+    delivery: String,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Type a message before sending it to the agent.".to_string());
+    }
+    let stream_id = stream_id.trim();
+    if stream_id.is_empty() {
+        return Err(STEER_RUN_ENDED.to_string());
+    }
+    let command_type = steer_command_type(&delivery);
+    let mut handles = steer_state
+        .stdin
+        .lock()
+        .map_err(|_| "Could not reach the running agent.".to_string())?;
+    let stdin = handles
+        .get_mut(stream_id)
+        .ok_or_else(|| STEER_RUN_ENDED.to_string())?;
+    let raw = serde_json::to_vec(&json!({ "type": command_type, "text": text }))
+        .map_err(|error| format!("Could not serialize the message: {error}"))?;
+    stdin
+        .write_all(&raw)
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not send the message to the agent: {error}"))
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OAuthLoginEvent {
@@ -2311,6 +2386,31 @@ struct MainAgentStreamEvent {
     usage: Option<Value>,
 }
 
+/// Accumulate live preview deltas, then replace them with the sidecar's
+/// authoritative final assistant message when the turn completes.
+fn apply_main_agent_text_event(
+    answer: &mut String,
+    event_type: &str,
+    delta: Option<&str>,
+    final_text: Option<&str>,
+) {
+    if event_type == "delta" {
+        if let Some(value) = delta {
+            answer.push_str(value);
+        }
+    }
+    if event_type == "done" {
+        if let Some(value) = final_text {
+            // The deltas are a live activity preview spanning every Pi tool
+            // round. `done.text` is deliberately only the final assistant
+            // message and must win whenever the sidecar supplied it.
+            if !value.trim().is_empty() || answer.trim().is_empty() {
+                *answer = value.to_string();
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ModelConfig {
     provider: String,
@@ -2430,6 +2530,7 @@ async fn run_model_chat(
 async fn run_main_agent_stream(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, StreamCancelState>,
+    steer_state: tauri::State<'_, AgentSteerState>,
     stream_id: String,
     chat_id: Option<String>,
     on_event: Channel<MainAgentStreamEvent>,
@@ -2505,14 +2606,27 @@ async fn run_main_agent_stream(
         .map_err(|error| format!("Could not start main agent sidecar: {error}"))?;
     register_stream_process(&cancel_state, &stream_id, child.id())?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let raw = serde_json::to_vec(&sidecar_request)
-            .map_err(|error| format!("Could not serialize main agent request: {error}"))?;
-        stdin
-            .write_all(&raw)
-            .and_then(|_| stdin.write_all(b"\n"))
-            .map_err(|error| format!("Could not send request to main agent: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Main agent stdin was unavailable.".to_string())?;
+    let raw = serde_json::to_vec(&sidecar_request)
+        .map_err(|error| format!("Could not serialize main agent request: {error}"))?;
+    stdin
+        .write_all(&raw)
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not send request to main agent: {error}"))?;
+    // Deliberately NOT dropped here: the sidecar keeps reading this pipe, and it
+    // is how a message typed mid-run reaches the agent. The guard below closes
+    // it on every exit path.
+    if let Ok(mut handles) = steer_state.stdin.lock() {
+        handles.insert(stream_id.clone(), stdin);
     }
+    let _steer_handle = SteerHandleGuard {
+        state: &steer_state,
+        stream_id: stream_id.clone(),
+    };
 
     let stdout = child
         .stdout
@@ -2594,18 +2708,12 @@ async fn run_main_agent_stream(
             .get("delta")
             .and_then(Value::as_str)
             .map(str::to_string);
-        if event_type == "delta" {
-            if let Some(value) = delta.as_deref() {
-                answer.push_str(value);
-            }
-        }
-        if event_type == "done" && answer.trim().is_empty() {
-            answer = payload
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-        }
+        apply_main_agent_text_event(
+            &mut answer,
+            &event_type,
+            delta.as_deref(),
+            payload.get("text").and_then(Value::as_str),
+        );
         if event_type == "build_request" {
             build_request = payload.get("buildRequest").cloned();
         }
@@ -4092,33 +4200,26 @@ fn resolve_generated_plugin_by_tool(
     ))
 }
 
-/// Where `scripts/standalone-runtime.mjs` lands inside a bundled macOS app.
-/// The executable sits in `Raynard.app/Contents/MacOS/`, and the packaged
-/// runtime is a bundle resource, so the scripts are two levels up under
-/// `Contents/Resources/agent-runtime/scripts/`.
-fn packaged_runtime_scripts_dir_for(executable: &Path) -> Option<PathBuf> {
-    let contents_dir = executable.parent()?.parent()?;
-    Some(
-        contents_dir
-            .join("Resources")
-            .join("agent-runtime")
-            .join("scripts"),
-    )
+/// Where `scripts/standalone-runtime.mjs` lands inside every Tauri bundle.
+/// Tauri owns the platform-specific resource root; the relative mapping in
+/// `tauri.conf.json` is the same on macOS, Linux, and Windows.
+fn packaged_runtime_scripts_dir_for(resource_dir: &Path) -> PathBuf {
+    resource_dir.join("agent-runtime").join("scripts")
 }
 
 /// The embedded Node executable is bundled as an external binary, so Tauri
 /// drops it next to the app executable with its target-triple suffix removed.
-fn packaged_node_path_for(executable: &Path) -> Option<PathBuf> {
-    Some(executable.parent()?.join("node"))
+fn packaged_node_path_for(executable: &Path, node_name: &str) -> Option<PathBuf> {
+    Some(executable.parent()?.join(node_name))
 }
 
-/// A packaged app has no useful current directory — it is launched with `/` —
-/// so bundle resources are resolved from the executable first. The
+/// A packaged app has no reliable current directory, so bundle resources are
+/// resolved from the Tauri resource root captured during setup. The
 /// directory-relative candidates keep `tauri dev` and the test suite working.
 fn resolve_runtime_script_path(script_name: &str) -> Result<PathBuf, String> {
-    if let Some(path) = env::current_exe()
-        .ok()
-        .and_then(|executable| packaged_runtime_scripts_dir_for(&executable))
+    if let Some(path) = BUNDLED_RESOURCE_DIR
+        .get()
+        .map(|resource_dir| packaged_runtime_scripts_dir_for(resource_dir))
         .map(|scripts| scripts.join(script_name))
         .filter(|path| path.is_file())
     {
@@ -4141,9 +4242,10 @@ fn resolve_runtime_script_path(script_name: &str) -> Result<PathBuf, String> {
 /// embedded executable, otherwise every agent turn depends on what the person
 /// who downloaded the app happens to have installed.
 fn resolve_node_command() -> PathBuf {
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
     env::current_exe()
         .ok()
-        .and_then(|executable| packaged_node_path_for(&executable))
+        .and_then(|executable| packaged_node_path_for(&executable, node_name))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("node"))
 }
@@ -5888,8 +5990,8 @@ mod tests {
         provider_preset, read_catalog_extension_detail_from, read_catalog_extensions,
         read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
         remove_chat_history_index_row_in, save_plugin_cache_settings, share_deep_link_payload,
-        upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in, AuthMethod,
-        BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
+        steer_command_type, upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in,
+        AuthMethod, BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
         PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
         StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
         APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
@@ -5898,6 +6000,25 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn terminal_main_agent_text_replaces_intermediate_tool_round_narration() {
+        let mut answer = String::new();
+        super::apply_main_agent_text_event(
+            &mut answer,
+            "delta",
+            Some("Let me search for an OECD source:"),
+            None,
+        );
+        super::apply_main_agent_text_event(
+            &mut answer,
+            "done",
+            None,
+            Some("```chart\n{\"type\":\"bar\"}\n```"),
+        );
+
+        assert_eq!(answer, "```chart\n{\"type\":\"bar\"}\n```");
+    }
 
     /// A channel that records what it was sent, so buffering can be observed.
     fn recording_channel() -> (tauri::ipc::Channel<String>, Arc<Mutex<Vec<String>>>) {
@@ -6005,28 +6126,37 @@ mod tests {
     }
 
     #[test]
-    fn packaged_paths_match_the_macos_bundle_layout() {
+    fn packaged_paths_match_platform_bundle_layouts() {
         let executable = Path::new("/Applications/Raynard.app/Contents/MacOS/raynard");
+        let resource_dir = Path::new("/Applications/Raynard.app/Contents/Resources");
 
         assert_eq!(
-            packaged_runtime_scripts_dir_for(executable),
-            Some(PathBuf::from(
-                "/Applications/Raynard.app/Contents/Resources/agent-runtime/scripts"
-            ))
+            packaged_runtime_scripts_dir_for(resource_dir),
+            PathBuf::from("/Applications/Raynard.app/Contents/Resources/agent-runtime/scripts")
         );
         assert_eq!(
-            packaged_node_path_for(executable),
+            packaged_node_path_for(executable, "node"),
             Some(PathBuf::from(
                 "/Applications/Raynard.app/Contents/MacOS/node"
             ))
+        );
+        assert_eq!(
+            packaged_runtime_scripts_dir_for(Path::new("C:/Users/example/AppData/Local/Raynard")),
+            PathBuf::from("C:/Users/example/AppData/Local/Raynard/agent-runtime/scripts")
+        );
+        assert_eq!(
+            packaged_node_path_for(
+                Path::new("C:/Program Files/Raynard/raynard.exe"),
+                "node.exe",
+            ),
+            Some(PathBuf::from("C:/Program Files/Raynard/node.exe"))
         );
     }
 
     #[test]
     fn packaged_paths_are_absent_for_a_rootless_executable() {
-        assert_eq!(packaged_runtime_scripts_dir_for(Path::new("raynard")), None);
         assert_eq!(
-            packaged_node_path_for(Path::new("raynard")),
+            packaged_node_path_for(Path::new("raynard"), "node"),
             Some(PathBuf::from("node"))
         );
     }
@@ -7219,6 +7349,16 @@ mod tests {
         assert_eq!(normalized[0].credential_request, Some(request));
         assert_eq!(normalized[0].extension_recommendation, Some(recommendation));
     }
+
+    #[test]
+    fn steer_command_type_defaults_to_steering() {
+        assert_eq!(steer_command_type("follow_up"), "follow_up");
+        assert_eq!(steer_command_type("  followUp "), "follow_up");
+        assert_eq!(steer_command_type("steer"), "steer");
+        // An unknown delivery must still reach the agent rather than be dropped.
+        assert_eq!(steer_command_type(""), "steer");
+        assert_eq!(steer_command_type("later"), "steer");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -7226,12 +7366,19 @@ pub fn run() {
     tauri::Builder::default()
         .manage(StreamCancelState::default())
         .manage(OAuthLoginState::default())
+        .manage(AgentSteerState::default())
         .manage(ProviderQuotaCache::default())
         .manage(BookmarkStoreState::default())
         .manage(PendingDeepLinks::default())
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             use tauri_plugin_deep_link::DeepLinkExt;
+
+            // Commands do not all receive an AppHandle, so capture Tauri's
+            // platform-aware resource directory once for sidecar resolution.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let _ = BUNDLED_RESOURCE_DIR.set(resource_dir);
+            }
 
             // A cold launch has already consumed its URL by the time the plugin
             // is up, so it is read back explicitly; everything after arrives
@@ -7258,6 +7405,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
             cancel_model_chat_stream,
+            steer_main_agent_stream,
             clear_generated_plugin_cache,
             delete_bookmark,
             delete_chat_history,

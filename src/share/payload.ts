@@ -1,5 +1,5 @@
 import type { ChartSource } from '../chart-sources';
-import { cardCountLabel } from '../result-card/ResultCardStack';
+import { cardSummaryLabel } from '../result-card/ResultCardStack';
 import type { StoredResultCard } from '../result-card/types';
 import { SHARE_PAYLOAD_VERSION, ShareLinkError } from './types';
 import type { ShareExtension, SharedAnswerPayload } from './types';
@@ -53,7 +53,7 @@ export function buildSharePayload(source: ShareSource): SharedAnswerPayload {
     q: source.question.trim(),
     a: source.message.text,
     teaser: {
-      cards: cardCountLabel(cards),
+      cards: cardSummaryLabel(cards),
       ext: extensions
         .map((extension) => extension.name.trim())
         .filter(Boolean)

@@ -52,6 +52,14 @@
       "minimumSystemVersion": "13.0",
       "hardenedRuntime": true,
       "entitlements": "./Entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

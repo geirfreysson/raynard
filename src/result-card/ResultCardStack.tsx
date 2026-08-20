@@ -28,6 +28,33 @@ export function cardCountLabel(cards: StoredResultCard[]): string {
     .join(' · ');
 }
 
+/**
+ * Distinct extension names behind these cards, in first-seen order. Empty when
+ * any card is unattributed: a half-resolved mix would silently under-report
+ * where the numbers came from, so it falls back to the per-kind breakdown.
+ */
+function cardPlugins(cards: StoredResultCard[]): string[] {
+  const names: string[] = [];
+  for (const card of cards) {
+    const name = (card.plugin || '').trim();
+    if (!name) return [];
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The disclosure summary. One extension keeps the per-kind breakdown
+ * (`1 indicator · 5 observations`); two or more name the extensions instead,
+ * because merged counts hide which source each number came from.
+ */
+export function cardSummaryLabel(cards: StoredResultCard[]): string {
+  const plugins = cardPlugins(cards);
+  if (plugins.length < 2) return cardCountLabel(cards);
+  const noun = cards.length === 1 ? 'result' : 'results';
+  return `${cards.length} ${noun} from ${plugins.join(' · ')}`;
+}
+
 function capitalize(value: string): string {
   return value ? `${value[0].toUpperCase()}${value.slice(1)}` : 'Result';
 }
@@ -70,10 +97,33 @@ function ResultCardDisclosure({ card, index }: { card: StoredResultCard; index: 
 }
 
 export function ResultCardList({ cards }: { cards: StoredResultCard[] }) {
+  const plugins = cardPlugins(cards);
+
+  // One source (or none we can name) reads better as a plain sequence.
+  if (plugins.length < 2) {
+    return (
+      <div role="list" className="flex flex-col gap-0.5">
+        {cards.map((card, index) => (
+          <ResultCardDisclosure key={index} card={card} index={index} />
+        ))}
+      </div>
+    );
+  }
+
+  // Indices stay message-wide so an untitled card keeps one stable number.
   return (
     <div role="list" className="flex flex-col gap-0.5">
-      {cards.map((card, index) => (
-        <ResultCardDisclosure key={index} card={card} index={index} />
+      {plugins.map((plugin) => (
+        <div key={plugin} role="group" aria-label={plugin}>
+          <p className="px-0 pt-2 pb-0.5 text-[13px] font-medium text-muted-foreground">
+            {plugin}
+          </p>
+          {cards.map((card, index) =>
+            (card.plugin || '').trim() === plugin ? (
+              <ResultCardDisclosure key={index} card={card} index={index} />
+            ) : null
+          )}
+        </div>
       ))}
     </div>
   );
@@ -148,7 +198,7 @@ export function ResultCardStack({
     );
   }
 
-  const label = cardCountLabel(valid);
+  const label = cardSummaryLabel(valid);
   return (
     <div className="rc-scope">
       <button

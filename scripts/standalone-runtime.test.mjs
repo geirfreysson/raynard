@@ -15,18 +15,44 @@ test('sidecars launch nested Node work with the embedded executable', async () =
   expect(pluginBuilder).toMatch(/process\.execPath/);
 });
 
-test('the standalone runtime packager pins and verifies the Apple Silicon Node archive', async () => {
+test('the standalone runtime packager pins and verifies every supported Node archive', async () => {
   const packager = await import('./standalone-runtime.mjs');
 
   expect(packager.NODE_RUNTIME.version).toBe('22.21.1');
-  expect(packager.NODE_RUNTIME.target).toBe('aarch64-apple-darwin');
-  expect(packager.NODE_RUNTIME.sha256).toBe(
+  expect(Object.keys(packager.NODE_RUNTIMES)).toEqual([
+    'aarch64-apple-darwin',
+    'x86_64-unknown-linux-gnu',
+    'x86_64-pc-windows-msvc'
+  ]);
+  expect(packager.NODE_RUNTIMES['aarch64-apple-darwin'].sha256).toBe(
     'c170d6554fba83d41d25a76cdbad85487c077e51fa73519e41ac885aa429d8af'
   );
-  expect(packager.NODE_RUNTIME.binarySha256).toBe(
-    '8179f1d4a920be531d81edef7a26df5cc5c9cb11c8b5a28fb336aa030fbfe3df'
+  expect(packager.NODE_RUNTIMES['x86_64-unknown-linux-gnu']).toMatchObject({
+    archive: 'node-v22.21.1-linux-x64.tar.gz',
+    executable: 'bin/node',
+    sha256: '219a152ea859861d75adea578bdec3dce8143853c13c5187f40c40e77b0143b2',
+    binarySha256: '92181daccf61361e7c54d6404a3e2c2307a916d076492e3c0b388e6e5f86a854'
+  });
+  expect(packager.NODE_RUNTIMES['x86_64-pc-windows-msvc']).toMatchObject({
+    archive: 'node-v22.21.1-win-x64.zip',
+    executable: 'node.exe',
+    sha256: '3c624e9fbe07e3217552ec52a0f84e2bdc2e6ffa7348f3fdfb9fbf8f42e23fcf',
+    binarySha256: '471961cb355311c9a9dd8ba417eca8269ead32a2231653084112554cda52e8b3'
+  });
+});
+
+test('the standalone runtime target can be selected by flag or build environment', async () => {
+  const { resolveRuntimeTarget } = await import('./standalone-runtime.mjs');
+
+  expect(resolveRuntimeTarget(['--target', 'x86_64-unknown-linux-gnu'], {})).toBe(
+    'x86_64-unknown-linux-gnu'
   );
-  expect(packager.NODE_RUNTIME.archive).toBe('node-v22.21.1-darwin-arm64.tar.gz');
+  expect(
+    resolveRuntimeTarget([], { RAYNARD_RUNTIME_TARGET: 'x86_64-pc-windows-msvc' })
+  ).toBe('x86_64-pc-windows-msvc');
+  expect(() => resolveRuntimeTarget(['--target', 'sparc-example-none'], {})).toThrow(
+    /unsupported standalone runtime target/i
+  );
 });
 
 test('every script a packaged sidecar imports is copied into the runtime', async () => {
@@ -66,21 +92,48 @@ test('the locked standalone dependency set includes builder runtime dependencies
   expect(runtimePackage.dependencies.typescript).toBe('5.9.3');
 });
 
-test('the release workflow prepares bundle inputs before Cargo validates them', async () => {
+test('every native release job prepares its matching standalone runtime', async () => {
   const workflow = await readFile(
     join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'),
     'utf8'
   );
-  const prepareRuntime = workflow.indexOf('npm run runtime:prepare:macos-arm64');
-  const cargoTest = workflow.indexOf('cargo test --manifest-path src-tauri/Cargo.toml --lib');
+  const macJob = workflow.slice(
+    workflow.indexOf('  release-macos-arm64:'),
+    workflow.indexOf('  release-linux-x64:')
+  );
+  const linuxJob = workflow.slice(
+    workflow.indexOf('  release-linux-x64:'),
+    workflow.indexOf('  release-windows-x64:')
+  );
+  const windowsJob = workflow.slice(
+    workflow.indexOf('  release-windows-x64:'),
+    workflow.indexOf('  publish-release:')
+  );
+
+  expect(macJob).toContain('RAYNARD_RUNTIME_TARGET: aarch64-apple-darwin');
+  expect(macJob).toContain('npm run runtime:prepare:macos-arm64');
+  expect(linuxJob).toContain('runs-on: ubuntu-22.04');
+  expect(linuxJob).toContain('npm run runtime:prepare:linux-x64');
+  expect(linuxJob).toContain('--bundles appimage,deb');
+  expect(linuxJob).toContain('verify-standalone-bundle.mjs linux');
+  expect(windowsJob).toContain('runs-on: windows-latest');
+  expect(windowsJob).toContain('npm run runtime:prepare:windows-x64');
+  expect(windowsJob).toContain('--bundles nsis');
+  expect(windowsJob).toContain('verify-standalone-bundle.mjs windows');
+
+  for (const job of [macJob, linuxJob, windowsJob]) {
+    expect(job.indexOf('- name: Prepare standalone runtime')).toBeGreaterThan(-1);
+    expect(job.indexOf('cargo test --manifest-path src-tauri/Cargo.toml --lib')).toBeGreaterThan(
+      job.indexOf('- name: Prepare standalone runtime')
+    );
+  }
+
   const importCertificate = workflow.indexOf('- name: Import Developer ID certificate');
   const signNativeRuntime = workflow.indexOf('- name: Sign standalone runtime native code');
   const tauriBuild = workflow.indexOf('npm run tauri:build -- --target aarch64-apple-darwin');
   const notarizeDmg = workflow.indexOf('xcrun notarytool submit "$dmg_path"');
   const validateDmgTicket = workflow.indexOf('xcrun stapler validate "$dmg_path"');
 
-  expect(prepareRuntime).toBeGreaterThan(-1);
-  expect(cargoTest).toBeGreaterThan(prepareRuntime);
   expect(signNativeRuntime).toBeGreaterThan(importCertificate);
   expect(tauriBuild).toBeGreaterThan(signNativeRuntime);
   expect(workflow.slice(signNativeRuntime, tauriBuild)).toContain(
@@ -96,7 +149,7 @@ test('tagged releases validate their version and publish the binary with its che
     'utf8'
   );
   const validateVersion = workflow.indexOf('scripts/validate-release-version.mjs');
-  const tauriBuild = workflow.indexOf('npm run tauri:build -- --target aarch64-apple-darwin');
+  const publishJob = workflow.slice(workflow.indexOf('  publish-release:'));
   const createRelease = workflow.indexOf('gh release create "$GITHUB_REF_NAME"');
   const uploadRelease = workflow.indexOf('gh release upload "$GITHUB_REF_NAME"');
   const publishRelease = workflow.indexOf(
@@ -104,38 +157,50 @@ test('tagged releases validate their version and publish the binary with its che
   );
 
   expect(validateVersion).toBeGreaterThan(-1);
-  expect(validateVersion).toBeLessThan(tauriBuild);
-  expect(createRelease).toBeGreaterThan(tauriBuild);
   expect(uploadRelease).toBeGreaterThan(createRelease);
   expect(workflow.slice(createRelease, uploadRelease)).toContain('--draft');
   expect(publishRelease).toBeGreaterThan(uploadRelease);
   expect(workflow).toContain('--notes-file release-draft.md');
   expect(workflow).toContain('Raynard-${version}-mac-arm64.dmg.sha256');
+  expect(workflow).toContain('Raynard-${version}-linux-x86_64.AppImage');
+  expect(workflow).toContain('Raynard-$version-windows-x64-setup.exe');
+  expect(publishJob).toContain('needs:');
+  expect(publishJob).toContain('- release-macos-arm64');
+  expect(publishJob).toContain('- release-linux-x64');
+  expect(publishJob).toContain('- release-windows-x64');
+  expect(publishJob).toContain('pattern: desktop-*');
+  expect(publishJob).toContain('docs/static/install.sh');
+  expect(publishJob).toContain('docs/static/install.ps1');
 });
 
-test('the docs homepage downloads the stable asset published by every latest release', async () => {
-  const [workflow, shareConfigRaw, homepageCopy, docsConfig, gettingStarted] = await Promise.all([
+test('the docs download surfaces use stable assets published by every latest release', async () => {
+  const [workflow, shareConfigRaw, homepage, downloadHelper, gettingStarted] = await Promise.all([
     readFile(join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'), 'utf8'),
     readFile(join(scriptsDir, '../share.config.json'), 'utf8'),
-    readFile(join(scriptsDir, '../docs/src/content/homepage-copy.json'), 'utf8'),
-    readFile(join(scriptsDir, '../docs/docusaurus.config.js'), 'utf8'),
+    readFile(join(scriptsDir, '../docs/src/pages/index.js'), 'utf8'),
+    readFile(join(scriptsDir, '../docs/src/lib/download.js'), 'utf8'),
     readFile(join(scriptsDir, '../docs/docs/getting-started.md'), 'utf8')
   ]);
 
   // The download URL now lives in share.config.json, which the app and the docs
   // site both read. Deriving the asset name from it ties the link the docs
   // publish to the artifact the release workflow actually uploads.
-  const latestDownload = JSON.parse(shareConfigRaw).downloadUrl;
+  const configured = JSON.parse(shareConfigRaw);
+  const latestDownload = configured.downloadUrl;
   const assetName = latestDownload.split('/').pop();
 
-  expect(workflow).toContain(`stable_artifact_name="${assetName}"`);
-  expect(workflow).toContain(`stable_checksum_name="${assetName}.sha256"`);
+  expect(workflow).toContain(`release-assets/${assetName}`);
+  expect(workflow).toContain(`${assetName}.sha256`);
+  for (const url of Object.values(configured.downloads)) {
+    expect(workflow).toContain(url.split('/').pop());
+  }
 
   // Markdown cannot import the config, so this one is checked by equality.
   expect(gettingStarted).toContain(latestDownload);
 
-  // These two import it instead, and must not drift back to a literal.
-  expect(docsConfig).not.toContain(latestDownload);
-  expect(homepageCopy).not.toContain(latestDownload);
-  expect(docsConfig).toContain('share.config.json');
+  // These import the config instead, and must not drift back to literals.
+  expect(homepage).not.toContain(latestDownload);
+  expect(downloadHelper).not.toContain(latestDownload);
+  expect(homepage).toContain('share.config.json');
+  expect(downloadHelper).toContain('share.config.json');
 });

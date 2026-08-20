@@ -3,7 +3,7 @@
     "description": "Talk to data APIs in plain English with Raynard."
   },
   "hero": {
-    "eyebrow": "Desktop app for macOS",
+    "eyebrow": "Desktop app for macOS, Linux, and Windows",
     "title": "The AI analyst that cites its sources",
     "slogan": {
       "before": "Talk",
@@ -11,12 +11,38 @@
       "after": "to me."
     },
     "body": "Raynard connects to data APIs so you can ask questions in plain English—every number comes back with a reference you can check.",
-    "primaryAction": {
-      "label": "Download for macOS"
+    "downloads": {
+      "order": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "alternativesPrefix": "Also for",
+      "platforms": {
+        "macos": {
+          "name": "Mac",
+          "label": "Download for Mac",
+          "spec": "Apple silicon · macOS 13 or later"
+        },
+        "linux": {
+          "name": "Linux",
+          "label": "Install on Linux",
+          "spec": "AppImage, Debian package, or one-line installer"
+        },
+        "windows": {
+          "name": "Windows",
+          "label": "Download for Windows",
+          "spec": "x64 installer · Windows 10 and 11",
+          "note": {
+            "text": "Unsigned preview",
+            "linkLabel": "what this means"
+          }
+        }
+      }
     },
-    "secondaryAction": {
-      "label": "Read the Docs",
-      "to": "/docs/intro"
+    "installationHelp": {
+      "linuxTo": "/docs/getting-started#linux",
+      "windowsInfoTo": "/docs/getting-started#windows"
     },
     "demoLabel": "Product demo — cited answers from live API data"
   },
@@ -53,7 +79,7 @@
       {
         "icon": "”",
         "title": "Cited answers",
-        "body": "Every figure Raynard gives you links back to the API response and source reference it came from."
+        "body": "Every figure Raynard gives you links back to the source it came from."
       },
       {
         "icon": "⇄",
@@ -67,8 +93,8 @@
       },
       {
         "icon": "⌘",
-        "title": "Native to your Mac",
-        "body": "A real desktop app that keeps conversations, connections, and credentials under your control."
+        "title": "Native desktop app",
+        "body": "A desktop app for macOS, Linux, and Windows that keeps conversations, connections, and credentials under your control."
       }
     ]
   },
@@ -82,19 +108,18 @@
         "body": "",
         "bullets": [
           "Builds and tests an API connector with just a prompt",
-          "The agent will have access to this data source in future chats",
+          "Raynard can use this data source in future chats",
           "Share your connector with the community or keep it private on your own machine"
-
         ],
         "mediaLabel": "Placeholder for Stripe refund analysis screenshot"
       },
       {
         "title": "Get data-backed analysis with references",
         "prompt": "How does Britain's productivity compare with the EU and why?",
-        "body": "The agent can interrogate multiple APIs and to build confidence it cites the results directly.",
+        "body": "Raynard can check multiple sources and cite the results directly, so you can verify its conclusions.",
         "bullets": [
           "Returns the matching records with source links",
-          "Keeps the supporting API response with the result"
+          "Keeps the supporting source data with the result"
         ],
         "mediaLabel": "Placeholder for research result",
         "reverse": true
@@ -102,7 +127,7 @@
       {
         "title": "Surface inventory below target",
         "prompt": "Show me warehouse inventory turns below target this month.",
-        "body": "A generated inventory plugin can compare current records with the target thresholds exposed by its API.",
+        "body": "An inventory extension can compare current records with your target thresholds.",
         "bullets": [
           "Returns the affected SKUs with supporting references",
           "Reruns against current data when thresholds change"
@@ -133,7 +158,7 @@
     "title": "Ready to talk data?",
     "body": "Connect your sources and start asking questions.",
     "action": {
-      "label": "Download for macOS",
+      "label": "Choose your download",
       "to": "/docs/getting-started"
     }
   }

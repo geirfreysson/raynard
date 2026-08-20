@@ -14,11 +14,11 @@ export const SHARE_PAYLOAD_VERSION = 1;
 /**
  * What the landing page shows without decoding a single card.
  *
- * Precomputed here so `docs/` needs no copy of `cardCountLabel`, `resolve.ts`,
+ * Precomputed here so `docs/` needs no copy of `cardSummaryLabel`, `resolve.ts`,
  * or the React card renderer — the page reads three strings and stops.
  */
 export type ShareTeaser = {
-  /** Count label, e.g. `2 monsters · 1 spell`. */
+  /** Count label, e.g. `2 monsters · 1 spell`, or `3 results from A · B`. */
   cards: string;
   /** Plugin display names that fed the answer, joined for display. */
   ext: string;

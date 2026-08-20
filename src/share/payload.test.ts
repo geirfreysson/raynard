@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cardCountLabel } from '../result-card/ResultCardStack';
+import { cardSummaryLabel } from '../result-card/ResultCardStack';
 import type { StoredResultCard } from '../result-card/types';
 import { buildSharePayload } from './payload';
 import { SHARE_PAYLOAD_VERSION, ShareLinkError } from './types';
@@ -47,9 +47,24 @@ describe('buildSharePayload', () => {
       now: at
     });
 
-    expect(payload.teaser.cards).toBe(cardCountLabel(cards));
+    expect(payload.teaser.cards).toBe(cardSummaryLabel(cards));
     expect(payload.teaser.cards).toBe('2 monsters · 1 spell');
     expect(payload.teaser.ext).toBe('D&D 5e API · Open Library');
+  });
+
+  it('names the extensions in the teaser when the answer spans more than one', () => {
+    const cards = [
+      { ...card('indicator', 'indicators'), plugin: 'OECD Data Explorer' },
+      { ...card('observation', 'observations'), plugin: 'World Bank Data360' }
+    ];
+    const payload = buildSharePayload({
+      question: 'q',
+      message: { text: 'a', cards },
+      extensions: [{ name: 'OECD Data Explorer' }, { name: 'World Bank Data360' }],
+      now: at
+    });
+
+    expect(payload.teaser.cards).toBe('2 results from OECD Data Explorer · World Bank Data360');
   });
 
   it('omits empty collections rather than shipping empty arrays', () => {

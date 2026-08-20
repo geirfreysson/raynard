@@ -13,6 +13,7 @@ import {
   createUsageTotal,
   addUsage,
   emptyUsage,
+  extractAssistantText,
   resolveContextWindow,
   defaultThinkingLevel,
   inferReasoningSupport,
@@ -27,6 +28,22 @@ import {
 import { Type } from '@mariozechner/pi-ai';
 
 describe('main agent core', () => {
+  it('keeps Markdown block boundaries between separate assistant text blocks', () => {
+    const text = extractAssistantText({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'I will fetch the remaining countries:' },
+        { type: 'toolCall', id: 'call-1', name: 'query', arguments: {} },
+        {
+          type: 'text',
+          text: '```chart\n{"type":"bar","x":"country","series":[{"key":"value"}],"rows":[{"country":"Iceland","value":1}]}\n```'
+        }
+      ]
+    });
+
+    expect(text).toContain('countries:\n\n```chart');
+  });
+
   it('creates Pi-compatible history and leaves the current user prompt out', () => {
     const messages = toAgentMessages(
       [

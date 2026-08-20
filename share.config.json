@@ -1,5 +1,13 @@
 {
   "shareBaseUrl": "http://localhost:3000",
   "appScheme": "raynard",
-  "downloadUrl": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg"
+  "downloadUrl": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg",
+  "downloads": {
+    "macos": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg",
+    "linux": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-x86_64.AppImage",
+    "debian": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-amd64.deb",
+    "windows": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-windows-x64-setup.exe",
+    "installLinux": "https://github.com/geirfreysson/raynard/releases/latest/download/install.sh",
+    "installWindows": "https://github.com/geirfreysson/raynard/releases/latest/download/install.ps1"
+  }
 }

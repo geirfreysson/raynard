@@ -5,6 +5,7 @@ import Layout from '@theme/Layout';
 
 import shareConfig from '../../../share.config.json';
 import {decodeSharePayload, degradationLine, teaserLine} from '../lib/share-link';
+import {downloadUrlForUserAgent} from '../lib/download';
 import styles from './s.module.css';
 
 // The landing page for a shared answer.
@@ -16,6 +17,7 @@ import styles from './s.module.css';
 
 function SharedAnswer() {
   const [state, setState] = useState({status: 'reading'});
+  const downloadUrl = downloadUrlForUserAgent(navigator.userAgent);
 
   useEffect(() => {
     const encoded = window.location.hash.replace(/^#/, '');
@@ -46,7 +48,7 @@ function SharedAnswer() {
     return (
       <div className={styles.card}>
         <p className={styles.error}>{state.message}</p>
-        <a className={styles.primary} href={shareConfig.downloadUrl}>
+        <a className={styles.primary} href={downloadUrl}>
           Download Raynard
         </a>
       </div>
@@ -68,7 +70,7 @@ function SharedAnswer() {
         <a className={styles.primary} href={`${shareConfig.appScheme}://share/${encoded}`}>
           Open in Raynard
         </a>
-        <a className={styles.secondary} href={shareConfig.downloadUrl}>
+        <a className={styles.secondary} href={downloadUrl}>
           Download Raynard
         </a>
       </div>

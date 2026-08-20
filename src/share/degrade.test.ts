@@ -146,6 +146,26 @@ describe('fitSharePayload', () => {
     }
   });
 
+  it('drops a source out of the teaser when its last card is dropped', async () => {
+    // Six World Bank cards then three OECD ones: only the first five survive, so
+    // the retold teaser must stop claiming OECD contributed anything.
+    const cards = [
+      ...Array.from({ length: 6 }, () => ({ ...tableCard(300), plugin: 'World Bank Data360' })),
+      ...Array.from({ length: 3 }, () => ({ ...tableCard(300), plugin: 'OECD Data Explorer' }))
+    ];
+    const fitted = await fitSharePayload(
+      payload({
+        cards,
+        teaser: { cards: '9 results from World Bank Data360 · OECD Data Explorer', ext: 'x' }
+      }),
+      5000,
+      jsonEncoder
+    );
+
+    expect(fitted.payload.cards).toHaveLength(SHARE_MAX_CARDS);
+    expect(fitted.payload.teaser.cards).toBe('5 observations');
+  });
+
   it('flags overBudget instead of handing back a link that cannot work', async () => {
     // The answer text alone exceeds the budget, and text is never truncated.
     const fitted = await fitSharePayload(payload({ a: 'x'.repeat(5000) }), 500, jsonEncoder);

@@ -1,14 +1,6 @@
 // @ts-check
 
-import {createRequire} from 'node:module';
-
 import {themes as prismThemes} from 'prism-react-renderer';
-
-// Single source of truth for the download link and the share base URL, shared
-// with the app (see src/share/config.ts). `createRequire` rather than an import
-// attribute so this stays portable across Node versions.
-const shareConfig = createRequire(import.meta.url)('../share.config.json');
-const latestMacDownload = shareConfig.downloadUrl;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -72,8 +64,8 @@ const config = {
             position: 'right',
           },
           {
-            href: latestMacDownload,
-            label: 'Download for Mac',
+            to: '/docs/getting-started',
+            label: 'Download',
             position: 'right',
             className: 'navbar-download',
           },

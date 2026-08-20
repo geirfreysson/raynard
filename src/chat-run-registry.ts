@@ -1,5 +1,10 @@
 export type ChatRunKind = 'agent' | 'builder';
 
+export type QueuedRunMessage = {
+  text: string;
+  delivery: 'steer' | 'followUp';
+};
+
 export type ChatRun<TMeta, TMessage> = {
   id: string;
   chatId: string;
@@ -9,6 +14,12 @@ export type ChatRun<TMeta, TMessage> = {
   meta: TMeta;
   messages: TMessage[];
   viewRevision: number;
+  /**
+   * Messages typed while this run was working, still waiting for the agent to
+   * pick them up. It lives on the run rather than in a renderer variable so
+   * navigating away from a busy chat and back does not lose them.
+   */
+  queued: QueuedRunMessage[];
 };
 
 export class ChatRunRegistry<TMeta, TMessage> {
@@ -46,7 +57,8 @@ export class ChatRunRegistry<TMeta, TMessage> {
       streamId: '',
       meta,
       messages,
-      viewRevision
+      viewRevision,
+      queued: []
     };
     this.runs.set(chatId, run);
     return run;
@@ -64,6 +76,35 @@ export class ChatRunRegistry<TMeta, TMessage> {
     if (!run || run.id !== runId) return false;
     run.pluginDir = pluginDir;
     return true;
+  }
+
+  enqueue(chatId: string, runId: string, message: QueuedRunMessage) {
+    const run = this.runs.get(chatId);
+    if (!run || run.id !== runId) return false;
+    run.queued.push(message);
+    return true;
+  }
+
+  /**
+   * Removes the first entry matching `text`.
+   *
+   * The sidecar recognizes a delivered message by its text too, so matching the
+   * same way keeps the two mirrors in step when the same text is queued twice.
+   */
+  dequeueText(chatId: string, runId: string, text: string) {
+    const run = this.runs.get(chatId);
+    if (!run || run.id !== runId) return false;
+    const index = run.queued.findIndex((entry) => entry.text === text);
+    if (index === -1) return false;
+    run.queued.splice(index, 1);
+    return true;
+  }
+
+  /** Drains the queue, for handing undelivered text back to the composer. */
+  takeQueued(chatId: string, runId: string): QueuedRunMessage[] {
+    const run = this.runs.get(chatId);
+    if (!run || run.id !== runId) return [];
+    return run.queued.splice(0);
   }
 
   finish(chatId: string, runId: string) {

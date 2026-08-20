@@ -49,6 +49,13 @@ export type ResultArtifactRef = {
 /** One card captured from a storable tool call and persisted on a message. */
 export type StoredResultCard = {
   toolName: string;
+  /**
+   * Display name of the extension that produced this card. Filled in by the
+   * renderer from the installed plugin list (see `pluginNameForTool`), the same
+   * way `ChartSource.plugin` is; absent on cards persisted before this existed
+   * and on shared cards whose extension is not installed.
+   */
+  plugin?: string;
   template: CardTemplate;
   data: unknown;
   /** True when at least one API request used to produce this card hit the cache. */

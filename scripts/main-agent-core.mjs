@@ -1052,6 +1052,10 @@ export function extractAssistantText(message) {
   return message.content
     .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text)
-    .join('')
+    // A provider may put prose, tool calls, and a fenced chart in separate
+    // content blocks. Those blocks are semantic boundaries, not token chunks:
+    // joining them directly can glue ```chart to the preceding sentence and
+    // turn a valid chart into invalid Markdown.
+    .join('\n\n')
     .trim();
 }

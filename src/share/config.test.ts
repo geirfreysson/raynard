@@ -6,11 +6,23 @@ import { APP_SCHEME, DOWNLOAD_URL, SHARE_BASE_URL } from './config';
 
 const root = new URL('../../', import.meta.url);
 const read = (relative: string) => readFileSync(fileURLToPath(new URL(relative, root)), 'utf8');
-const shareConfig = JSON.parse(read('share.config.json')) as Record<string, string>;
+type SharedConfig = {
+  appScheme: string;
+  downloadUrl: string;
+  shareBaseUrl: string;
+  downloads: Record<string, string>;
+};
+const shareConfig = JSON.parse(read('share.config.json')) as SharedConfig;
 
 describe('share.config.json', () => {
-  it('declares the three values the app and the docs site share', () => {
-    expect(Object.keys(shareConfig).sort()).toEqual(['appScheme', 'downloadUrl', 'shareBaseUrl']);
+  it('declares the app links and platform downloads in one shared file', () => {
+    expect(Object.keys(shareConfig).sort()).toEqual([
+      'appScheme',
+      'downloadUrl',
+      'downloads',
+      'shareBaseUrl'
+    ]);
+    expect(shareConfig.downloads.macos).toBe(shareConfig.downloadUrl);
   });
 
   it('uses a scheme that is a valid URL scheme', () => {
@@ -19,6 +31,9 @@ describe('share.config.json', () => {
 
   it('points the download at https', () => {
     expect(shareConfig.downloadUrl).toMatch(/^https:\/\//);
+    for (const download of Object.values(shareConfig.downloads)) {
+      expect(download).toMatch(/^https:\/\//);
+    }
   });
 });
 
@@ -43,6 +58,7 @@ describe('docs download links', () => {
       'docs/docusaurus.config.js',
       'docs/src/pages/index.js',
       'docs/src/pages/s.js',
+      'docs/src/lib/download.js',
       'docs/src/content/homepage-copy.json'
     ]) {
       expect(read(place).match(RELEASE_URL)).toBeNull();
@@ -53,6 +69,10 @@ describe('docs download links', () => {
   it('matches share.config.json in getting-started.md', () => {
     const found = read('docs/docs/getting-started.md').match(RELEASE_URL) ?? [];
     expect(found.length).toBeGreaterThan(0);
-    for (const url of found) expect(url).toBe(shareConfig.downloadUrl);
+    const configuredDownloads = new Set([
+      shareConfig.downloadUrl,
+      ...Object.values(shareConfig.downloads)
+    ]);
+    for (const url of found) expect(configuredDownloads).toContain(url);
   });
 });

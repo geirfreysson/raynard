@@ -68,12 +68,13 @@ const agent = new Agent({
 That import boundary is the practical difference between the modes. Explore
 has generated API tools and a tool for proposing a build, but no file-editing
 tools. Build receives Pi's coding tools, rooted in the approved plugin
-directory, but it is a new agent run with a different prompt and model role.
+directory, but it is a new agent run with a different prompt and role. The same
+provider and model selected in Raynard power both runtimes.
 
 ## The Explore loop
 
 Explore mode is the everyday Raynard experience. Every ordinary message starts
-here and uses your selected **Chat/Explore model**.
+here and uses your selected model in the **Chat/Explore role**.
 
 <div className="pi-agent-grid">
   <div className="pi-agent-card pi-agent-card--explore">
@@ -131,10 +132,11 @@ in-place edit, and start the separate coding agent.
 
 ## The extension-development loop
 
-In Build mode, Pi uses your selected **Coding/Build model**. The tools returned
-by `createCodingTools(pluginDirectory)` let the agent read, search, edit, and
-write files and run shell commands. Passing the plugin directory is important:
-it roots those tools in the one extension workspace selected for the build.
+In Build mode, Pi uses the same selected model in the **Coding/Build role**. The
+tools returned by `createCodingTools(pluginDirectory)` let the agent read,
+search, edit, and write files and run shell commands. Passing the plugin
+directory is important: it roots those tools in the one extension workspace
+selected for the build.
 
 Raynard streams Pi's filesystem and test events into the activity timeline, so
 you can see which files are being inspected or changed and when tests run.
@@ -167,8 +169,8 @@ The separation keeps each loop focused and makes the transition visible:
   changing plugin files.
 - **Build has scoped coding tools.** It can change only the plugin you approved,
   not the Raynard application or another extension.
-- **The models are independent.** You can choose a conversational model for
-  research and a coding-focused model for development.
+- **The agent runs are independent.** Explore and Build have separate prompts
+  and tools, while the provider and model you select power both.
 - **Each confirmation covers one coding pass.** The next ordinary message
   returns to Explore, and another change requires another proposal and approval.
 

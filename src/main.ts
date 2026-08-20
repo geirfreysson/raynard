@@ -38,6 +38,7 @@ import {
 import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
 import { parseChartSpec } from './chart-spec';
+import { normalizeChartFenceBoundaries } from './chart-markdown';
 import { renderChart, unmountChart } from './chart-mount';
 import { wrapCopyable } from './copy-affordance';
 import { writeClipboard } from './clipboard';
@@ -54,11 +55,13 @@ import {
   cancelAgentTurnStream,
   runMainAgentStream,
   runPluginBuilderStream,
+  steerAgentTurn,
   type AgentBuildRequest,
   type AgentErrorEvent,
   type AgentRetryEvent,
   type ChatMessage,
   type PluginBuilderRequest,
+  type SteerDelivery,
   type TurnUsage
 } from './agent-runtime';
 import {
@@ -526,6 +529,8 @@ app.innerHTML = `
       <section id="messages" class="messages" aria-live="polite"></section>
       <section id="pluginDetailView" class="plugin-detail-view is-hidden" aria-live="polite"></section>
 
+      <div id="pendingQueue" class="pending-queue is-hidden" aria-live="polite"></div>
+
       <form id="chatForm" class="composer" autocomplete="off">
         <textarea id="chatInput" rows="1"></textarea>
         <div class="composer-meta-row">
@@ -665,6 +670,7 @@ const chatForm = document.querySelector<HTMLFormElement>('#chatForm');
 const chatInput = document.querySelector<HTMLTextAreaElement>('#chatInput');
 const chatEnvLabel = document.querySelector<HTMLElement>('#chatEnvLabel');
 const stopStreamButton = document.querySelector<HTMLButtonElement>('#stopStreamButton');
+const pendingQueue = document.querySelector<HTMLElement>('#pendingQueue');
 const suggestionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-suggestion]'));
 const slashMenu = document.querySelector<HTMLElement>('#slashMenu');
 type SlashState = { input: HTMLTextAreaElement; items: SlashCommand[]; active: number };
@@ -844,7 +850,8 @@ for (const input of [introInput, chatInput]) {
     event.preventDefault();
     const target = event.currentTarget;
     if (target instanceof HTMLTextAreaElement) {
-      void submitMessage(target);
+      // Alt+Enter queues behind the whole answer instead of interrupting it.
+      void submitMessage(target, event.altKey ? 'followUp' : 'steer');
     }
   });
 }
@@ -942,11 +949,14 @@ newChatRail?.addEventListener('click', () => {
   void startNewConversation({ showPreChat: true });
 });
 stopStreamButton?.addEventListener('click', () => {
-  const streamId = chatRuns.get(activeSessionId)?.streamId;
-  if (!streamId) return;
+  const run = chatRuns.get(activeSessionId);
+  if (!run?.streamId) return;
   stopStreamButton.disabled = true;
   stopStreamButton.textContent = 'Stopping';
-  void cancelAgentTurnStream(streamId);
+  // The sidecar dies with its queue, so anything it never took goes back to the
+  // composer.
+  restoreQueuedToComposer(run);
+  void cancelAgentTurnStream(run.streamId);
 });
 
 async function loadEnvStatus() {
@@ -3777,7 +3787,11 @@ function shareExtensionsForCards(cards: StoredResultCard[]): ShareExtension[] {
 function shareMessage(message: StoredChatMessage) {
   openShareModal({
     question: promptForAssistant(storedMessages, message),
-    message: { text: message.text, cards: message.cards, sources: message.sources },
+    message: {
+      text: message.text,
+      cards: message.cards && withPluginNames(message.cards),
+      sources: message.sources
+    },
     extensions: shareExtensionsForCards(message.cards ?? []),
     loadArtifact: resultArtifactLoader,
     baseUrl: SHARE_BASE_URL,
@@ -3912,7 +3926,7 @@ function ensureCardContainer(article: HTMLElement): HTMLElement {
 /** Mount (or re-mount) result cards beneath a message article. */
 function renderMessageCards(article: HTMLElement, cards: StoredResultCard[] | undefined) {
   if (!cards || !cards.length) return;
-  renderResultCards(ensureCardContainer(article), cards);
+  renderResultCards(ensureCardContainer(article), withPluginNames(cards));
 }
 
 /** The display name of the plugin that owns a runtime tool, for citations. */
@@ -3921,8 +3935,22 @@ function pluginNameForTool(toolName: string): string | undefined {
     ?.name;
 }
 
+/**
+ * Name the owning extension on cards persisted before they carried one, so an
+ * older chat still gets a per-source summary. A card whose extension is no
+ * longer installed stays unattributed and falls back to the per-kind label.
+ */
+function withPluginNames(cards: StoredResultCard[]): StoredResultCard[] {
+  return cards.map((card) =>
+    card.plugin ? card : { ...card, plugin: pluginNameForTool(card.toolName) }
+  );
+}
+
 /** Pull a storable result card out of a tool-result event, if the tool has one. */
-function extractResultCard(event: { toolName: string; result: unknown }): StoredResultCard | null {
+function extractResultCard(
+  event: { toolName: string; result: unknown },
+  pluginName?: string
+): StoredResultCard | null {
   const result = event.result;
   if (!result || typeof result !== 'object') return null;
   const card = (result as Record<string, unknown>).card;
@@ -3936,6 +3964,7 @@ function extractResultCard(event: { toolName: string; result: unknown }): Stored
       : null;
   return {
     toolName: event.toolName,
+    plugin: pluginName || undefined,
     template: card as StoredResultCard['template'],
     data: (result as Record<string, unknown>).data ?? {},
     cached: resultWasCached(result) || undefined,
@@ -3953,12 +3982,49 @@ function extractResultCard(event: { toolName: string; result: unknown }): Stored
   };
 }
 
-async function submitMessage(input: HTMLTextAreaElement | null) {
-  if (!input || !messages || chatRuns.has(activeSessionId)) return;
+/**
+ * Sends the composer's contents.
+ *
+ * With no run in flight this starts an ordinary turn. With one running, the
+ * message is queued for the working agent instead: `steer` reaches it at the
+ * next tool-round boundary, `followUp` waits until it would otherwise stop.
+ */
+async function submitMessage(
+  input: HTMLTextAreaElement | null,
+  delivery: SteerDelivery = 'steer'
+) {
+  if (!input || !messages) return;
 
   const content = input.value.trim();
   if (!content) return;
+  // Slash commands are host commands, not messages, so they still run locally
+  // while the agent is working.
   if (await runSlashCommand(content, input)) return;
+
+  const run = chatRuns.get(activeSessionId);
+  if (run) {
+    // A builder run has no steering channel, and a run without a stream id has
+    // not reached its sidecar yet.
+    if (run.kind !== 'agent' || !run.streamId) return;
+    input.value = '';
+    chatRuns.enqueue(run.chatId, run.id, { text: content, delivery });
+    renderPendingQueue();
+    void logAgentTurnEvent('steer_queued', { text: content, delivery }, run.chatId);
+    try {
+      await steerAgentTurn(run.streamId, content, delivery);
+      return;
+    } catch (error) {
+      chatRuns.dequeueText(run.chatId, run.id, content);
+      renderPendingQueue();
+      // The turn ended between typing and sending. Ask it as an ordinary new
+      // question rather than dropping the message.
+      if (chatRuns.has(activeSessionId)) {
+        input.value = content;
+        console.error('Could not steer the agent:', getErrorMessage(error));
+        return;
+      }
+    }
+  }
 
   input.value = '';
   appendUserTurn(content);
@@ -3994,8 +4060,10 @@ async function startAgentTurn(content: string) {
   // explicit plugin-writing confirmation below.
   void switchAppModeWithStatus(automaticModeForUserTurn());
 
-  const pending = addMessage('assistant', '', true);
-  const pendingBody = pending.querySelector<HTMLElement>('.message-text');
+  // Re-assignable: a steering message ends the current assistant bubble and
+  // opens a new one, so a turn can own several segments.
+  let pending = addMessage('assistant', '', true);
+  let pendingBody = pending.querySelector<HTMLElement>('.message-text');
   const thinkingPreview = document.createElement('div');
   thinkingPreview.className = 'thinking-preview';
   // Inserted on the first reasoning delta; the activity row below carries the
@@ -4009,7 +4077,7 @@ async function startAgentTurn(content: string) {
   // The stream's own error event, which carries the provider identity that the
   // rejected command drops.
   let streamError: AgentErrorEvent | undefined;
-  const assistantRecord: StoredChatMessage = {
+  let assistantRecord: StoredChatMessage = {
     role: 'assistant',
     text: 'Thinking...',
     timestamp: Date.now(),
@@ -4146,17 +4214,14 @@ async function startAgentTurn(content: string) {
         assistantRecord.status = 'running';
         activeToolName = undefined;
         refreshActivity();
-        const resultCard = extractResultCard(toolCall);
+        const pluginName = pluginNameForTool(toolCall.toolName);
+        const resultCard = extractResultCard(toolCall, pluginName);
         let cardIndex: number | undefined;
         if (resultCard) {
           cardIndex = (assistantRecord.cards ??= []).push(resultCard) - 1;
           if (turnIsActive()) renderMessageCards(pending, assistantRecord.cards);
         }
-        const source = extractToolSource(
-          toolCall.result,
-          toolCall.toolName,
-          pluginNameForTool(toolCall.toolName)
-        );
+        const source = extractToolSource(toolCall.result, toolCall.toolName, pluginName);
         // A citation opens the card this same call rendered.
         if (source && cardIndex !== undefined) source.cardIndex = cardIndex;
         if (source) (assistantRecord.sources ??= []).push(source);
@@ -4199,6 +4264,76 @@ async function startAgentTurn(content: string) {
           { recommendation, mode: turnMode },
           turnSessionId
         );
+      },
+      /**
+       * A message the user typed mid-run just entered the agent's transcript.
+       *
+       * What the assistant had written until now is final, the steer becomes a
+       * real user bubble, and everything after it is a new assistant message.
+       * This is not only cosmetic: the sidecar's final text is the LAST
+       * assistant message alone, so without a record per segment the completion
+       * path below would overwrite everything written before the steer.
+       */
+      onSteeringApplied: (text) => {
+        if (settled) return;
+        chatRuns.dequeueText(turnSessionId, run.id, text);
+        renderPendingQueue();
+
+        const finishedText = streamed.trim();
+        assistantRecord.text = finishedText || 'Steered before this answer started.';
+        assistantRecord.thinking = thinking.trim() || undefined;
+        assistantRecord.status = 'completed';
+        assistantRecord.error = undefined;
+        assistantRecord.timestamp = Date.now();
+        if (turnIsActive()) {
+          // Model-visible history is written on the active path only, matching
+          // the completion path below; a backgrounded turn already skips it.
+          if (finishedText) {
+            turnChatMessages.push({ role: 'assistant', content: finishedText });
+          }
+          if (thinkingPreview.parentElement) thinkingPreview.remove();
+          if (pendingBody) {
+            renderMessageText(
+              pendingBody,
+              assistantRecord.text,
+              true,
+              messageContext(assistantRecord)
+            );
+          }
+          pending.classList.remove('pending');
+          syncMessageActions(pending, assistantRecord);
+        }
+
+        const steerRecord: StoredChatMessage = {
+          role: 'user',
+          text,
+          timestamp: Date.now()
+        };
+        turnStored.push(steerRecord);
+        if (turnIsActive()) turnChatMessages.push({ role: 'user', content: text });
+
+        assistantRecord = {
+          role: 'assistant',
+          text: 'Thinking...',
+          timestamp: Date.now(),
+          status: 'running'
+        };
+        turnStored.push(assistantRecord);
+        streamed = '';
+        thinking = '';
+        activeToolName = undefined;
+        if (turnIsActive()) {
+          const steerArticle = addMessage('user', text);
+          renderedMessageArticles.set(steerRecord, steerArticle);
+          pending = addMessage('assistant', '', true);
+          pendingBody = pending.querySelector<HTMLElement>('.message-text');
+          renderedMessageArticles.set(assistantRecord, pending);
+          scrollMessagesToBottom();
+        }
+        refreshActivity();
+        snapshotPersister.schedule(true);
+        syncRemountedTurn();
+        void logAgentTurnEvent('steer_applied', { text }, turnSessionId);
       },
       onRetry: (event) => {
         // The turn is deliberately idle for the length of the backoff. Saying so
@@ -4325,6 +4460,7 @@ async function startAgentTurn(content: string) {
     refreshActivity(false);
     snapshotPersister.flush();
     syncRemountedTurn();
+    restoreQueuedToComposer(run);
     chatRuns.finish(turnSessionId, run.id);
     syncRunControls();
     renderChatHistory();
@@ -4335,11 +4471,57 @@ async function startAgentTurn(content: string) {
 function syncRunControls() {
   const run = chatRuns.get(activeSessionId);
   const visible = Boolean(run);
-  if (chatInput) chatInput.disabled = visible;
+  // The composer stays live through an agent run: typing into it is how the
+  // agent is steered. A builder run has no steering channel, so it keeps the
+  // old lock.
+  if (chatInput) chatInput.disabled = run?.kind === 'builder';
+  renderPendingQueue();
   if (!stopStreamButton) return;
   stopStreamButton.classList.toggle('is-hidden', !visible);
   stopStreamButton.disabled = !run?.streamId;
   stopStreamButton.textContent = run?.streamId ? 'Stop' : 'Starting';
+}
+
+/**
+ * The dim strip above the composer listing messages the agent has not taken yet.
+ *
+ * Queued text deliberately stays out of the transcript until the agent actually
+ * receives it, so the transcript never shows a message the model never saw.
+ */
+function renderPendingQueue() {
+  if (!pendingQueue) return;
+  const queued = chatRuns.get(activeSessionId)?.queued ?? [];
+  pendingQueue.replaceChildren();
+  pendingQueue.classList.toggle('is-hidden', queued.length === 0);
+  for (const entry of queued) {
+    const row = document.createElement('div');
+    row.className = 'pending-queue-row';
+    const label = document.createElement('span');
+    label.className = 'pending-queue-label';
+    label.textContent = entry.delivery === 'followUp' ? 'Follow-up' : 'Steering';
+    const text = document.createElement('span');
+    text.className = 'pending-queue-text';
+    text.textContent = entry.text;
+    row.append(label, text);
+    pendingQueue.appendChild(row);
+  }
+}
+
+/**
+ * Hands text the agent never received back to the composer.
+ *
+ * Losing what somebody typed because the turn stopped first is worse than
+ * making them press Enter again.
+ */
+function restoreQueuedToComposer(run: ChatRun<ChatMeta, StoredChatMessage>) {
+  const queued = chatRuns.takeQueued(run.chatId, run.id);
+  renderPendingQueue();
+  if (!queued.length || run.chatId !== activeSessionId || !chatInput) return;
+  chatInput.value = [...queued.map((entry) => entry.text), chatInput.value]
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  chatInput.focus();
 }
 
 function syncRemountedRun(
@@ -5589,7 +5771,7 @@ function renderMarkdown(
   // Charts own a React root; release it before the node is discarded below.
   container.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
   container.textContent = '';
-  const sourceText = String(text || '');
+  const sourceText = normalizeChartFenceBoundaries(String(text || ''));
   const sourceLines = sourceText.replace(/\r\n?/g, '\n').split('\n');
 
   if (sourceText.length > MAX_MARKDOWN_RENDER_LENGTH || sourceLines.length > MAX_MARKDOWN_RENDER_LINES) {

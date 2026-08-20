@@ -103,6 +103,33 @@ describe('applyStreamPayload', () => {
     ]);
   });
 
+  it('reports a steered message only once it has reached the agent', () => {
+    const steered: string[] = [];
+    const handlers = { onSteeringApplied: (text: string) => steered.push(text) };
+
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'steering_applied', text: 'only Show HN posts' },
+      'active',
+      { streamed: '' },
+      handlers
+    );
+    // An empty payload is not a delivery, and neither is another chat's stream.
+    applyStreamPayload(
+      { stream_id: 'active', event_type: 'steering_applied', text: '   ' },
+      'active',
+      { streamed: '' },
+      handlers
+    );
+    applyStreamPayload(
+      { stream_id: 'other', event_type: 'steering_applied', text: 'wrong stream' },
+      'active',
+      { streamed: '' },
+      handlers
+    );
+
+    expect(steered).toEqual(['only Show HN posts']);
+  });
+
   it('forwards a validated available-extension recommendation', () => {
     const recommendations: unknown[] = [];
 

@@ -25,6 +25,49 @@ describe('ChatRunRegistry', () => {
     expect(registry.values().map((run) => run.chatId)).toEqual(['chat-a', 'chat-b']);
   });
 
+  it('queues steering messages against the run that owns the chat', () => {
+    const registry = new ChatRunRegistry<object, string>();
+    const run = registry.begin('chat-a', 'agent', {}, [], 1)!;
+    expect(run.queued).toEqual([]);
+    expect(registry.enqueue('chat-a', run.id, { text: 'narrow it', delivery: 'steer' })).toBe(true);
+    expect(registry.enqueue('chat-a', run.id, { text: 'then chart it', delivery: 'followUp' })).toBe(
+      true
+    );
+    // A finished turn must not be able to queue against the run that replaced it.
+    expect(registry.enqueue('chat-a', 'stale-run', { text: 'ignored', delivery: 'steer' })).toBe(
+      false
+    );
+    expect(registry.get('chat-a')?.queued.map((entry) => entry.text)).toEqual([
+      'narrow it',
+      'then chart it'
+    ]);
+  });
+
+  it('removes a queued message by its text, one match at a time', () => {
+    const registry = new ChatRunRegistry<object, string>();
+    const run = registry.begin('chat-a', 'agent', {}, [], 1)!;
+    registry.enqueue('chat-a', run.id, { text: 'again', delivery: 'steer' });
+    registry.enqueue('chat-a', run.id, { text: 'again', delivery: 'steer' });
+
+    expect(registry.dequeueText('chat-a', run.id, 'again')).toBe(true);
+    expect(registry.get('chat-a')?.queued).toHaveLength(1);
+    expect(registry.dequeueText('chat-a', run.id, 'never queued')).toBe(false);
+  });
+
+  it('drains the queue so undelivered text can go back to the composer', () => {
+    const registry = new ChatRunRegistry<object, string>();
+    const run = registry.begin('chat-a', 'agent', {}, [], 1)!;
+    registry.enqueue('chat-a', run.id, { text: 'first', delivery: 'steer' });
+    registry.enqueue('chat-a', run.id, { text: 'second', delivery: 'followUp' });
+
+    expect(registry.takeQueued('chat-a', 'stale-run')).toEqual([]);
+    expect(registry.takeQueued('chat-a', run.id).map((entry) => entry.text)).toEqual([
+      'first',
+      'second'
+    ]);
+    expect(registry.get('chat-a')?.queued).toEqual([]);
+  });
+
   it('only lets the owning run clear its chat slot', () => {
     const registry = new ChatRunRegistry<object, string>();
     const run = registry.begin('chat-a', 'builder', {}, [], 1)!;

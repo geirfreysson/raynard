@@ -1,4 +1,4 @@
-import { cardCountLabel } from '../result-card/ResultCardStack';
+import { cardSummaryLabel } from '../result-card/ResultCardStack';
 import { encodeSharePayload } from './codec';
 import { projectCardData } from './project';
 import type { ShareDegradation, SharedAnswerPayload } from './types';
@@ -98,7 +98,7 @@ function limitCards(payload: SharedAnswerPayload, max: number): SharedAnswerPayl
     {
       ...payload,
       cards,
-      teaser: { ...payload.teaser, cards: cardCountLabel(cards) }
+      teaser: { ...payload.teaser, cards: cardSummaryLabel(cards) }
     },
     patch
   );

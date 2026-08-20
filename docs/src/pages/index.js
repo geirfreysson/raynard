@@ -1,3 +1,4 @@
+import {useEffect, useState} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
@@ -5,6 +6,7 @@ import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import homepageCopy from '../content/homepage-copy.json';
 import shareConfig from '../../../share.config.json';
+import {platformForUserAgent} from '../lib/download';
 import styles from './index.module.css';
 
 const extensionRowB = [...homepageCopy.extensions.items].reverse();
@@ -22,6 +24,78 @@ function ExtensionRow({items, reverse = false}) {
   );
 }
 
+function DownloadIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className={styles.downloadIcon}
+      fill="none"
+      height="18"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+      width="18"
+    >
+      <path d="M12 3v12" />
+      <path d="m7 11 5 5 5-5" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+// The link target differs per platform on purpose: macOS and Windows get the
+// installer itself, while Linux gets the docs section that leads with the
+// one-line install script.
+function downloadTargetFor(platform) {
+  if (platform === 'linux') return homepageCopy.hero.installationHelp.linuxTo;
+  return shareConfig.downloads[platform];
+}
+
+function DownloadAction() {
+  const {downloads, installationHelp} = homepageCopy.hero;
+  // Server rendering has no user agent, so the markup starts on the macOS
+  // default that `platformForUserAgent` already falls back to, then corrects
+  // itself once the browser takes over.
+  const [platform, setPlatform] = useState('macos');
+
+  useEffect(() => {
+    setPlatform(platformForUserAgent(navigator.userAgent));
+  }, []);
+
+  const current = downloads.platforms[platform];
+  const alternatives = downloads.order.filter((key) => key !== platform);
+
+  return (
+    <div className={styles.downloadAction}>
+      <Link className={styles.primaryButton} to={downloadTargetFor(platform)}>
+        <DownloadIcon />
+        {current.label}
+      </Link>
+      {/* Deliberately not <p>: Infima's paragraph rule is specificity-boosted
+          (`p:not(#\#):not(#\#)`) and would override these margins. */}
+      <div className={styles.downloadSpec}>{current.spec}</div>
+      {current.note && (
+        <div className={styles.downloadNote}>
+          {current.note.text}
+          <span aria-hidden="true"> — </span>
+          <Link to={installationHelp.windowsInfoTo}>{current.note.linkLabel}</Link>
+        </div>
+      )}
+      <div className={styles.downloadAlternatives}>
+        {downloads.alternativesPrefix}{' '}
+        {alternatives.map((key, index) => (
+          <span key={key}>
+            {index > 0 && <span aria-hidden="true"> · </span>}
+            <Link to={downloadTargetFor(key)}>{downloads.platforms[key].name}</Link>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Hero() {
   const {hero, extensions} = homepageCopy;
 
@@ -34,11 +108,7 @@ function Hero() {
           {hero.slogan.before} <span>{hero.slogan.emphasis}</span> {hero.slogan.after}
         </p>
         <p className={styles.heroBody}>{hero.body}</p>
-        <div className={styles.heroActions}>
-          {/* The download URL is code-owned (share.config.json), not copy. */}
-          <Link className={styles.primaryButton} to={shareConfig.downloadUrl}>{hero.primaryAction.label}</Link>
-          <Link className={styles.secondaryButton} to={hero.secondaryAction.to}>{hero.secondaryAction.label}</Link>
-        </div>
+        <DownloadAction />
 
         <div className={styles.demoFrame}>
           <div className={styles.demoChrome} aria-hidden="true">

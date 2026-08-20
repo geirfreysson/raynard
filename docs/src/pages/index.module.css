@@ -68,20 +68,67 @@
   line-height: 1.6;
 }
 
-.heroActions {
+.downloadAction {
   display: flex;
-  gap: 14px;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 18px;
   margin-bottom: 72px;
+}
+
+.downloadIcon {
+  flex: none;
+  margin-top: -1px;
+}
+
+.downloadSpec,
+.downloadNote,
+.downloadAlternatives {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.downloadSpec {
+  margin-top: 20px;
+}
+
+.downloadNote,
+.downloadAlternatives {
+  margin-top: 8px;
+}
+
+.downloadSpec a,
+.downloadNote a,
+.downloadAlternatives a {
+  color: #394b67 !important;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: #c8cdd6;
+  text-underline-offset: 3px;
+  transition: color 0.2s, text-decoration-color 0.2s;
+}
+
+.downloadSpec a:hover,
+.downloadNote a:hover,
+.downloadAlternatives a:hover {
+  color: #a8412f !important;
+  text-decoration-color: #a8412f;
 }
 
 .primaryButton,
 .secondaryButton {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   padding: 14px 28px;
   border-radius: 8px;
   font-size: 15px;
   font-weight: 600;
-  transition: background 0.2s, border-color 0.2s;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 
 .primaryButton {
@@ -92,6 +139,17 @@
 .primaryButton:hover {
   color: #ffffff !important;
   background: #832f21;
+}
+
+.downloadAction > .primaryButton {
+  padding: 17px 34px;
+  font-size: 17px;
+  box-shadow: 0 12px 28px -14px rgba(168, 65, 47, 0.85);
+}
+
+.downloadAction > .primaryButton:hover {
+  box-shadow: 0 16px 32px -14px rgba(131, 47, 33, 0.9);
+  transform: translateY(-1px);
 }
 
 .secondaryButton {
@@ -521,11 +579,14 @@
     padding: 64px 20px 48px;
   }
 
-  .heroActions {
-    flex-direction: column;
+  .downloadAction {
+    width: 100%;
+    margin-bottom: 48px;
+  }
+
+  .downloadAction > .primaryButton {
     width: 100%;
     max-width: 320px;
-    margin-bottom: 48px;
   }
 
   .featureGrid,
