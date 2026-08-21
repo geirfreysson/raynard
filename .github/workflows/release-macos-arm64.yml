@@ -261,6 +261,15 @@ jobs:
           cargo check --manifest-path src-tauri/Cargo.toml
 
       - name: Build AppImage and Debian package
+        env:
+          # linuxdeploy and its appimage plugin ship as AppImages and mount
+          # themselves with FUSE, which the runner image does not provide.
+          # Extracting instead is the supported way to run them headlessly.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # The embedded Node binary is already stripped upstream; letting
+          # linuxdeploy strip it again only risks breaking a signed-upstream
+          # executable.
+          NO_STRIP: true
         run: npm run tauri:build -- --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
 
       - name: Verify Linux standalone runtime

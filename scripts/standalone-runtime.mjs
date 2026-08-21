@@ -143,12 +143,40 @@ async function downloadNodeArchive(runtime, archivePath) {
   await writeFile(archivePath, contents, { mode: 0o644 });
 }
 
+/**
+ * Whether this command has to go through a shell to start at all.
+ *
+ * Node refuses to spawn a `.cmd`/`.bat` directly (the CVE-2024-27980 fix), and
+ * on Windows npm *is* `npm.cmd`. Everything else stays shell-free, so the
+ * quoting below applies to one narrow path rather than every subprocess.
+ */
+export function needsShell(command, platform = process.platform) {
+  return platform === 'win32' && /\.(cmd|bat)$/i.test(command);
+}
+
+/**
+ * Quotes one argument for `cmd.exe`.
+ *
+ * `spawnSync` does not quote for us once `shell` is set: it joins the command
+ * line verbatim, so an unquoted path containing a space arrives as two
+ * arguments. Only the runtime's own literal flags and paths go through here.
+ */
+export function quoteForShell(value) {
+  return /[\s"^&|<>()]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
 function run(command, args, cwd = projectDir) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  const shell = needsShell(command);
+  const result = spawnSync(
+    shell ? quoteForShell(command) : command,
+    shell ? args.map(quoteForShell) : args,
+    {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell
+    }
+  );
   if (result.status !== 0) {
     const detail =
       result.error?.message ||

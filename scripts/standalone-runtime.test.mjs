@@ -204,3 +204,44 @@ test('the docs download surfaces use stable assets published by every latest rel
   expect(homepage).toContain('share.config.json');
   expect(downloadHelper).toContain('share.config.json');
 });
+
+test('npm is started through a shell on Windows, where it is a .cmd', async () => {
+  const { needsShell } = await import('./standalone-runtime.mjs');
+
+  // Node refuses to spawn these directly, so a shell-free spawn fails with
+  // EINVAL before npm ever runs. This is what broke the v0.3.0 Windows build.
+  expect(needsShell('npm.cmd', 'win32')).toBe(true);
+  expect(needsShell('yarn.BAT', 'win32')).toBe(true);
+
+  // Everything else keeps the safer shell-free path, on every platform.
+  expect(needsShell('tar', 'win32')).toBe(false);
+  expect(needsShell('node.exe', 'win32')).toBe(false);
+  expect(needsShell('npm', 'darwin')).toBe(false);
+  expect(needsShell('npm', 'linux')).toBe(false);
+});
+
+test('shell arguments are quoted, because spawnSync stops doing it for us', async () => {
+  const { quoteForShell } = await import('./standalone-runtime.mjs');
+
+  // A user directory with a space is the ordinary case this protects.
+  expect(quoteForShell(String.raw`C:\Users\Ada Lovelace\raynard`)).toBe(
+    String.raw`"C:\Users\Ada Lovelace\raynard"`
+  );
+  expect(quoteForShell('--omit=dev')).toBe('--omit=dev');
+  expect(quoteForShell('ci')).toBe('ci');
+
+  // cmd.exe would otherwise read these as command separators.
+  expect(quoteForShell('a&b')).toBe('"a&b"');
+  expect(quoteForShell('a|b')).toBe('"a|b"');
+});
+
+test('the Linux AppImage build runs linuxdeploy without FUSE', async () => {
+  const workflow = await readFile(
+    join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'),
+    'utf8'
+  );
+
+  // The runner image has no FUSE, so linuxdeploy cannot mount itself and the
+  // bundle step fails with a bare "failed to run linuxdeploy".
+  expect(workflow).toContain('APPIMAGE_EXTRACT_AND_RUN: 1');
+});
