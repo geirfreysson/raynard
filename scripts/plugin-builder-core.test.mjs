@@ -219,6 +219,55 @@ describe('plugin builder core', () => {
     ).toEqual({ testFiles: ['tools.test.ts'], toolCount: 1, cardCount: 1, credentials: [] });
   });
 
+  it('briefly requires domain-neutral catalog metadata in fresh build prompts', () => {
+    const system = buildSystemPrompt({ sourceUrls: [] });
+    const user = buildUserPrompt({ prompt: 'Build it', pluginDir: '/tmp/p' });
+
+    expect(system).toContain('plugin.json.catalogMetadata');
+    expect(system).toMatch(/one category from:/i);
+    expect(system).toMatch(/4–7.*lowercase kebab-case tags.*include api/i);
+    expect(system).toMatch(/icon.*book-open.*database.*message-square/i);
+    expect(system).not.toMatch(/eurostat/i);
+    expect(user).toContain('catalogMetadata');
+  });
+
+  it('validates builder-authored catalog metadata for fresh plugins', () => {
+    const valid = {
+      files: ['tools.ts', 'tools.test.ts'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- routes',
+      tools: [{ name: 'transit_list_routes', callable: true, card: requiredCard }],
+      requireCatalogMetadata: true
+    };
+    const catalogMetadata = {
+      category: 'Maps',
+      tags: ['transit', 'routes', 'cities', 'api'],
+      icon: 'database'
+    };
+
+    expect(() => validatePluginArtifacts({ ...valid })).toThrow(/catalogMetadata/i);
+    expect(() =>
+      validatePluginArtifacts({
+        ...valid,
+        catalogMetadata: { ...catalogMetadata, category: 'Miscellaneous' }
+      })
+    ).toThrow(/category/i);
+    expect(() =>
+      validatePluginArtifacts({
+        ...valid,
+        catalogMetadata: { ...catalogMetadata, tags: ['transit', 'API'] }
+      })
+    ).toThrow(/4–7.*kebab-case.*api/i);
+    expect(() =>
+      validatePluginArtifacts({
+        ...valid,
+        catalogMetadata: { ...catalogMetadata, icon: 'map' }
+      })
+    ).toThrow(/icon/i);
+    expect(validatePluginArtifacts({ ...valid, catalogMetadata })).toMatchObject({
+      catalogMetadata
+    });
+  });
+
   it('embeds a canonical tool template that pins the execute method and tool shape', () => {
     const prompt = buildSystemPrompt({ sourceUrls: [] });
 

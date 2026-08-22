@@ -2,6 +2,29 @@ import { homedir } from 'node:os';
 import { isAbsolute, resolve as resolvePath, sep } from 'node:path';
 import ts from 'typescript';
 
+const CATALOG_CATEGORIES = new Set([
+  'Arts',
+  'Business',
+  'Developer Tools',
+  'Economics',
+  'Education',
+  'Entertainment',
+  'Finance',
+  'Games',
+  'Government',
+  'Health',
+  'Maps',
+  'News',
+  'Reference',
+  'Science',
+  'Social',
+  'Sports',
+  'Travel',
+  'Utilities',
+  'Weather'
+]);
+const CATALOG_ICONS = new Set(['book-open', 'database', 'message-square']);
+
 // Shared across the fresh-build and interactive-edit prompts so the card
 // contract can never drift between them.
 const CARD_RULES = `Result-card rules (which tool results become a visible card):
@@ -259,6 +282,7 @@ Hard constraints:
   - Do NOT ask the user for the key and do NOT read process.env or a .env file. The host stores it in the OS keychain and supplies it at call time; when it is missing, the host prompts the user for you.
   - Keep tests fully mocked. The builder never has a real key, so tests must never depend on one. Inject a fake at the top of the test file with configureCredentials({ PROVIDER_API_KEY: 'TEST_KEY' }) from @raynard/plugin-sdk, and cover the missing-key path by asserting the tool rejects when no value is configured.
 - Set plugin.json.samplePrompts to exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>".
+- Set plugin.json.catalogMetadata to { "category", "tags", "icon" }: choose one category from: ${[...CATALOG_CATEGORIES].join(', ')}; use 4–7 unique lowercase kebab-case tags specific to its subject, provenance, or geography and include api; choose icon book-open, database, or message-square.
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
 parameter schemas, response types, and rendering differ between plugins. Write
@@ -465,7 +489,7 @@ Expected output (the workspace is already scaffolded and the shared SDK is insta
 - tools.ts: export defineTools({...}) with focused tools, each with a specific description and JSON parameter schema, returning { text, references, data } via the SDK.
 - Result cards: give EVERY tool, including list/search tools, a fixed "card" template plus a matching "data" object on every successful result path. Follow the Result-card rules in the system prompt.
 - Executable mocked-fetch tests in *.test.ts files using @raynard/plugin-sdk/testing.
-- plugin.json: keep its identity/source metadata and set exactly three samplePrompts.
+- plugin.json: keep its identity/source metadata and set exactly three samplePrompts plus catalogMetadata.
 - README.md with an Endpoint Inventory covering implemented and future endpoints.
 - No index.ts, local runtime/testing/contract plumbing, or UI code.
 
@@ -631,14 +655,47 @@ export function findUsedCredentialKeys(sources) {
   return [...used].sort();
 }
 
+function validateCatalogMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Fresh plugins must set plugin.json.catalogMetadata.');
+  }
+  const category = typeof value.category === 'string' ? value.category.trim() : '';
+  if (!CATALOG_CATEGORIES.has(category)) {
+    throw new Error(
+      `plugin.json.catalogMetadata.category must be one of: ${[...CATALOG_CATEGORIES].join(', ')}.`
+    );
+  }
+  const tags = Array.isArray(value.tags) ? value.tags : [];
+  if (
+    tags.length < 4 ||
+    tags.length > 7 ||
+    tags.some((tag) => typeof tag !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag)) ||
+    new Set(tags).size !== tags.length ||
+    !tags.includes('api')
+  ) {
+    throw new Error(
+      'plugin.json.catalogMetadata.tags must contain 4–7 unique lowercase kebab-case tags and include api.'
+    );
+  }
+  const icon = typeof value.icon === 'string' ? value.icon.trim() : '';
+  if (!CATALOG_ICONS.has(icon)) {
+    throw new Error(
+      'plugin.json.catalogMetadata.icon must be book-open, database, or message-square.'
+    );
+  }
+  return { category, tags: [...tags], icon };
+}
+
 export function validatePluginArtifacts({
   files,
   readme,
   tools,
   samplePrompts,
+  catalogMetadata,
   auth,
   sources,
-  requireSamplePrompts = false
+  requireSamplePrompts = false,
+  requireCatalogMetadata = false
 }) {
   const testFiles = findPluginTestFiles(files);
   if (!testFiles.length) {
@@ -672,6 +729,10 @@ export function validatePluginArtifacts({
       );
     }
   }
+  const validatedCatalogMetadata =
+    requireCatalogMetadata || catalogMetadata !== undefined
+      ? validateCatalogMetadata(catalogMetadata)
+      : null;
   const credentials = normalizePluginAuth(auth ? { auth } : undefined);
   const usedCredentialKeys = findUsedCredentialKeys(sources);
   const undeclared = usedCredentialKeys.filter(
@@ -703,7 +764,13 @@ export function validatePluginArtifacts({
   }
   for (const tool of tools) validateToolCard(tool);
   const cardCount = tools.filter((tool) => tool && tool.card).length;
-  return { testFiles, toolCount: tools.length, cardCount, credentials };
+  return {
+    testFiles,
+    toolCount: tools.length,
+    cardCount,
+    credentials,
+    ...(validatedCatalogMetadata ? { catalogMetadata: validatedCatalogMetadata } : {})
+  };
 }
 
 // --- Workspace containment -------------------------------------------------

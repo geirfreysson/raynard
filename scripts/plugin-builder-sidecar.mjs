@@ -123,13 +123,16 @@ async function validatePluginWorkspace() {
   const files = await readdir(pluginDir);
   const readme = await readFile(`${pluginDir}/README.md`, 'utf8');
   let samplePrompts;
+  let catalogMetadata;
   let auth;
   try {
     const manifest = JSON.parse(await readFile(`${pluginDir}/plugin.json`, 'utf8'));
     samplePrompts = manifest.samplePrompts;
+    catalogMetadata = manifest.catalogMetadata;
     auth = manifest.auth;
   } catch {
     samplePrompts = undefined;
+    catalogMetadata = undefined;
     auth = undefined;
   }
   // Source text so validation can check that every credential the plugin reads
@@ -156,9 +159,11 @@ async function validatePluginWorkspace() {
     readme,
     tools: payload.result?.tools,
     samplePrompts,
+    catalogMetadata,
     auth,
     sources,
-    requireSamplePrompts: true
+    requireSamplePrompts: true,
+    requireCatalogMetadata: true
   });
   emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });
   await runCommand(process.execPath, ['--test', ...validation.testFiles]);

@@ -11,6 +11,10 @@ type ContributionPlugin = {
   directory: string;
 };
 
+type CatalogMetadata = Pick<ExtensionContributionMetadata, 'category' | 'tags' | 'icon'>;
+
+const CATALOG_ICONS = new Set(['book-open', 'database', 'message-square']);
+
 function sourceUrls(manifest: unknown): string[] {
   if (!manifest || typeof manifest !== 'object' || !('sourceUrls' in manifest)) return [];
   const value = (manifest as { sourceUrls?: unknown }).sourceUrls;
@@ -28,14 +32,43 @@ function contributionSlug(plugin: ContributionPlugin) {
     .replace(/^-+|-+$/g, '');
 }
 
+function catalogMetadata(manifest: unknown): CatalogMetadata | null {
+  if (!manifest || typeof manifest !== 'object' || !('catalogMetadata' in manifest)) return null;
+  const value = (manifest as { catalogMetadata?: unknown }).catalogMetadata;
+  if (!value || typeof value !== 'object') return null;
+  const metadata = value as { category?: unknown; tags?: unknown; icon?: unknown };
+  const category = typeof metadata.category === 'string' ? metadata.category.trim() : '';
+  const tags = Array.isArray(metadata.tags)
+    ? metadata.tags.filter((tag): tag is string => typeof tag === 'string')
+    : [];
+  const icon = typeof metadata.icon === 'string' ? metadata.icon.trim() : '';
+  if (
+    !category ||
+    tags.length < 4 ||
+    tags.length > 7 ||
+    new Set(tags).size !== tags.length ||
+    tags.some((tag) => !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag)) ||
+    !tags.includes('api') ||
+    !CATALOG_ICONS.has(icon)
+  ) {
+    return null;
+  }
+  return { category, tags, icon };
+}
+
 export function contributionDefaults(
   plugin: ContributionPlugin,
   manifest: unknown
 ): ExtensionContributionMetadata {
+  const suggested = catalogMetadata(manifest);
   return {
-    category: 'Data',
-    tags: [contributionSlug(plugin), 'api'].filter((tag, index, tags) => tag && tags.indexOf(tag) === index),
-    icon: 'database',
+    category: suggested?.category ?? 'Data',
+    tags:
+      suggested?.tags ??
+      [contributionSlug(plugin), 'api'].filter(
+        (tag, index, tags) => tag && tags.indexOf(tag) === index
+      ),
+    icon: suggested?.icon ?? 'database',
     author: '',
     homepage: sourceUrls(manifest)[0] ?? ''
   };
