@@ -28,6 +28,7 @@ export const NODE_RUNTIMES = Object.freeze({
   'aarch64-apple-darwin': Object.freeze({
     ...NODE_RUNTIME,
     target: 'aarch64-apple-darwin',
+    nativePrebuild: 'darwin_arm64',
     archive: 'node-v22.21.1-darwin-arm64.tar.gz',
     extractedDirectory: 'node-v22.21.1-darwin-arm64',
     executable: 'bin/node',
@@ -37,6 +38,7 @@ export const NODE_RUNTIMES = Object.freeze({
   'x86_64-unknown-linux-gnu': Object.freeze({
     ...NODE_RUNTIME,
     target: 'x86_64-unknown-linux-gnu',
+    nativePrebuild: 'linux_x64',
     archive: 'node-v22.21.1-linux-x64.tar.gz',
     extractedDirectory: 'node-v22.21.1-linux-x64',
     executable: 'bin/node',
@@ -46,6 +48,7 @@ export const NODE_RUNTIMES = Object.freeze({
   'x86_64-pc-windows-msvc': Object.freeze({
     ...NODE_RUNTIME,
     target: 'x86_64-pc-windows-msvc',
+    nativePrebuild: 'win32_x64',
     archive: 'node-v22.21.1-win-x64.zip',
     extractedDirectory: 'node-v22.21.1-win-x64',
     executable: 'node.exe',
@@ -199,6 +202,31 @@ async function ensureExtractedNode(runtime, cacheDir, archivePath) {
   return { extractedDir, nodePath };
 }
 
+/**
+ * Prebuilt native addons for platforms this bundle will never run on.
+ *
+ * `koffi` ships one `.node` per platform — including OpenBSD, whose binary
+ * needs `libc++.so.9.0`. linuxdeploy resolves the dependencies of every ELF it
+ * finds in the AppDir, so that one unreachable library fails the whole AppImage
+ * build. Keeping only the target's copy fixes that and drops the dead weight
+ * from every bundle.
+ */
+export async function pruneForeignNativePrebuilds(runtime, packageDir = runtimePackageDir) {
+  const prebuildRoot = join(packageDir, 'node_modules', 'koffi', 'build', 'koffi');
+  if (!(await pathExists(prebuildRoot))) return [];
+
+  const entries = await readdir(prebuildRoot);
+  // Without the target's own copy this is not the layout we think it is, and
+  // deleting the rest would leave a runtime that cannot load koffi at all.
+  if (!entries.includes(runtime.nativePrebuild)) return [];
+
+  const removed = entries.filter((entry) => entry !== runtime.nativePrebuild);
+  for (const entry of removed) {
+    await rm(join(prebuildRoot, entry), { recursive: true, force: true });
+  }
+  return removed;
+}
+
 async function installRuntimeDependencies(runtime) {
   const lockDigest = await sha256(join(runtimePackageDir, 'package-lock.json'));
   const nodeModules = join(runtimePackageDir, 'node_modules');
@@ -215,6 +243,8 @@ async function installRuntimeDependencies(runtime) {
   if (!(await pathExists(nodeModules))) {
     throw new Error('Standalone runtime dependencies were not installed.');
   }
+  // Before the marker, so a cached tree is always an already-pruned tree.
+  await pruneForeignNativePrebuilds(runtime);
   await writeFile(markerPath, `${runtimeKey}\n`);
   return nodeModules;
 }

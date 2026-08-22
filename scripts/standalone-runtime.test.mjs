@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
@@ -244,4 +245,61 @@ test('the Linux AppImage build runs linuxdeploy without FUSE', async () => {
   // The runner image has no FUSE, so linuxdeploy cannot mount itself and the
   // bundle step fails with a bare "failed to run linuxdeploy".
   expect(workflow).toContain('APPIMAGE_EXTRACT_AND_RUN: 1');
+});
+
+async function fakeKoffiTree(platforms) {
+  const packageDir = await mkdtemp(join(tmpdir(), 'raynard-prebuilds-'));
+  const prebuildRoot = join(packageDir, 'node_modules', 'koffi', 'build', 'koffi');
+  for (const platform of platforms) {
+    await mkdir(join(prebuildRoot, platform), { recursive: true });
+    await writeFile(join(prebuildRoot, platform, 'koffi.node'), 'ELF');
+  }
+  return { packageDir, prebuildRoot };
+}
+
+test('staging keeps only the target platform prebuild, so linuxdeploy can resolve every ELF', async () => {
+  const { pruneForeignNativePrebuilds } = await import('./standalone-runtime.mjs');
+  const { packageDir, prebuildRoot } = await fakeKoffiTree([
+    'linux_x64',
+    'openbsd_x64',
+    'freebsd_x64',
+    'musl_x64',
+    'win32_x64'
+  ]);
+
+  // openbsd_x64 needs libc++.so.9.0, which does not exist on the Linux runner.
+  // linuxdeploy resolves dependencies for every ELF in the AppDir, so shipping
+  // that file failed the whole AppImage build.
+  const removed = await pruneForeignNativePrebuilds(
+    { nativePrebuild: 'linux_x64' },
+    packageDir
+  );
+
+  expect(removed.sort()).toEqual(['freebsd_x64', 'musl_x64', 'openbsd_x64', 'win32_x64']);
+  expect(await readdir(prebuildRoot)).toEqual(['linux_x64']);
+});
+
+test('an unrecognised prebuild layout is left alone rather than emptied', async () => {
+  const { pruneForeignNativePrebuilds } = await import('./standalone-runtime.mjs');
+  const { packageDir, prebuildRoot } = await fakeKoffiTree(['openbsd_x64', 'freebsd_x64']);
+
+  // The target's own copy is missing, so this is not the layout we expect.
+  // Pruning here would leave a runtime that cannot load koffi at all.
+  const removed = await pruneForeignNativePrebuilds(
+    { nativePrebuild: 'linux_x64' },
+    packageDir
+  );
+
+  expect(removed).toEqual([]);
+  expect((await readdir(prebuildRoot)).sort()).toEqual(['freebsd_x64', 'openbsd_x64']);
+});
+
+test('every supported target names the native prebuild it keeps', async () => {
+  const { NODE_RUNTIMES } = await import('./standalone-runtime.mjs');
+
+  expect(Object.values(NODE_RUNTIMES).map((runtime) => runtime.nativePrebuild)).toEqual([
+    'darwin_arm64',
+    'linux_x64',
+    'win32_x64'
+  ]);
 });
