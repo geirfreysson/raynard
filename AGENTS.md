@@ -122,9 +122,10 @@ active chat path.
    `run_plugin_builder_stream` forwards `editMode` and the recent conversation so
    follow-ups have context.
 9. A fresh build is gated on executable mocked tests, `node --test`, runtime tool
-   discovery, at least one exported tool, a README Endpoint Inventory, and
-   exactly three valid splash prompts in `plugin.json.samplePrompts` (validation
-   failure gives one repair pass). An interactive edit turn is not forced
+   discovery, at least one exported tool, a README Endpoint Inventory, exactly
+   three valid splash prompts in `plugin.json.samplePrompts`, and valid
+   `plugin.json.catalogMetadata` contribution suggestions (validation failure
+   gives one repair pass). An interactive edit turn is not forced
    through that gate — the agent makes the smallest change and runs the
    relevant tests via `node --test` when appropriate.
 10. Every generated API tool carries a fixed declarative result-`card` (+
@@ -245,7 +246,8 @@ dev backdoor in `src/share/deep-link.ts` runs the identical import path.
 Generated plugins live in the Tauri app-local-data `generated-plugins`
 directory, not in this repository. A completed current plugin normally contains:
 
-- `plugin.json`: plugin metadata, SDK version, sources, and three sample prompts.
+- `plugin.json`: plugin metadata, SDK version, sources, three sample prompts,
+  and builder-authored catalog contribution suggestions.
 - `tools.ts`: runtime entry and exported `defineTools({...})` registry.
 - Optional `client.ts` and other API-specific supporting modules.
 - `README.md`: tools, source documentation, and Endpoint Inventory.

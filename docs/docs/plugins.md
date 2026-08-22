@@ -95,7 +95,7 @@ A typical completed plugin looks like this:
 
 ```text
 my-api-plugin/
-├── plugin.json             # identity, sources, SDK version, and sample prompts
+├── plugin.json             # identity, sources, prompts, and catalog suggestions
 ├── client.ts               # thin typed API access and response normalization
 ├── tools.ts                # runtime entry: schemas, execution, references, cards
 ├── client.test.ts          # mocked client tests
@@ -134,7 +134,12 @@ pages, routes, CSS, host application edits, or embedded secrets.
     "Which records changed today?",
     "Show the ten highest-value records.",
     "Look up the details for record 42."
-  ]
+  ],
+  "catalogMetadata": {
+    "category": "Reference",
+    "tags": ["records", "search", "reference", "api"],
+    "icon": "database"
+  }
 }
 ```
 
@@ -143,6 +148,11 @@ description broad enough to describe the whole plugin rather than one endpoint.
 `sdkVersion` is mandatory. Plugins without the current SDK version are not
 loaded; there is no old-format manifest or entrypoint fallback. Never put API
 keys or other credentials in the manifest or source files.
+
+The builder also records `catalogMetadata` for instant defaults in **Prepare
+PR**. It chooses one broad category, four to seven lowercase kebab-case tags
+including `api`, and one host-supported icon. These are editable contribution
+suggestions; author and homepage remain user-owned or source-derived fields.
 
 ## Authentication
 
@@ -571,7 +581,8 @@ A fresh plugin is accepted only when it has:
 - at least one exported callable tool;
 - valid descriptions, object parameter schemas, cards, and implementations;
 - a README with an Endpoint Inventory;
-- exactly three valid sample prompts in `plugin.json`.
+- exactly three valid sample prompts in `plugin.json`;
+- valid `plugin.json.catalogMetadata` category, tags, and icon suggestions.
 
 From the Raynard repository, inspect an installed plugin without starting the
 desktop app:

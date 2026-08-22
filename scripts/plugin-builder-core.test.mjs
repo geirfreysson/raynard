@@ -224,7 +224,7 @@ describe('plugin builder core', () => {
     const user = buildUserPrompt({ prompt: 'Build it', pluginDir: '/tmp/p' });
 
     expect(system).toContain('plugin.json.catalogMetadata');
-    expect(system).toMatch(/one category from:/i);
+    expect(system).toMatch(/best-fit category from:/i);
     expect(system).toMatch(/4–7.*lowercase kebab-case tags.*include api/i);
     expect(system).toMatch(/icon.*book-open.*database.*message-square/i);
     expect(system).not.toMatch(/eurostat/i);

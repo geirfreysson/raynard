@@ -5,6 +5,7 @@ import ts from 'typescript';
 const CATALOG_CATEGORIES = new Set([
   'Arts',
   'Business',
+  'Data',
   'Developer Tools',
   'Economics',
   'Education',
@@ -282,7 +283,7 @@ Hard constraints:
   - Do NOT ask the user for the key and do NOT read process.env or a .env file. The host stores it in the OS keychain and supplies it at call time; when it is missing, the host prompts the user for you.
   - Keep tests fully mocked. The builder never has a real key, so tests must never depend on one. Inject a fake at the top of the test file with configureCredentials({ PROVIDER_API_KEY: 'TEST_KEY' }) from @raynard/plugin-sdk, and cover the missing-key path by asserting the tool rejects when no value is configured.
 - Set plugin.json.samplePrompts to exactly three distinct, concise, natural-language questions that demonstrate useful things this plugin's implemented tools can answer. Use concrete inputs when a tool requires them; never use placeholders such as "<id>".
-- Set plugin.json.catalogMetadata to { "category", "tags", "icon" }: choose one category from: ${[...CATALOG_CATEGORIES].join(', ')}; use 4–7 unique lowercase kebab-case tags specific to its subject, provenance, or geography and include api; choose icon book-open, database, or message-square.
+- Set plugin.json.catalogMetadata to { "category", "tags", "icon" }: choose the best-fit category from: ${[...CATALOG_CATEGORIES].join(', ')} (use Data only when none is more specific); use 4–7 unique lowercase kebab-case tags specific to its provider, subject, provenance, or geography and include api; choose icon book-open, database, or message-square.
 
 Canonical shape. The plumbing is already provided, so only the endpoints,
 parameter schemas, response types, and rendering differ between plugins. Write
