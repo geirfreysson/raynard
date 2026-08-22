@@ -60,7 +60,8 @@ scratch.
   the one it used, why it won, and the closest one it rejected — with the
   identifier you need to ask for the other.
 - Charts support a second Y axis, so a rate plotted against an absolute is no
-  longer flattened into the noise, and line charts pick sensible scales.
+  longer flattened into the noise. Line charts pick sensible scales and mark
+  their individual data points.
 
 ## Saved answers and performance
 
