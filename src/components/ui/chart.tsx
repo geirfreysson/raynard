@@ -45,6 +45,7 @@ const MUTED_OPACITY = 0.45;
 const LINE_STROKE_WIDTH = 2;
 const HIGHLIGHTED_LINE_STROKE_WIDTH = 4;
 const SECONDARY_LINE_OPACITY = 0.65;
+const LINE_DOT_RADIUS = 3;
 
 /**
  * Paint for one series: full palette color, or muted when a highlight excludes
@@ -321,7 +322,14 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
                 stroke={paint.color}
                 strokeOpacity={paint.opacity}
                 strokeWidth={paint.width}
-                dot={false}
+                dot={{
+                  r: LINE_DOT_RADIUS,
+                  fill: paint.color,
+                  fillOpacity: paint.opacity,
+                  stroke: paint.color,
+                  strokeOpacity: paint.opacity,
+                  strokeWidth: 1
+                }}
                 connectNulls
                 isAnimationActive={ANIMATE}
               />

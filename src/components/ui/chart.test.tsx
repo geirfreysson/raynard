@@ -112,6 +112,7 @@ describe('ChartBlock', () => {
     const { container, root } = await mount(productivity);
 
     expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(2);
+    expect(container.querySelectorAll('.recharts-line-dot')).toHaveLength(6);
     expect(container.textContent).toContain('GDP per person employed');
     expect(container.innerHTML).toContain('--chart-1');
     expect(container.innerHTML).toContain('--chart-2');
