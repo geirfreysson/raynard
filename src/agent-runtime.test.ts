@@ -159,6 +159,33 @@ describe('applyStreamPayload', () => {
     ]);
   });
 
+  it('forwards a structured scheduled-task request', () => {
+    const requests: unknown[] = [];
+    const request = {
+      name: 'Iceland inflation',
+      prompt: 'Compare Iceland inflation with the OECD.',
+      destinationType: 'newChat' as const,
+      schedule: {
+        frequency: 'quarterly' as const,
+        time: '09:00',
+        timeZone: 'Europe/London',
+        dayOfMonth: 23,
+        monthOfYear: 8
+      }
+    };
+    applyStreamPayload(
+      {
+        stream_id: 'active',
+        event_type: 'scheduled_task_request',
+        scheduled_task_request: request
+      },
+      'active',
+      { streamed: '' },
+      { onScheduledTaskRequest: (value) => requests.push(value) }
+    );
+    expect(requests).toEqual([request]);
+  });
+
   it('forwards complete Pi coding-tool lifecycle events', () => {
     const events: unknown[] = [];
     const handlers = {

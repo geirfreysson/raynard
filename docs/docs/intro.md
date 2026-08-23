@@ -17,6 +17,8 @@ before entering **Build** mode.
 - Live answers grounded in data from connected services.
 - Source links and clear result cards that make answers easy to check.
 - Extensions that Raynard can create or improve after you approve the work.
+- Recurring Explore tasks with results collected in a dedicated or existing
+  chat.
 - Saved chat history, with multiple conversations able to work at once.
 - A visible Explore and Build flow that keeps extension changes under your
   control.
@@ -25,7 +27,8 @@ before entering **Build** mode.
 
 1. Follow [Getting started](./getting-started.md) to run the desktop app.
 2. Learn how [chat, sharing, and models](./chat-and-models.md) work.
-3. Read the technical explanation of how Raynard is
+3. Learn how to create and manage [scheduled tasks](./scheduled-tasks.md).
+4. Read the technical explanation of how Raynard is
    [powered by two Pi agent loops](./powered-by-pi.md).
-4. Use the technical guide to [creating generated plugins](./plugins.md).
-5. Use the [development guide](./development.md) when changing the app.
+5. Use the technical guide to [creating generated plugins](./plugins.md).
+6. Use the [development guide](./development.md) when changing the app.

@@ -80,6 +80,7 @@ const config = {
               {label: 'Overview', to: '/docs/intro'},
               {label: 'Getting started', to: '/docs/getting-started'},
               {label: 'Chat and models', to: '/docs/chat-and-models'},
+              {label: 'Scheduled tasks', to: '/docs/scheduled-tasks'},
             ],
           },
           {

@@ -8,6 +8,7 @@ import {
   createAvailableExtensionSearchTool,
   defaultThinkingLevel,
   createBuildRequestTool,
+  createScheduledTaskTool,
   createDirectAnswerTool,
   createExtensionRecommendationTool,
   createGeneratedPluginTools,
@@ -204,6 +205,7 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
 let buildRequest = null;
 let directAnswer = null;
 let extensionRecommendation = null;
+let scheduledTaskRequest = null;
 const buildRequestTool = createBuildRequestTool(
   Type,
   (nextRequest) => {
@@ -227,11 +229,28 @@ const extensionRecommendationTool = createExtensionRecommendationTool(
     emit({ type: 'extension_recommendation', result: recommendation });
   }
 );
+const scheduledTaskTool = request.scheduledExecution
+  ? null
+  : createScheduledTaskTool(
+      Type,
+      (nextRequest) => {
+        scheduledTaskRequest = nextRequest;
+        emit({ type: 'scheduled_task_request', scheduledTaskRequest: nextRequest });
+      },
+      {
+        context: {
+          ...(request.schedulerContext || {}),
+          chats: request.chats,
+          currentChatId: request.currentChatId
+        }
+      }
+    );
 const tools = [
   ...generatedTools,
   availableExtensionSearchTool,
   extensionRecommendationTool,
   buildRequestTool,
+  ...(scheduledTaskTool ? [scheduledTaskTool] : []),
   directAnswerTool
 ];
 const internalToolNames = new Set([
@@ -249,7 +268,13 @@ const agent = new Agent({
     systemPrompt: buildMainAgentSystemPrompt({
       mode: request.mode === 'build' ? 'build' : 'explore',
       toolNames: generatedTools.map((tool) => tool.name),
-      plugins: installedPlugins
+      plugins: installedPlugins,
+      scheduling: {
+        enabled: !request.scheduledExecution,
+        ...(request.schedulerContext || {}),
+        chats: request.chats,
+        currentChatId: request.currentChatId
+      }
     }),
     model: agentModel,
     thinkingLevel: defaultThinkingLevel('explore'),
@@ -402,7 +427,7 @@ try {
   // answer a question the host has already replaced with something else. The
   // host hands the undelivered text back to the composer instead.
   const endsInACard = Boolean(
-    buildRequest || credentialRequest || directAnswer || extensionRecommendation
+    buildRequest || scheduledTaskRequest || credentialRequest || directAnswer || extensionRecommendation
   );
   // Otherwise a message queued between the loop's last steering poll and
   // agent_end would die with the process. continue() drains both queues itself
@@ -425,6 +450,7 @@ try {
   if (
     !directAnswer &&
     !buildRequest &&
+    !scheduledTaskRequest &&
     !credentialRequest &&
     !extensionRecommendation &&
     (failed || !lastMessageHadText)
@@ -457,6 +483,7 @@ try {
     type: 'done',
     text: directAnswer || extensionRecommendation?.answer || finalText,
     buildRequest,
+    scheduledTaskRequest,
     result: extensionRecommendation || credentialRequest || undefined,
     stopReason: lastStopReason,
     usage: usageTotal.value()

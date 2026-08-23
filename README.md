@@ -12,6 +12,8 @@ Barebones Tauri v2 desktop chat app inspired by the first Raynard screen and the
 - Falls back to a deterministic hello-world response if no model key is configured.
 - Reads `.env` from the Tauri backend without exposing secret values in the UI.
 - Supports `/models` to connect or switch providers.
+- Supports editable daily, weekly, monthly, quarterly, and yearly Explore tasks
+  whose results are saved to dedicated or existing chats.
 
 ## Run
 

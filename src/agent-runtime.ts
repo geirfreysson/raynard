@@ -38,6 +38,7 @@ export type AgentReply = {
   provider?: string;
   model?: string;
   buildRequest?: AgentBuildRequest;
+  scheduledTaskRequest?: ScheduledTaskRequest;
   extensionRecommendation?: ExtensionRecommendation;
   usage?: TurnUsage;
 };
@@ -54,6 +55,7 @@ export type StreamPayload = {
     | 'tool_execution_update'
     | 'tool_execution_end'
     | 'build_request'
+    | 'scheduled_task_request'
     | 'credential_request'
     | 'extension_recommendation'
     | 'steering_applied'
@@ -81,6 +83,7 @@ export type StreamPayload = {
   result?: unknown;
   is_error?: boolean | null;
   build_request?: AgentBuildRequest | null;
+  scheduled_task_request?: ScheduledTaskRequest | null;
   /** Present on `done`; the turn's summed token counts. */
   usage?: TurnUsage | null;
 };
@@ -94,6 +97,23 @@ export type AgentBuildRequest = {
   auth?: BuildRequestAuth;
   taskKind?: 'card-edit' | 'plugin-edit' | 'plugin-create';
   targetTools?: string[];
+};
+
+export type ScheduledTaskFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';
+
+export type ScheduledTaskRequest = {
+  name: string;
+  prompt: string;
+  destinationType: 'existingChat' | 'newChat';
+  destinationChatId?: string;
+  schedule: {
+    frequency: ScheduledTaskFrequency;
+    time: string;
+    timeZone: string;
+    dayOfWeek?: number;
+    dayOfMonth?: number;
+    monthOfYear?: number;
+  };
 };
 
 export type AgentToolEvent = {
@@ -155,6 +175,7 @@ export type AgentStreamHandlers = {
   onToolExecutionUpdate?: (event: AgentToolExecutionUpdateEvent) => void;
   onToolExecutionEnd?: (event: AgentToolExecutionEndEvent) => void;
   onBuildRequest?: (request: AgentBuildRequest) => void;
+  onScheduledTaskRequest?: (request: ScheduledTaskRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
   onExtensionRecommendation?: (recommendation: ExtensionRecommendation) => void;
   /**
@@ -192,7 +213,8 @@ export async function runMainAgentStream(
   messages: ChatMessage[],
   mode: 'explore' | 'build',
   handlers: AgentStreamHandlers = {},
-  chatId?: string
+  chatId?: string,
+  scheduledExecution = false
 ): Promise<AgentReply> {
   const streamId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -204,6 +226,7 @@ export async function runMainAgentStream(
   let provider: string | undefined;
   let model: string | undefined;
   let buildRequest: AgentBuildRequest | undefined;
+  let scheduledTaskRequest: ScheduledTaskRequest | undefined;
 
   const onEvent = new Channel<StreamPayload>((payload) => {
     const nextState = applyStreamPayload(payload, streamId, { streamed, provider, model }, handlers);
@@ -213,6 +236,13 @@ export async function runMainAgentStream(
     if (payload.stream_id === streamId && payload.event_type === 'build_request' && payload.build_request) {
       buildRequest = payload.build_request;
     }
+    if (
+      payload.stream_id === streamId &&
+      payload.event_type === 'scheduled_task_request' &&
+      payload.scheduled_task_request
+    ) {
+      scheduledTaskRequest = payload.scheduled_task_request;
+    }
   });
 
   const reply = await invoke<AgentReply & { result?: unknown }>('run_main_agent_stream', {
@@ -220,7 +250,12 @@ export async function runMainAgentStream(
     onEvent,
     messages,
     mode,
-    chatId
+    chatId,
+    scheduledExecution,
+    schedulerContext: {
+      localDateTime: new Date().toISOString(),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    }
   });
 
   return {
@@ -228,6 +263,7 @@ export async function runMainAgentStream(
     provider: reply.provider ?? provider,
     model: reply.model ?? model,
     buildRequest: reply.buildRequest ?? buildRequest,
+    scheduledTaskRequest: reply.scheduledTaskRequest ?? scheduledTaskRequest,
     extensionRecommendation: decodeExtensionRecommendation(reply.result) ?? undefined,
     usage: reply.usage
   };
@@ -359,6 +395,9 @@ export function applyStreamPayload(
   }
   if (payload.event_type === 'build_request' && payload.build_request) {
     handlers.onBuildRequest?.(payload.build_request);
+  }
+  if (payload.event_type === 'scheduled_task_request' && payload.scheduled_task_request) {
+    handlers.onScheduledTaskRequest?.(payload.scheduled_task_request);
   }
   if (payload.event_type === 'status') {
     const status = payload.text?.trim() || '';
