@@ -9,6 +9,8 @@ import {
   MessageSquare,
   PackageMinus,
   PanelLeftClose,
+  Pause,
+  Play,
   Plug,
   Plus,
   Share2,
@@ -23,6 +25,15 @@ import {
   promptForAssistant
 } from './bookmarks';
 import { getErrorMessage } from './errors';
+import {
+  calendarFieldsFor,
+  relativeRunLabel,
+  runStatusLabel,
+  scheduleSentence,
+  scheduleShorthand,
+  taskStatus,
+  type RunTone
+} from './scheduled-task-view';
 import { createCoalescedSaveQueue } from './chat-persistence';
 import type { ExtensionRecommendation } from './extension-recommendation';
 import {
@@ -469,6 +480,8 @@ const appIcons: Record<string, IconNode> = {
   'package-minus': PackageMinus,
   plus: Plus,
   'panel-left-close': PanelLeftClose,
+  pause: Pause,
+  play: Play,
   plug: Plug,
   'share-2': Share2,
   'trash-2': Trash2
@@ -771,6 +784,7 @@ let bookmarkTotal = 0;
 let bookmarkLoading = false;
 let bookmarkRefreshQueued = false;
 let scheduledTasks: ScheduledTask[] = [];
+let activeScheduledTaskId: string | null = null;
 let scheduledTaskRunnerActive = false;
 const scheduledTaskQueue: Array<{ taskId: string; manual: boolean }> = [];
 let activeBookmarks = new Map<string, StoredBookmark>();
@@ -3377,26 +3391,36 @@ async function refreshScheduledTasks() {
   }
 }
 
-function scheduleSummary(task: Pick<ScheduledTask, 'schedule' | 'enabled' | 'activeExecutionId'>) {
-  if (task.activeExecutionId) return 'Running now';
-  const label = task.schedule.frequency[0].toUpperCase() + task.schedule.frequency.slice(1);
-  return `${task.enabled ? label : 'Paused'} · ${task.schedule.time}`;
-}
-
 function renderScheduledTasks() {
   if (!scheduledTaskList) return;
   scheduledTaskList.replaceChildren();
+  const now = Date.now();
   for (const task of scheduledTasks) {
+    const status = taskStatus(task);
     const row = document.createElement('button');
     row.type = 'button';
-    row.className = `scheduled-task-row${task.enabled ? '' : ' is-paused'}`;
+    row.className = 'scheduled-task-row';
+    row.classList.toggle('is-paused', !task.enabled && !task.activeExecutionId);
+    row.classList.toggle('is-active', task.id === activeScheduledTaskId);
+    const top = document.createElement('span');
+    top.className = 'scheduled-task-row-top';
+    const dot = document.createElement('span');
+    dot.className = 'scheduled-task-dot';
+    dot.dataset.tone = status.tone;
     const title = document.createElement('strong');
     title.textContent = task.name;
+    top.append(dot, title);
     const schedule = document.createElement('span');
-    schedule.textContent = scheduleSummary(task);
+    schedule.className = 'scheduled-task-row-meta';
+    schedule.textContent = scheduleShorthand(task.schedule);
     const next = document.createElement('span');
-    next.textContent = task.enabled ? `Next ${formatChatDate(task.nextRunAt)}` : 'Not scheduled';
-    row.append(title, schedule, next);
+    next.className = 'scheduled-task-row-next';
+    next.textContent = task.activeExecutionId
+      ? 'Running now'
+      : task.enabled
+        ? `Next ${relativeRunLabel(task.nextRunAt, now)}`
+        : 'Paused';
+    row.append(top, schedule, next);
     row.addEventListener('click', () => openScheduledTask(task));
     scheduledTaskList.appendChild(row);
   }
@@ -3406,6 +3430,7 @@ function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest
   const data = new FormData(form);
   const frequency = String(data.get('frequency')) as ScheduledTaskRequest['schedule']['frequency'];
   const destination = String(data.get('destination'));
+  const fields = calendarFieldsFor(frequency);
   return {
     name: String(data.get('name') || '').trim(),
     prompt: String(data.get('prompt') || '').trim(),
@@ -3420,55 +3445,127 @@ function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest
       frequency,
       time: String(data.get('time') || ''),
       timeZone: fallback.schedule.timeZone,
-      dayOfWeek: frequency === 'weekly' ? Number(data.get('dayOfWeek')) : undefined,
-      dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
-        ? Number(data.get('dayOfMonth'))
-        : undefined,
-      monthOfYear: ['quarterly', 'yearly'].includes(frequency)
-        ? Number(data.get('monthOfYear'))
-        : undefined
+      dayOfWeek: fields.weekday ? Number(data.get('dayOfWeek')) : undefined,
+      dayOfMonth: fields.day ? Number(data.get('dayOfMonth')) : undefined,
+      monthOfYear: fields.month ? Number(data.get('monthOfYear')) : undefined
     }
   };
 }
 
+const TASK_FREQUENCIES: Array<{ value: ScheduledTaskRequest['schedule']['frequency']; label: string }> = [
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'yearly', label: 'Yearly' }
+];
+
+const TASK_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December'
+];
+
 function renderTaskEditor(
   root: HTMLElement,
   draft: ScheduledTaskRequest,
-  options: { submitLabel: string; onSubmit: (draft: ScheduledTaskRequest, status: HTMLElement) => Promise<void> }
+  options: {
+    submitLabel: string;
+    variant?: 'page' | 'panel';
+    onSubmit: (draft: ScheduledTaskRequest, status: HTMLElement) => Promise<void>;
+  }
 ) {
+  const variant = options.variant ?? 'panel';
   root.replaceChildren();
   const form = document.createElement('form');
-  form.className = 'scheduled-task-editor';
+  form.className = `task-editor task-editor--${variant}`;
   form.innerHTML = `
-    <label><span>Name</span><input name="name" required maxlength="120"></label>
-    <label><span>Prompt</span><textarea name="prompt" required rows="4"></textarea></label>
-    <label><span>Destination</span><select name="destination"></select></label>
-    <div class="scheduled-task-schedule-grid">
-      <label><span>Repeats</span><select name="frequency">
-        <option value="daily">Daily</option><option value="weekly">Weekly</option>
-        <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option>
-        <option value="yearly">Yearly</option>
-      </select></label>
-      <label><span>Time</span><input name="time" type="time" required></label>
-      <label data-calendar-field="weekday"><span>Weekday</span><select name="dayOfWeek">
-        <option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option>
-        <option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="7">Sunday</option>
-      </select></label>
-      <label data-calendar-field="day"><span>Day</span><input name="dayOfMonth" type="number" min="1" max="31"></label>
-      <label data-calendar-field="month"><span>Anchor month</span><input name="monthOfYear" type="number" min="1" max="12"></label>
-    </div>
-    <p class="scheduled-task-timezone"></p>
-    <p class="scheduled-task-form-status" aria-live="polite"></p>
-    <div class="scheduled-task-actions"><button type="submit" class="capability-primary-action"></button></div>
+    <section class="task-editor-section">
+      <h2 class="task-editor-heading">Task</h2>
+      <label class="task-field">
+        <span class="task-field-label">Name</span>
+        <input name="name" required maxlength="120" placeholder="Daily briefing">
+      </label>
+      <label class="task-field">
+        <span class="task-field-label">Prompt</span>
+        <textarea name="prompt" required rows="4" placeholder="Describe exactly what to do on each run."></textarea>
+        <span class="task-field-hint">Every run starts fresh, so the prompt has to stand on its own.</span>
+      </label>
+    </section>
+
+    <section class="task-editor-section">
+      <h2 class="task-editor-heading">Schedule</h2>
+      <div class="task-segmented" role="radiogroup" aria-label="Repeats">
+        ${TASK_FREQUENCIES.map(
+          (entry) =>
+            `<button type="button" role="radio" aria-checked="false" data-frequency="${entry.value}">${entry.label}</button>`
+        ).join('')}
+      </div>
+      <input type="hidden" name="frequency" value="daily">
+      <div class="task-schedule-grid">
+        <label class="task-field">
+          <span class="task-field-label">Time</span>
+          <input name="time" type="time" required>
+        </label>
+        <label class="task-field" data-calendar-field="weekday">
+          <span class="task-field-label">Weekday</span>
+          <select name="dayOfWeek">
+            <option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option>
+            <option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+            <option value="7">Sunday</option>
+          </select>
+        </label>
+        <label class="task-field" data-calendar-field="day">
+          <span class="task-field-label">Day of month</span>
+          <input name="dayOfMonth" type="number" min="1" max="31">
+        </label>
+        <label class="task-field" data-calendar-field="month">
+          <span class="task-field-label">Anchor month</span>
+          <select name="monthOfYear">
+            ${TASK_MONTHS.map((month, index) => `<option value="${index + 1}">${month}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <p class="task-schedule-summary">
+        <span class="task-schedule-summary-icon" aria-hidden="true">${iconSvg('stopwatch')}</span>
+        <span class="task-schedule-summary-text"></span>
+      </p>
+    </section>
+
+    <section class="task-editor-section">
+      <h2 class="task-editor-heading">Destination</h2>
+      <label class="task-field">
+        <span class="task-field-label">Post results to</span>
+        <select name="destination"></select>
+        <span class="task-field-hint">A dedicated chat is created on the first run and reused after that.</span>
+      </label>
+    </section>
+
+    <footer class="task-editor-footer">
+      <p class="task-form-status" aria-live="polite"></p>
+      <div class="task-editor-buttons">
+        <button type="button" class="task-editor-discard is-hidden">Discard</button>
+        <button type="submit" class="capability-primary-action task-editor-save"></button>
+      </div>
+    </footer>
   `;
   const name = form.elements.namedItem('name') as HTMLInputElement;
   const prompt = form.elements.namedItem('prompt') as HTMLTextAreaElement;
   const destination = form.elements.namedItem('destination') as HTMLSelectElement;
-  const frequency = form.elements.namedItem('frequency') as HTMLSelectElement;
+  const frequency = form.elements.namedItem('frequency') as HTMLInputElement;
   const time = form.elements.namedItem('time') as HTMLInputElement;
   const weekday = form.elements.namedItem('dayOfWeek') as HTMLSelectElement;
   const day = form.elements.namedItem('dayOfMonth') as HTMLInputElement;
-  const month = form.elements.namedItem('monthOfYear') as HTMLInputElement;
+  const month = form.elements.namedItem('monthOfYear') as HTMLSelectElement;
   name.value = draft.name;
   prompt.value = draft.prompt;
   destination.add(new Option('Dedicated task chat', 'newChat'));
@@ -3492,102 +3589,244 @@ function renderTaskEditor(
   weekday.value = String(draft.schedule.dayOfWeek || 1);
   day.value = String(draft.schedule.dayOfMonth || 1);
   month.value = String(draft.schedule.monthOfYear || 1);
-  const timezone = form.querySelector<HTMLElement>('.scheduled-task-timezone');
-  if (timezone) timezone.textContent = `Timezone: ${draft.schedule.timeZone}`;
+
+  const save = form.querySelector<HTMLButtonElement>('.task-editor-save');
+  const discard = form.querySelector<HTMLButtonElement>('.task-editor-discard');
+  const status = form.querySelector<HTMLElement>('.task-form-status');
+  const summary = form.querySelector<HTMLElement>('.task-schedule-summary-text');
+  if (save) save.textContent = options.submitLabel;
+
   const syncFields = () => {
-    const value = frequency.value;
-    form.querySelector<HTMLElement>('[data-calendar-field="weekday"]')?.classList.toggle('is-hidden', value !== 'weekly');
-    form.querySelector<HTMLElement>('[data-calendar-field="day"]')?.classList.toggle('is-hidden', !['monthly', 'quarterly', 'yearly'].includes(value));
-    form.querySelector<HTMLElement>('[data-calendar-field="month"]')?.classList.toggle('is-hidden', !['quarterly', 'yearly'].includes(value));
+    const fields = calendarFieldsFor(frequency.value);
+    for (const button of form.querySelectorAll<HTMLButtonElement>('.task-segmented button')) {
+      const selected = button.dataset.frequency === frequency.value;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-checked', String(selected));
+    }
+    form
+      .querySelector<HTMLElement>('[data-calendar-field="weekday"]')
+      ?.classList.toggle('is-hidden', !fields.weekday);
+    form.querySelector<HTMLElement>('[data-calendar-field="day"]')?.classList.toggle('is-hidden', !fields.day);
+    form
+      .querySelector<HTMLElement>('[data-calendar-field="month"]')
+      ?.classList.toggle('is-hidden', !fields.month);
+    if (summary) {
+      const current = taskDraftFromForm(form, draft).schedule;
+      summary.textContent = `${scheduleSentence(current)} · ${current.timeZone}`;
+    }
   };
-  frequency.addEventListener('change', syncFields);
+
+  // The page editor only offers a save once something actually changed, so the
+  // detail screen does not look like an unsaved form on every visit.
+  const baseline = () => JSON.stringify(taskDraftFromForm(form, draft));
+  let saved = baseline();
+  const syncDirty = () => {
+    if (variant !== 'page' || !save) return;
+    const dirty = baseline() !== saved;
+    save.disabled = !dirty;
+    discard?.classList.toggle('is-hidden', !dirty);
+    if (status) status.textContent = dirty ? 'Unsaved changes' : '';
+  };
+
+  for (const button of form.querySelectorAll<HTMLButtonElement>('.task-segmented button')) {
+    button.addEventListener('click', () => {
+      frequency.value = button.dataset.frequency || 'daily';
+      syncFields();
+      syncDirty();
+    });
+  }
+  form.addEventListener('input', () => {
+    syncFields();
+    syncDirty();
+  });
+  form.addEventListener('change', () => {
+    syncFields();
+    syncDirty();
+  });
+  discard?.addEventListener('click', () => {
+    renderTaskEditor(root, draft, options);
+  });
   syncFields();
-  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
-  if (submit) submit.textContent = options.submitLabel;
+  syncDirty();
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const status = form.querySelector<HTMLElement>('.scheduled-task-form-status');
-    if (!status || !submit) return;
-    submit.disabled = true;
+    if (!status || !save) return;
+    save.disabled = true;
     status.textContent = 'Saving…';
     try {
       await options.onSubmit(taskDraftFromForm(form, draft), status);
+      saved = baseline();
+      syncDirty();
     } catch (error) {
       status.textContent = getErrorMessage(error, 'Could not save the task.');
-      submit.disabled = false;
+      save.disabled = false;
     }
   });
   root.appendChild(form);
 }
 
+function taskStatTile(label: string, value: string, note?: { text: string; tone?: RunTone }) {
+  const tile = document.createElement('div');
+  tile.className = 'task-stat';
+  const caption = document.createElement('span');
+  caption.className = 'task-stat-label';
+  caption.textContent = label;
+  const strong = document.createElement('strong');
+  strong.className = 'task-stat-value';
+  strong.textContent = value;
+  tile.append(caption, strong);
+  if (note) {
+    const hint = document.createElement('span');
+    hint.className = 'task-stat-note';
+    if (note.tone) hint.dataset.tone = note.tone;
+    hint.textContent = note.text;
+    tile.appendChild(hint);
+  }
+  return tile;
+}
+
 function openScheduledTask(task: ScheduledTask) {
   if (!pluginDetailView || !messages) return;
   mainViewRevision += 1;
+  activeScheduledTaskId = task.id;
+  renderScheduledTasks();
   pluginDetailView.replaceChildren();
+  const status = taskStatus(task);
+  const now = Date.now();
+
   const header = document.createElement('header');
-  header.className = 'plugin-detail-header';
-  const heading = document.createElement('h1');
-  heading.textContent = task.name;
-  const meta = document.createElement('p');
-  meta.textContent = `${scheduleSummary(task)} · Next ${formatChatDate(task.nextRunAt)}`;
-  header.append(heading, meta);
+  header.className = 'plugin-detail-header task-detail-header';
+  header.innerHTML = `
+    <div class="plugin-detail-title">
+      <span class="plugin-detail-kicker">Scheduled task</span>
+      <h1>${escapeHtml(task.name)}</h1>
+      <p class="task-status-line">
+        <span class="task-status-pill" data-tone="${status.tone}">${escapeHtml(status.label)}</span>
+        <span>${escapeHtml(scheduleSentence(task.schedule))}</span>
+        <span class="task-status-zone">${escapeHtml(task.schedule.timeZone)}</span>
+      </p>
+    </div>
+    <div class="plugin-detail-actions task-detail-header-actions">
+      <button class="task-run-now" type="button">${iconSvg('play')}<span>Run now</span></button>
+      <button class="plugin-detail-menu-toggle" type="button" aria-label="Task options" aria-haspopup="menu" aria-expanded="false">
+        ${iconSvg('ellipsis')}
+      </button>
+      <div class="plugin-detail-menu is-hidden" role="menu">
+        <button type="button" role="menuitem" data-task-action="toggle">
+          ${iconSvg(task.enabled ? 'pause' : 'play')}
+          <span>${task.enabled ? 'Pause task' : 'Resume task'}</span>
+        </button>
+        ${task.destinationChatId
+          ? `<button type="button" role="menuitem" data-task-action="open-chat">
+              ${iconSvg('message-square')}
+              <span>Open chat</span>
+            </button>`
+          : ''}
+        <button type="button" role="menuitem" class="is-danger" data-task-action="delete">
+          ${iconSvg('trash-2')}
+          <span>Delete task</span>
+        </button>
+      </div>
+    </div>
+  `;
+  const menuToggle = header.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
+  const menu = header.querySelector<HTMLElement>('.plugin-detail-menu');
+  menuToggle?.addEventListener('click', () => {
+    const opening = menu?.classList.contains('is-hidden') ?? false;
+    menu?.classList.toggle('is-hidden', !opening);
+    menuToggle.setAttribute('aria-expanded', String(opening));
+  });
+  const runNow = header.querySelector<HTMLButtonElement>('.task-run-now');
+  if (runNow) {
+    runNow.disabled = Boolean(task.activeExecutionId);
+    runNow.addEventListener('click', () => {
+      runNow.disabled = true;
+      const label = runNow.querySelector('span');
+      if (label) label.textContent = 'Queued';
+      queueScheduledTask(task.id, true);
+    });
+  }
+  header
+    .querySelector<HTMLButtonElement>('[data-task-action="toggle"]')
+    ?.addEventListener('click', async () => {
+      closePluginDetailMenu();
+      const updated = await invoke<ScheduledTask>('set_scheduled_task_enabled', {
+        taskId: task.id,
+        enabled: !task.enabled
+      });
+      await refreshScheduledTasks();
+      openScheduledTask(updated);
+    });
+  header
+    .querySelector<HTMLButtonElement>('[data-task-action="open-chat"]')
+    ?.addEventListener('click', () => {
+      closePluginDetailMenu();
+      if (task.destinationChatId) void openSavedChat(task.destinationChatId);
+    });
+  header
+    .querySelector<HTMLButtonElement>('[data-task-action="delete"]')
+    ?.addEventListener('click', async () => {
+      closePluginDetailMenu();
+      if (task.activeExecutionId) return;
+      await invoke('delete_scheduled_task', { taskId: task.id });
+      activeScheduledTaskId = null;
+      await refreshScheduledTasks();
+      showConversation();
+    });
   pluginDetailView.appendChild(header);
+
+  const stats = document.createElement('section');
+  stats.className = 'task-stat-row';
+  stats.appendChild(
+    taskStatTile(
+      'Next run',
+      task.activeExecutionId ? 'Running now' : task.enabled ? formatChatDate(task.nextRunAt) : 'Not scheduled',
+      task.enabled && !task.activeExecutionId
+        ? { text: relativeRunLabel(task.nextRunAt, now) }
+        : { text: task.activeExecutionId ? 'Started just now' : 'Resume to schedule the next run' }
+    )
+  );
+  const lastRun = runStatusLabel(task.lastStatus);
+  stats.appendChild(
+    taskStatTile(
+      'Last run',
+      task.lastRunAt ? formatChatDate(task.lastRunAt) : 'Never run',
+      task.lastRunAt
+        ? { text: task.lastError ? `${lastRun.label} · ${task.lastError}` : lastRun.label, tone: lastRun.tone }
+        : { text: 'This task has not run yet' }
+    )
+  );
+  const destinationChat = task.destinationChatId
+    ? chatHistoryRows.find((chat) => chat.chatId === task.destinationChatId)
+    : undefined;
+  stats.appendChild(
+    taskStatTile(
+      'Destination',
+      task.destinationType === 'newChat' ? 'Dedicated task chat' : destinationChat?.name || 'Selected chat',
+      {
+        text: task.destinationChatId
+          ? 'Results append to that chat'
+          : 'A chat is created on the first run'
+      }
+    )
+  );
+  pluginDetailView.appendChild(stats);
+
   const editor = document.createElement('section');
   editor.className = 'plugin-detail-section';
   pluginDetailView.appendChild(editor);
   renderTaskEditor(editor, task, {
     submitLabel: 'Save changes',
-    onSubmit: async (draft, status) => {
+    variant: 'page',
+    onSubmit: async (draft, formStatus) => {
       const updated = await invoke<ScheduledTask>('update_scheduled_task', { taskId: task.id, draft });
-      status.textContent = 'Saved.';
+      formStatus.textContent = 'Saved.';
       await refreshScheduledTasks();
       openScheduledTask(updated);
     }
   });
-  const actions = document.createElement('div');
-  actions.className = 'scheduled-task-actions scheduled-task-detail-actions';
-  const pause = document.createElement('button');
-  pause.type = 'button';
-  pause.textContent = task.enabled ? 'Pause' : 'Resume';
-  pause.addEventListener('click', async () => {
-    const updated = await invoke<ScheduledTask>('set_scheduled_task_enabled', { taskId: task.id, enabled: !task.enabled });
-    await refreshScheduledTasks();
-    openScheduledTask(updated);
-  });
-  const run = document.createElement('button');
-  run.type = 'button';
-  run.textContent = 'Run now';
-  run.disabled = Boolean(task.activeExecutionId);
-  run.addEventListener('click', () => {
-    run.disabled = true;
-    run.textContent = 'Queued';
-    queueScheduledTask(task.id, true);
-  });
-  const remove = document.createElement('button');
-  remove.type = 'button';
-  remove.textContent = 'Delete';
-  remove.className = 'scheduled-task-delete';
-  remove.disabled = Boolean(task.activeExecutionId);
-  remove.addEventListener('click', async () => {
-    await invoke('delete_scheduled_task', { taskId: task.id });
-    await refreshScheduledTasks();
-    showConversation();
-  });
-  actions.append(pause, run, remove);
-  if (task.destinationChatId) {
-    const openChat = document.createElement('button');
-    openChat.type = 'button';
-    openChat.textContent = 'Open destination chat';
-    openChat.addEventListener('click', () => void openSavedChat(task.destinationChatId!));
-    actions.prepend(openChat);
-  }
-  pluginDetailView.appendChild(actions);
-  if (task.lastRunAt) {
-    const last = document.createElement('p');
-    last.className = 'plugin-detail-hint';
-    last.textContent = `Last run: ${formatChatDate(task.lastRunAt)} · ${task.lastStatus || 'unknown'}${task.lastError ? ` · ${task.lastError}` : ''}`;
-    pluginDetailView.appendChild(last);
-  }
+
   shell?.classList.add('plugin-view');
   shell?.classList.remove('pre-chat');
   pluginDetailView.classList.remove('is-hidden');
@@ -3595,6 +3834,7 @@ function openScheduledTask(task: ScheduledTask) {
   chatForm?.classList.add('is-hidden');
   document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
 }
+
 
 async function enqueueDueScheduledTasks() {
   if (!llmEnvStatus?.configured) return;
@@ -4307,7 +4547,7 @@ function renderScheduledTaskConfirmation(body: HTMLElement, record: StoredChatMe
     body.textContent = record.text;
     await persistActiveChatHistory();
   });
-  panel.querySelector('.scheduled-task-actions')?.appendChild(dismiss);
+  panel.querySelector('.task-editor-buttons')?.prepend(dismiss);
 }
 
 function syncMessageActions(article: HTMLElement, message: StoredChatMessage) {
@@ -6340,6 +6580,10 @@ function showConversation() {
   mainViewRevision += 1;
   shell?.classList.remove('pre-chat');
   shell?.classList.remove('plugin-view');
+  if (activeScheduledTaskId) {
+    activeScheduledTaskId = null;
+    renderScheduledTasks();
+  }
   selectedPluginId = '';
   selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();

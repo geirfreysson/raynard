@@ -20,6 +20,7 @@ generated API plugins.
   claiming, calendar/time-zone calculation, completion, and interrupted-run
   recovery.
 - `src/errors.ts`: shared error formatting helpers.
+- `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
 - `src/result-card/template-fields.ts`: the single walker over the `CardBlock` union; drives both example data and share-link projection.
@@ -86,6 +87,17 @@ generated API plugins.
   either a dedicated task chat or an existing chat and can be edited, paused,
   resumed, run immediately, or deleted from its detail screen. Run now does not
   move the recurring schedule.
+- A task detail screen leads with the task's status pill, plain-English
+  schedule sentence, and time zone, followed by Next run / Last run /
+  Destination tiles. Run now is the only header button; pause, resume, open
+  chat, and delete live in the `⋯` menu, which reuses the plugin detail menu so
+  Escape and outside clicks already close it. The editor below is grouped into
+  Task, Schedule, and Destination, picks a frequency with a segmented control,
+  shows only the calendar fields that frequency validates, and restates the
+  result as a sentence. Its save bar stays disabled until something actually
+  changes, and then offers Discard next to it. `src/scheduled-task-view.ts`
+  holds the pure wording/status helpers behind all of that. The in-chat
+  creation confirmation renders the same editor without the dirty-state bar.
 - The composer stays live while an Explore turn is working. Enter queues what
   you type as a **steering** message the agent picks up at its next tool-round
   boundary; Alt+Enter queues a **follow-up** that waits until the agent would
