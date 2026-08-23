@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+`CLAUDE.md` is a symlink to this file: both names resolve to the same bytes on
+disk, and there is nothing to keep in sync. Edit `AGENTS.md`. Applying the same
+change to both paths inserts it twice — a script that reads, edits, and writes
+each name in turn will silently duplicate whatever it added, and a `diff` of the
+two paths cannot catch it because it always reports them identical. Check with
+`ls -la CLAUDE.md` if in doubt.
+
 ## Project Structure & Module Organization
 
 This repository is a Tauri v2 desktop chat app with two Pi agent runtimes and
