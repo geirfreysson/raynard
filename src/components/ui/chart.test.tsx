@@ -90,6 +90,21 @@ function curveYSpread(curve: Element): number {
   return yCoordinates.length ? Math.max(...yCoordinates) - Math.min(...yCoordinates) : 0;
 }
 
+/** Legend entries, keyed by their rendered label. */
+function legendItem(container: HTMLElement, label: string): HTMLElement {
+  const items = [...container.querySelectorAll<HTMLElement>('.recharts-legend-item')];
+  const match = items.find((item) => item.textContent?.trim() === label);
+  if (!match) throw new Error(`no legend entry for ${label} in [${items.map((i) => i.textContent)}]`);
+  return match;
+}
+
+function clickLegend(container: HTMLElement, label: string): void {
+  const item = legendItem(container, label);
+  act(() => {
+    item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
 // ResponsiveContainer picks up its size in an effect, so the tree needs a flush
 // after render before the plotted series exist.
 async function mount(source: string): Promise<{ container: HTMLElement; root: Root }> {
@@ -372,6 +387,129 @@ describe('ChartBlock', () => {
     const germany = headers.find((cell) => cell.textContent === 'Germany');
     expect(uk?.className).toContain('font-semibold');
     expect(germany?.className).toContain('text-muted-foreground');
+
+    act(() => root.unmount());
+  });
+
+  it('hides a series from the plot when its legend entry is clicked', async () => {
+    const { container, root } = await mount(productivity);
+
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(2);
+
+    clickLegend(container, 'Germany');
+
+    // The line is gone from the plot entirely, not merely dimmed.
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(1);
+    expect(container.querySelectorAll('.recharts-line-dot')).toHaveLength(3);
+    expect(container.innerHTML).not.toContain('--chart-2');
+
+    // The legend entry stays, marked off, so the series can be brought back.
+    expect(legendItem(container, 'Germany').className).toContain('inactive');
+    clickLegend(container, 'Germany');
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(2);
+
+    act(() => root.unmount());
+  });
+
+  it('hides a bar series when its legend entry is clicked', async () => {
+    const { container, root } = await mount(
+      JSON.stringify({
+        type: 'bar',
+        x: 'country',
+        series: [{ key: 'gdp', label: 'GDP' }, { key: 'debt', label: 'Debt' }],
+        rows: [
+          { country: 'UK', gdp: 12, debt: 4 },
+          { country: 'Germany', gdp: 18, debt: 6 }
+        ]
+      })
+    );
+
+    expect(barFills(container)).toHaveLength(4);
+
+    clickLegend(container, 'Debt');
+
+    expect(barFills(container)).toEqual(['hsl(var(--chart-1))', 'hsl(var(--chart-1))']);
+
+    act(() => root.unmount());
+  });
+
+  it('refuses to hide the last visible series', async () => {
+    // An empty plot would auto-scale its axis to nothing and read as broken.
+    const { container, root } = await mount(productivity);
+
+    clickLegend(container, 'Germany');
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(1);
+
+    clickLegend(container, 'UK');
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(1);
+    expect(legendItem(container, 'UK').className).not.toContain('inactive');
+
+    act(() => root.unmount());
+  });
+
+  it('rescales the axis to the series still showing', async () => {
+    const { container, root } = await mount(
+      JSON.stringify({
+        type: 'line',
+        x: 'year',
+        series: [{ key: 'small', label: 'Small' }, { key: 'huge', label: 'Huge' }],
+        rows: [
+          { year: 2010, small: 5, huge: 900000 },
+          { year: 2019, small: 9, huge: 950000 }
+        ]
+      })
+    );
+
+    expect(axisText(container)).toMatch(/\dK\b|\dM\b/);
+
+    clickLegend(container, 'Huge');
+
+    // With the large series gone the axis follows the small one.
+    expect(axisText(container)).not.toMatch(/\dK\b|\dM\b/);
+    expect(tickLabels(container)).toContain('9');
+
+    act(() => root.unmount());
+  });
+
+  it('distinguishes a hidden series from a highlight-dimmed one in the legend', async () => {
+    const { container, root } = await mount(
+      JSON.stringify({
+        type: 'line',
+        x: 'year',
+        highlight: ['UK'],
+        series: [{ key: 'UK' }, { key: 'Germany' }, { key: 'France' }],
+        rows: [
+          { year: 2010, UK: 1, Germany: 2, France: 3 },
+          { year: 2019, UK: 4, Germany: 5, France: 6 }
+        ]
+      })
+    );
+
+    clickLegend(container, 'France');
+
+    // The innermost span is the one the legend formatter styles; the outer one
+    // is Recharts' own wrapper.
+    const labelStyle = (label: string) =>
+      [...legendItem(container, label).querySelectorAll('span')].pop()?.getAttribute('style') ?? '';
+
+    expect(labelStyle('France')).toContain('line-through');
+    expect(labelStyle('Germany')).not.toContain('line-through');
+    expect(labelStyle('Germany')).toContain('--muted-foreground');
+
+    act(() => root.unmount());
+  });
+
+  it('keeps every series in the Show data table while one is hidden', async () => {
+    // The table is the escape hatch to the numbers; hiding is a plot control.
+    const { container, root } = await mount(productivity);
+
+    clickLegend(container, 'Germany');
+    act(() => {
+      container.querySelector('button')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.querySelector('table')?.textContent).toContain('Germany');
+    expect(container.querySelector('table')?.textContent).toContain('115,039');
 
     act(() => root.unmount());
   });

@@ -360,6 +360,16 @@ async function drawBrandMark(context: CanvasRenderingContext2D, right: number, b
 }
 
 /**
+ * Whether a legend entry belongs in a copied image. Recharts marks an entry
+ * `inactive` when its series is switched off, and that series is not in the
+ * plot being rasterized — copying its swatch would caption a line that is not
+ * there.
+ */
+export function isPlottedLegendItem(item: Element): boolean {
+  return !item.classList.contains('inactive');
+}
+
+/**
  * Recharts renders the legend as HTML positioned over the plot, so the SVG
  * leaves an empty band where it belongs. Redraw it there from the live nodes.
  */
@@ -370,7 +380,9 @@ function drawLegend(
   originX: number,
   originY: number
 ) {
-  const items = Array.from(chartRoot.querySelectorAll<HTMLElement>('.recharts-legend-item'));
+  const items = Array.from(chartRoot.querySelectorAll<HTMLElement>('.recharts-legend-item')).filter(
+    isPlottedLegendItem
+  );
 
   for (const item of items) {
     const rect = item.getBoundingClientRect();

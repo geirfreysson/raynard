@@ -76,6 +76,14 @@ function lineSeriesPaint(index: number, key: string, highlight: HighlightResolut
   };
 }
 
+/**
+ * The series key behind a legend entry. Recharts types the payload loosely
+ * because different graphical items fill it differently, so read it defensively.
+ */
+function legendKey(entry: unknown): string {
+  return String((entry as { dataKey?: unknown } | undefined)?.dataKey ?? '');
+}
+
 const axisProps = {
   stroke: 'hsl(var(--muted-foreground))',
   fontSize: 12,
@@ -151,6 +159,31 @@ function ChartData({ spec }: { spec: ChartSpec }) {
 
 function ChartFigure({ spec }: { spec: ChartSpec }) {
   const showLegend = spec.series.length > 1;
+  // Clicking a legend entry drops that series from the plot. Recharts' `hide`
+  // does the rest: the shape is not drawn, the series leaves the tooltip
+  // payload, and the axis domain is recomputed without it.
+  const [hiddenKeys, setHiddenKeys] = React.useState<ReadonlySet<string>>(() => new Set());
+  const hidden = React.useMemo(
+    // Intersecting with the current spec keeps a key left over from a previous
+    // spec on this same React root from counting against the guard below.
+    () => new Set(spec.series.filter((series) => hiddenKeys.has(series.key)).map((s) => s.key)),
+    [spec.series, hiddenKeys]
+  );
+  const toggleSeries = React.useCallback(
+    (key: string) => {
+      setHiddenKeys((current) => {
+        const next = new Set(current);
+        if (next.delete(key)) return next;
+        // Hiding the last lit series would leave an empty plot auto-scaled to
+        // nothing, which reads as a broken chart rather than an empty one.
+        const visible = spec.series.filter((series) => !next.has(series.key)).length;
+        if (visible <= 1) return current;
+        next.add(key);
+        return next;
+      });
+    },
+    [spec.series]
+  );
   const leftSeries = React.useMemo(
     () => spec.series.filter((series) => series.axis !== 'right'),
     [spec.series]
@@ -159,15 +192,27 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
     () => spec.series.filter((series) => series.axis === 'right'),
     [spec.series]
   );
+  // Recharts rescales an axis domain to the series still showing, so the tick
+  // formatter has to follow. Derived from every series instead, a chart whose
+  // large series was switched off would keep compact notation and round the
+  // small one still on screen away to "0".
+  const visibleLeftSeries = React.useMemo(
+    () => leftSeries.filter((series) => !hidden.has(series.key)),
+    [leftSeries, hidden]
+  );
+  const visibleRightSeries = React.useMemo(
+    () => rightSeries.filter((series) => !hidden.has(series.key)),
+    [rightSeries, hidden]
+  );
   // Raw ticks read as 1000000; the axis compacts them while the tooltip and the
   // Show data table keep the exact figure.
   const formatLeftTick = React.useMemo(
-    () => createAxisFormatter(spec.rows, leftSeries),
-    [spec.rows, leftSeries]
+    () => createAxisFormatter(spec.rows, visibleLeftSeries),
+    [spec.rows, visibleLeftSeries]
   );
   const formatRightTick = React.useMemo(
-    () => createAxisFormatter(spec.rows, rightSeries),
-    [spec.rows, rightSeries]
+    () => createAxisFormatter(spec.rows, visibleRightSeries),
+    [spec.rows, visibleRightSeries]
   );
   // Recharts drops every other label once they collide, so rotate instead.
   const ticks = React.useMemo(() => xTickLayout(spec.rows, spec.x), [spec.rows, spec.x]);
@@ -196,6 +241,9 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
     <YAxis
       yAxisId="left"
       {...axisProps}
+      // Kept mounted so a hidden series' yAxisId still resolves; just not drawn
+      // once every series it scales has been switched off.
+      hide={leftSeries.length > 0 && visibleLeftSeries.length === 0}
       domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatLeftTick}
@@ -211,6 +259,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
       yAxisId="right"
       orientation="right"
       {...axisProps}
+      hide={visibleRightSeries.length === 0}
       domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatRightTick}
@@ -236,12 +285,28 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
   const grid = <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />;
   const legend = showLegend ? (
     <Legend
-      wrapperStyle={{ fontSize: 12 }}
+      wrapperStyle={{ fontSize: 12, cursor: 'pointer' }}
+      // Recharts greys an entry whose series is hidden; point it at the theme
+      // rather than its hard-coded #ccc, which is invisible in dark mode.
+      inactiveColor={MUTED_COLOR}
+      onClick={(entry: unknown) => {
+        const key = legendKey(entry);
+        if (key) toggleSeries(key);
+      }}
       formatter={(value: string, entry: unknown) => {
-        const key = String((entry as { dataKey?: unknown } | undefined)?.dataKey ?? '');
-        const dimmed = highlight.series.size > 0 && !highlight.series.has(key);
+        const key = legendKey(entry);
+        const off = hidden.has(key);
+        // A hidden series and a highlight-dimmed one are different states, so
+        // the strikethrough carries the "switched off" meaning on its own.
+        const dimmed = !off && highlight.series.size > 0 && !highlight.series.has(key);
         return (
-          <span style={{ color: dimmed ? MUTED_COLOR : 'inherit', opacity: dimmed ? MUTED_OPACITY : 1 }}>
+          <span
+            style={{
+              color: off || dimmed ? MUTED_COLOR : 'inherit',
+              opacity: dimmed ? MUTED_OPACITY : 1,
+              textDecoration: off ? 'line-through' : undefined
+            }}
+          >
             {value}
           </span>
         );
@@ -282,6 +347,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
                 name={series.label}
                 fill={paint.color}
                 fillOpacity={paint.opacity}
+                hide={hidden.has(series.key)}
                 stackId={spec.stacked ? 'stack' : undefined}
                 radius={[3, 3, 0, 0]}
                 isAnimationActive={ANIMATE}
@@ -322,6 +388,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
                 stroke={paint.color}
                 strokeOpacity={paint.opacity}
                 strokeWidth={paint.width}
+                hide={hidden.has(series.key)}
                 dot={{
                   r: LINE_DOT_RADIUS,
                   fill: paint.color,

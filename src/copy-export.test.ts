@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   chartSpecToMarkdown,
   inlineComputedSvgStyles,
+  isPlottedLegendItem,
   planSourceLines,
   truncateToWidth,
   wrapText
@@ -76,6 +77,22 @@ describe('inlineComputedSvgStyles', () => {
 
 // One unit of width per character, which is enough to exercise the layout.
 const context = { measureText: (text: string) => ({ width: text.length }) as TextMetrics };
+
+describe('isPlottedLegendItem', () => {
+  const item = (className: string) => {
+    const node = document.createElement('li');
+    node.className = className;
+    return node;
+  };
+
+  it('keeps an entry whose series is drawn', () => {
+    expect(isPlottedLegendItem(item('recharts-legend-item legend-item-0'))).toBe(true);
+  });
+
+  it('drops an entry the reader switched off, so the image matches the plot', () => {
+    expect(isPlottedLegendItem(item('recharts-legend-item legend-item-1 inactive'))).toBe(false);
+  });
+});
 
 describe('truncateToWidth', () => {
   it('leaves text that already fits', () => {
