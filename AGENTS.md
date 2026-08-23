@@ -535,6 +535,37 @@ Do not bypass, disable, replace, delete, modify, or otherwise override repositor
 
 Pull requests should describe the user-facing change, list verification commands run, and include screenshots or screen recordings for visual UI changes.
 
+### Branching and landing work
+
+The user cannot see which branch is checked out. Keeping the worktree on a
+sensible branch is therefore the agent's responsibility, and a branch problem
+discovered at push time has already been a problem for a while.
+
+- Check the branch before starting work, not when you are ready to commit.
+  `git status --short`, `git rev-parse --abbrev-ref HEAD`, and
+  `git log --oneline origin/main..HEAD` show where you are and what the branch
+  already carries.
+- Start each feature or fix on its own branch cut from an up-to-date
+  `origin/main`, named after the change (`fix-extension-sample-prompts`). Do not
+  pile unrelated work onto whatever branch happens to be checked out, and do not
+  commit directly onto a local `main`.
+- Name the branch in your reply whenever you create one, switch to one, or
+  commit to one. That line is the user's only visibility into where the work
+  went.
+- When the work is finished and verified, **ask how to land it**: open a pull
+  request, or merge into `main` and push directly. Both are normal in this
+  repository and the choice is the user's, so ask rather than assuming one.
+- For a pull request: open it with `gh pr create`, describe the user-facing
+  change, list the verification commands run, then merge it yourself once checks
+  pass and the change is good. Report the PR number and its final state.
+- For a direct merge: merge the branch into `main`, push, and report the
+  resulting commit.
+- After landing, switch back to `main` and pull, so the next task does not begin
+  on a stale, already-merged branch.
+- If a branch has drifted — it carries unrelated commits, or work landed
+  somewhere it should not have — say so plainly and propose a correction instead
+  of quietly building on top of it.
+
 ## Security & Configuration Tips
 
 Do not commit `.env` or API keys. `.env.example` documents expected variables. API keys entered through `/models` are stored in the operating system keychain via Rust `keyring`; app config should store preferences only, not secrets.
