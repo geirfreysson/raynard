@@ -1,77 +1,62 @@
-# Raynard v0.3.0
+# Raynard v0.4.0
 
-Released: 2026-08-21
+Released: 2026-08-23
 
-Raynard now runs on Linux and Windows, answers can be shared as links, and
-extensions arrive from a bundled catalog instead of always being written from
-scratch.
+Raynard can now do work on a schedule, and generated plugins have to prove
+themselves against the real API before a build is reported as done.
 
-## Linux and Windows
+## Scheduled tasks
 
-- Added an x86_64 AppImage and an amd64 Debian package for Linux, and a per-user
-  x64 NSIS installer for Windows, each carrying its own embedded Node runtime
-  and verified by a cross-platform bundle gate before release.
-- Added `install.sh` and `install.ps1` for checksum-verified installation from
-  the terminal, published as stable assets on every release.
-- The Windows installer is not code-signed yet, so SmartScreen will warn on
-  first run. Choose **More info**, then **Run anyway**. Windows signing is
-  planned.
-- macOS remains Apple Silicon and now requires macOS 13 or later.
+- Ask for recurring work — "check the top stories on Hacker News every morning
+  and tell me the top one" — and Raynard saves it as a task instead of
+  answering once. It runs daily, weekly, monthly, quarterly, or yearly at a
+  local time in your own time zone.
+- Nothing is created without you. The request first renders as an editable
+  confirmation showing the name, the prompt that will run, the destination, and
+  the recurrence; Dismiss creates nothing.
+- Results land either in a dedicated chat, created on the first run and reused
+  after, or appended to an existing chat you pick. Messages from a task are
+  labelled with its name.
+- The timer icon on the sidebar rail lists your tasks. A detail screen edits,
+  pauses, resumes, deletes, or runs one immediately — running now does not move
+  the recurring schedule.
+- A scheduled run is an ordinary Explore turn with your selected model and
+  installed extensions. It cannot enter Build on its own and cannot create
+  another task: a missing extension or a needed credential is recorded as a
+  note asking you to open the chat and handle it yourself.
+- The scheduler runs only while Raynard is open. A task that came due while the
+  app was closed runs once after the next launch; missed occurrences are not
+  replayed one by one.
 
-## Share an answer as a link
+## Generated plugins are checked against the live API
 
-- Any finished answer can be shared. There is no server and no account: the
-  whole payload rides in the URL fragment, which browsers never transmit, so
-  nothing is uploaded and nothing is stored.
-- Links carry the question, the answer, its cards, and its sources, but never
-  your provider, model, token usage, chat, or timestamps.
-- A link that would be too long is degraded in measured steps — excerpts, then
-  card data, then table rows — and refused outright rather than handed over
-  broken. Answer text is never truncated.
-- A shared answer opens as a snapshot and says so: a follow-up question runs a
-  live query, because the model only ever sees the transcript text.
+A generated plugin could pass every mocked test with all of its live endpoints
+broken — mocks that match on a path fragment survive a total rewrite of the API
+host. Building one now ends with a real call:
 
-## Extension catalog
+- A fresh build executes the plugin's first zero-argument tool against the real
+  API and requires text, at least one source reference, and a non-empty list.
+  A failure gets one repair pass.
+- Edit turns run the same live call. Previously an edit bypassed validation, so
+  "test and fix the API" could be answered with a confident green. A still
+  failing check is now reported instead of success.
+- A test suite that never pins the API host as a literal absolute URL is
+  rejected. Three of the five bundled extensions had this and now pin theirs.
+- Plugin SDK 1.3.0: a 204, an empty body, or a non-JSON body now raises a
+  message naming the URL that failed, rather than a bare parse error.
 
-- `/extensions` lists pre-approved extensions bundled with the app — Hacker
-  News, Open Library, Fantasy Premier League, World Bank Data360, and D&D 5e —
-  alongside the ones you have written yourself.
-- Installing copies the extension into your own directory, where it becomes an
-  ordinary editable extension.
-- The agent can now recommend a catalog extension mid-conversation and offer to
-  install it inline.
-- Plugin builds now require real API source documentation up front, rather than
-  starting a build on a guess.
+## Charts
 
-## Steer the agent while it works
+- Clicking a legend entry now switches that series off and removes it from the
+  plot, the tooltip, and the axis scale, rather than dimming it. The entry
+  stays in the legend, struck through, so the series can be brought back.
+- Axis number formatting follows the visible series, so switching off a large
+  series no longer rounds a smaller one away to zero. Hiding the last visible
+  series is refused, and a copied chart image matches what is on screen.
 
-- The composer stays live during an answer. Press Enter to send a course
-  correction the agent picks up at its next step, or Alt+Enter to queue a
-  follow-up for when it finishes.
-- Queued text waits in a strip above the composer and only becomes part of the
-  conversation once the agent actually takes it. Stopping the turn hands
-  anything undelivered back to you.
+## Extensions
 
-## Answers show their working
-
-- When an answer draws on more than one extension, results are grouped and
-  labelled by the extension that produced them.
-- When several data series could have answered a question, the answer now names
-  the one it used, why it won, and the closest one it rejected — with the
-  identifier you need to ask for the other.
-- Charts support a second Y axis, so a rate plotted against an absolute is no
-  longer flattened into the noise. Line charts pick sensible scales and mark
-  their individual data points.
-
-## Saved answers and performance
-
-- Answers can be bookmarked and revisited.
-- Large result sets move out of the chat file and load only when a card is
-  opened, so reopening a long conversation stays fast.
-- Results built from a cached API response are marked **Cached**.
-
-## Documentation
-
-- The docs site covers all three platforms, and the homepage offers the build
-  for the operating system you are reading from, with the other platforms one
-  click away.
+- Promoting a plugin to the bundled catalog now starts from the builder's own
+  category, tags, and icon suggestions instead of fixed defaults, when those
+  survive validation. Author and homepage are never taken from the model.
+- Bundled extension splash prompts read as real questions.
