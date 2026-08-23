@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { findUnpinnedTestHosts } from './plugin-builder-core.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const extensionsDir = join(root, 'extensions');
@@ -109,6 +110,17 @@ describe('bundled extension catalog', () => {
         /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(path)
       );
       expect(tests.length, `${directory} needs a mocked executable test`).toBeGreaterThan(0);
+
+      // A mock matched on a path fragment, or on a base-URL constant imported
+      // from the module under test, stays green through a total rewrite of the
+      // API host. One literal origin in the tests is what makes that fail.
+      const code = authoredFiles(directory).filter((path) => /\.(?:ts|js|mjs)$/i.test(path));
+      const isTest = (path) => /\.(?:test|spec)\./i.test(path);
+      const read = (paths) => paths.map((path) => readFileSync(path, 'utf8'));
+      expect(
+        findUnpinnedTestHosts(read(code.filter((path) => !isTest(path))), read(tests)),
+        `${directory} tests must assert a literal API origin`
+      ).toEqual([]);
 
       const testRun = spawnSync(process.execPath, ['--test', ...tests], {
         cwd: root,

@@ -123,11 +123,18 @@ active chat path.
    follow-ups have context.
 9. A fresh build is gated on executable mocked tests, `node --test`, runtime tool
    discovery, at least one exported tool, a README Endpoint Inventory, exactly
-   three valid splash prompts in `plugin.json.samplePrompts`, and valid
-   `plugin.json.catalogMetadata` contribution suggestions (validation failure
-   gives one repair pass). An interactive edit turn is not forced
-   through that gate — the agent makes the smallest change and runs the
-   relevant tests via `node --test` when appropriate.
+   three valid splash prompts in `plugin.json.samplePrompts`, valid
+   `plugin.json.catalogMetadata` contribution suggestions, at least one test
+   pinning the API host as a literal absolute URL, and **one live call**: the
+   first zero-argument tool is executed against the real API and must return
+   text, references, and a non-empty list. Validation failure gives one repair
+   pass. Mocked tests alone cannot see a wrong base URL — a mock matching on a
+   path fragment, or on a base-URL constant imported from the module under
+   test, stays green through a total rewrite of the host. An interactive edit
+   turn is not forced through the full gate — the agent makes the smallest
+   change and runs the relevant tests via `node --test` — but an edit that
+   changed files runs the same live call, with one repair attempt, and a
+   failure is reported to the user rather than being reported as done.
 10. Every generated API tool carries a fixed declarative result-`card` (+
     `data`) rendered by the host as a React/shadcn card, including list/search
     tools. The builder only authors the declarative template — never React.

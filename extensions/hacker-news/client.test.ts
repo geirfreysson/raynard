@@ -30,6 +30,19 @@ const story = (id: number) => ({
   url: `https://example.com/story-${id}`
 });
 
+test('the client targets the documented Hacker News host', async () => {
+  // Every other assertion here is written against API_BASE and would follow a
+  // base-URL rewrite. Pinning the literal origin once is what makes it fail.
+  assert.equal(API_BASE, 'https://hacker-news.firebaseio.com/v0');
+  const fetchMock = mockFetch(() => ({ body: [111] }));
+  try {
+    await fetchTopStoryIds();
+    assert.equal(fetchMock.calls[0], 'https://hacker-news.firebaseio.com/v0/topstories.json');
+  } finally {
+    fetchMock.restore();
+  }
+});
+
 test('story-id feed helpers hit the right endpoints and return id arrays', async () => {
   const feeds: Array<[(ids?: number[]) => Promise<number[]>, string]> = [
     [fetchTopStoryIds, 'topstories'],

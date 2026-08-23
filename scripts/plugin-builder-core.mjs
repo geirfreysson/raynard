@@ -262,9 +262,10 @@ Hard constraints:
 - The author-owned workspace is intentionally small: plugin.json, tools.ts, optional client.ts/supporting modules, behavior tests, and README.md. Do not create index.ts, runtime.ts, testing.ts, contract.test.ts, reference.ts, or another SDK wrapper.
 - You MUST reuse the SDK and MUST NOT re-implement its fetch wrapper, HTTP error handling, query-string builder, references, tool contracts, card types, or test harness.
 - Every API-derived result must expose enough raw payload and source metadata for Explore mode to quote or cite it.
-- Query-parameter names must come from the documented API surface, spelled exactly as the API expects, including case. APIs commonly ignore unknown parameters and silently return unfiltered data, which looks like a working tool that quietly answers the wrong question.
-- Because tests mock the network, a misspelled parameter still passes a response-shape assertion. Any tool exposing a filter, range, or pagination parameter MUST have a test asserting the built request URL contains that parameter, not only that the mocked response was parsed.
-- That assertion catches a renamed or misspelled query key and nothing more: a mocked test proves only what the plugin SENT, never that the API honored it. Exercise filters against the live API while building, and write what you observe into the tool and parameter descriptions.
+- Call every endpoint with bash (curl) BEFORE writing client code, and read the real status, headers, and body. Build from what you observed, never from what the API "should" look like: your memory of an API is often a previous version of it.
+- A 2xx is not success. A query matching nothing can return 204 and an empty body, a wrong path a 200 HTML page, and an unknown parameter is usually ignored, silently returning unfiltered data. Spell parameter, path, and header names exactly as the API does, including case, and judge the body, not the status.
+- Mocked tests prove only what the plugin SENT. At least one test MUST assert a request URL against a literal absolute URL, as shown in the example below: a path fragment or a constant imported from the module under test follows a base-URL rewrite and stays green while every live call fails. Any tool exposing a filter, range, or pagination parameter MUST assert that parameter in the built URL.
+- Validation ends by calling one zero-argument tool against the real API and requires real content back. Write what you observed into the tool and parameter descriptions.
 - Treat provided API documentation as a whole API surface. Do not only build the single narrow call implied by the user's latest question unless the docs truly cover only that call.
 - Build a practical suite of focused tools for important list/search, detail, user/account, metadata/status, and update/history endpoints when available.
 - Prefer multiple focused tools over one broad generic tool.
@@ -273,7 +274,7 @@ Hard constraints:
 - Every exported tool must have a routing-quality description and a JSON parameter schema with descriptions, required fields, enum values, and useful optional limits or filters.
 - A tool's description and its parameter descriptions are the ONLY plugin text the Explore agent ever sees at runtime. README.md, code comments, and plugin.json never reach it. Anything a caller must know to use the endpoint correctly belongs in those descriptions, not only in README.md.
 - So record, in the tool description or in the specific parameter's description: parameters that only take effect in combination or are ignored on their own; inputs the API silently drops; defaults applied when a parameter is omitted; result caps, maximum page size, and how to page; the sort order of results; the format and source of IDs and codes; units; and which tool to call before or after this one.
-- Put a per-parameter rule on that parameter's description and whole-endpoint behavior on the tool description. README.md may repeat any of it for human readers, but must never be its only home.
+- Put a per-parameter rule on that parameter's description and whole-endpoint behavior on the tool description.
 - Update README.md with implemented tools, the endpoint inventory, future endpoint notes, and source docs.
 - Authentication. If the API requires a key, token, or app id:
   - Declare every secret in plugin.json under "auth": { "credentials": [ { "key": "PROVIDER_API_KEY", "label": "Provider API key", "description": "short note, e.g. free tier", "signupUrl": "https://the page where a user signs up for the key" } ] }. The key must be UPPER_SNAKE_CASE; the label and signupUrl are required.
@@ -362,11 +363,14 @@ import assert from 'node:assert/strict';
 import { mockFetch, expectToolResult } from '@raynard/plugin-sdk/testing';
 import { tools } from './tools.ts';
 
-test('example_get_thing renders text and a citation', async () => {
+test('example_get_thing calls the documented URL and renders a citation', async () => {
   const fetchMock = mockFetch(() => ({ body: { id: 1, name: 'Widget' } }));
   try {
     const result = await tools.example_get_thing.execute({ id: 1 });
     expectToolResult(result);
+    // Pin the host as a literal. \`url.includes('/things')\` or \`\${BASE}/things/1\`
+    // would pass just as happily against a completely wrong API.
+    assert.equal(fetchMock.calls[0], 'https://api.example.com/things/1');
     assert.match(result.text, /Widget/);
   } finally {
     fetchMock.restore();
@@ -420,6 +424,7 @@ How to work:
 - Stay within the plugin. Do not modify the host app. Do not build React, pages, routes, CSS, or any UI — this is TypeScript API tooling only.
 - Keep secrets out of source. If this edit makes the plugin need an API key, declare it in plugin.json under auth.credentials with a label and a signupUrl (the page where a user gets the key), read it with requireCredential('KEY') inside execute(), and document it in README.md under an "## Authentication" heading including that URL. Never read process.env, and never ask the user for the key yourself — the host prompts for it and supplies it at call time.
 - Tests: use your bash tool to run \`node --test <files>\` when the user asks or after a substantive change, and fix failures. You are not forced to pass whole-plugin validation on every turn — respond to what the user asked.
+- Mocked tests cannot tell you whether the plugin works. When the request is that a call fails, returns nothing, or hits the wrong endpoint, curl it first and read the real status, headers, and body: a 2xx can still be an empty body, an HTML page, or a silently ignored parameter. Fix from what you observed — never by guessing another base URL. After your edit the host calls one tool for real, and a failure there is reported to the user.
 
 ${cardFastPath}
 ${CARD_RULES}
@@ -555,6 +560,96 @@ export function findPluginTestFiles(files) {
     .filter((name) => /\.(?:test|spec)\.(?:ts|js|mjs)$/i.test(String(name)))
     .map(String)
     .sort();
+}
+
+// --- Live verification -----------------------------------------------------
+//
+// A mocked suite proves only what the plugin SENT. An IMF plugin once passed
+// 11/11 tests through four rewrites of its base URL because every mock matched
+// on the substring `/dataflow`, which survives any host change; nothing in the
+// build ever called the API. The gate therefore executes one real tool.
+
+/**
+ * The tool the gate can call without inventing arguments: the first callable
+ * one whose schema requires nothing. There is no safe way to guess a valid id,
+ * dimension code, or search key, so a plugin without such a tool is not
+ * smoke-tested rather than failed on a fabricated call.
+ */
+export function selectLiveSmokeTool(tools) {
+  const candidates = Array.isArray(tools) ? tools : [];
+  for (const tool of candidates) {
+    if (!tool || typeof tool.name !== 'string' || !tool.name) continue;
+    if (tool.callable === false) continue;
+    const required = tool.parameters && Array.isArray(tool.parameters.required) ? tool.parameters.required : [];
+    if (required.length) continue;
+    return tool;
+  }
+  return null;
+}
+
+/**
+ * Judges one live runner result. Deliberately stricter than "it did not
+ * throw": a wrong agency, path, or filter style is commonly answered with 204
+ * or an empty 200, so a call that merely completed proves nothing about
+ * whether the plugin reached real data.
+ */
+export function assessLiveToolResult(payload) {
+  const response = payload && typeof payload === 'object' ? payload : {};
+  if (response.credentialRequest && response.credentialRequest.key) {
+    return {
+      ok: true,
+      skipped: `needs the ${response.credentialRequest.key} credential, which the builder cannot supply`
+    };
+  }
+  if (!response.ok) {
+    return { ok: false, message: String(response.error || 'the call failed with no error message') };
+  }
+  const result = response.result && typeof response.result === 'object' ? response.result : {};
+  if (typeof result.text !== 'string' || !result.text.trim()) {
+    return { ok: false, message: 'it returned no text for the model to read' };
+  }
+  if (!Array.isArray(result.references) || !result.references.length) {
+    return { ok: false, message: 'it returned no source references, so nothing it says can be cited' };
+  }
+  const data = result.data && typeof result.data === 'object' ? result.data : {};
+  const arrays = Object.entries(data).filter(([, value]) => Array.isArray(value));
+  if (arrays.length && arrays.every(([, value]) => !value.length)) {
+    return {
+      ok: false,
+      message: `every list in its data is empty (${arrays.map(([key]) => key).join(', ')}), which is how this API reports a rejected request`
+    };
+  }
+  return { ok: true };
+}
+
+/** Absolute origins named in plugin source, e.g. `https://api.example.com`. */
+function collectOrigins(sources) {
+  const origins = new Set();
+  for (const source of Array.isArray(sources) ? sources : []) {
+    for (const match of String(source || '').matchAll(/https?:\/\/[a-zA-Z0-9.-]+/g)) {
+      origins.add(match[0]);
+    }
+  }
+  return origins;
+}
+
+/**
+ * Origins the plugin calls that no test pins as a literal.
+ *
+ * Matching a mocked request against a constant imported from the module under
+ * test (`url === `${BASE}/items``) or against a bare path (`url.includes(
+ * '/items')`) reads like a URL assertion but follows the source: rewrite the
+ * base URL and the suite stays green. One literal origin in the tests is what
+ * makes a host change fail.
+ */
+export function findUnpinnedTestHosts(sources, testSources) {
+  const sourceOrigins = collectOrigins(sources);
+  if (!sourceOrigins.size) return [];
+  const testOrigins = collectOrigins(testSources);
+  for (const origin of sourceOrigins) {
+    if (testOrigins.has(origin)) return [];
+  }
+  return [...sourceOrigins].sort();
 }
 
 // Components the host card renderer knows how to draw. Unknown components are
@@ -695,12 +790,21 @@ export function validatePluginArtifacts({
   catalogMetadata,
   auth,
   sources,
+  testSources,
   requireSamplePrompts = false,
   requireCatalogMetadata = false
 }) {
   const testFiles = findPluginTestFiles(files);
   if (!testFiles.length) {
     throw new Error('Plugin validation requires at least one executable test file.');
+  }
+  if (testSources !== undefined) {
+    const unpinned = findUnpinnedTestHosts(sources, testSources);
+    if (unpinned.length) {
+      throw new Error(
+        `No test pins the API host as a literal. At least one test must assert a request URL that starts with ${unpinned[0]}, not a path fragment and not a constant imported from the module under test — both of those follow a base-URL rewrite and stay green while every live call fails.`
+      );
+    }
   }
   if (!/^##?\s+Endpoint Inventory\b/im.test(String(readme || ''))) {
     throw new Error('Plugin README must include an Endpoint Inventory section.');

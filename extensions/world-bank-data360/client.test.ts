@@ -33,6 +33,13 @@ function mockFetchWithInit(body: unknown, status = 200) {
   };
 }
 
+test('the client targets the documented Data360 host', () => {
+  // Assertions below compare against DATA_URL/SEARCH_URL, so they would follow
+  // a base-URL rewrite. Pinning the literal origins once is what makes it fail.
+  assert.equal(SEARCH_URL, 'https://data360api.worldbank.org/data360/searchv2');
+  assert.equal(DATA_URL, 'https://data360api.worldbank.org/data360/data');
+});
+
 test('searchData360Indicators posts an indicator-only search and keeps endpoint metadata', async () => {
   const response = {
     '@odata.count': 42,

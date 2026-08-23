@@ -13,6 +13,20 @@ import {
   BASE
 } from './client.ts';
 
+test('the client targets the documented FPL host', async () => {
+  // Every other assertion in this file is written against BASE, so all of them
+  // would follow a base-URL rewrite and stay green while no call reached FPL.
+  // Pinning the literal origin once is what makes that rewrite fail here.
+  assert.equal(BASE, 'https://fantasy.premierleague.com/api');
+  const mock = mockFetch(() => ({ body: { elements: [], teams: [], events: [], element_types: [] } }));
+  try {
+    await fetchBootstrapStatic();
+    assert.equal(mock.calls[0], 'https://fantasy.premierleague.com/api/bootstrap-static/');
+  } finally {
+    mock.restore();
+  }
+});
+
 test('fetchBootstrapStatic GETs /bootstrap-static/ and returns elements, teams and events', async () => {
   const mock = mockFetch((url) => {
     assert.equal(url, `${BASE}/bootstrap-static/`);

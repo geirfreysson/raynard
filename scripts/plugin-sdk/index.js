@@ -231,9 +231,44 @@ export async function apiGet(url, options = {}) {
       )
     );
   }
-  const payload = await response.json();
+  const payload = await parseJsonBody(response, target, label);
   if (cachePath) await writeApiCacheEntry(cachePath, payload);
   return payload;
+}
+
+/**
+ * A successful status is not a successful response. Content-negotiated APIs
+ * answer an unsupported Accept with 204 and an empty body, and a wrong path
+ * with a 200 HTML page. `response.json()` reports both as a bare
+ * "Unexpected token '<'" carrying no URL, which leaves an agent unable to say
+ * which request failed — so it rewrites base URLs by guesswork instead.
+ */
+async function parseJsonBody(response, target, label) {
+  let raw = '';
+  try {
+    raw = await response.text();
+  } catch (error) {
+    throw new Error(
+      redactSecrets(`${label} returned HTTP ${response.status} for ${target} but its body could not be read.`)
+    );
+  }
+  if (!raw.trim()) {
+    throw new Error(
+      redactSecrets(
+        `${label} returned HTTP ${response.status} with an empty body for ${target}. An empty body usually means nothing matched this request, not that the resource has no data: check the path segments and identifiers before changing the base URL.`
+      )
+    );
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const snippet = raw.trim().replace(/\s+/g, ' ').slice(0, 200);
+    throw new Error(
+      redactSecrets(
+        `${label} returned HTTP ${response.status} with a body that is not JSON for ${target} — ${snippet}`
+      )
+    );
+  }
 }
 
 function apiCacheEntryPath(target, headers = {}) {

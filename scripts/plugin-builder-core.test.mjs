@@ -6,8 +6,11 @@ import {
   buildTargetedPluginSnapshot,
   buildSystemPrompt,
   buildUserPrompt,
+  assessLiveToolResult,
   findPluginTestFiles,
+  findUnpinnedTestHosts,
   findUsedCredentialKeys,
+  selectLiveSmokeTool,
   hasAuthoredPluginWork,
   normalizePluginAuth,
   validatePluginArtifacts
@@ -179,14 +182,14 @@ describe('plugin builder core', () => {
     // prompt must say so rather than pointing API semantics at README.
     expect(prompt).toMatch(/ONLY plugin text the Explore agent ever sees/i);
     expect(prompt).toMatch(/README\.md, code comments, and plugin\.json never reach it/i);
-    expect(prompt).toMatch(/must never be its only home/i);
+    expect(prompt).toMatch(/belongs in those descriptions, not only in README\.md/i);
     // The specific facts that have to be written down.
     expect(prompt).toMatch(/only take effect in combination or are ignored on their own/i);
     expect(prompt).toMatch(/inputs the API silently drops/i);
     expect(prompt).toMatch(/sort order of results/i);
     expect(prompt).toMatch(/result caps, maximum page size, and how to page/i);
     // A mocked URL assertion is not proof the API honored the parameter.
-    expect(prompt).toMatch(/proves only what the plugin SENT, never that the API honored it/i);
+    expect(prompt).toMatch(/Mocked tests prove only what the plugin SENT/i);
   });
 
   it('keeps tool descriptions truthful when an edit changes behavior', () => {
@@ -434,6 +437,62 @@ export type UnrelatedRuntimeType = { ignored: true };`;
     expect(sys).not.toContain('interactive coding agent editing an existing');
   });
 
+  it('picks the first zero-argument tool for the live smoke call', () => {
+    const tools = [
+      { name: 'hn_get_story', callable: true, parameters: { type: 'object', required: ['id'] } },
+      { name: 'hn_list_top', callable: true, parameters: { type: 'object', required: [] } },
+      { name: 'hn_list_new', callable: true, parameters: { type: 'object' } }
+    ];
+    expect(selectLiveSmokeTool(tools)?.name).toBe('hn_list_top');
+
+    // Nothing callable without arguments: the gate cannot invent valid ids.
+    expect(selectLiveSmokeTool([tools[0]])).toBeNull();
+    expect(selectLiveSmokeTool([{ name: 'x', callable: false, parameters: { type: 'object' } }])).toBeNull();
+  });
+
+  it('accepts a live result only when it carries real content', () => {
+    const good = {
+      ok: true,
+      result: { text: '3 stories', references: [{ referenceId: '1' }], data: { stories: [{ id: 1 }] } }
+    };
+    expect(assessLiveToolResult(good)).toMatchObject({ ok: true });
+
+    // A 200 with nothing in it is the exact failure mocked tests cannot see.
+    expect(assessLiveToolResult({ ok: false, error: 'HTTP 404 for https://api.example.com/x' })).toMatchObject({
+      ok: false
+    });
+    expect(assessLiveToolResult({ ...good, result: { ...good.result, text: '  ' } }).message).toMatch(/text/i);
+    expect(assessLiveToolResult({ ...good, result: { ...good.result, references: [] } }).message).toMatch(
+      /reference/i
+    );
+    expect(
+      assessLiveToolResult({ ...good, result: { ...good.result, data: { stories: [] } } }).message
+    ).toMatch(/empty/i);
+
+    // A credential the host has not stored is a user-input need, not a defect.
+    expect(
+      assessLiveToolResult({ ok: false, error: 'missing', credentialRequest: { key: 'K', label: 'K' } })
+    ).toMatchObject({ ok: true, skipped: expect.stringMatching(/credential/i) });
+  });
+
+  it('requires at least one test to pin a literal API origin', () => {
+    const sources = ["const BASE = 'https://api.example.com/v1';"];
+
+    // Matching on a constant imported from the module under test follows any
+    // base-URL rewrite, so the suite stays green while every live call 404s.
+    expect(findUnpinnedTestHosts(sources, ["if (url === `${BASE}/items`) return { body: {} };"])).toEqual([
+      'https://api.example.com'
+    ]);
+    expect(findUnpinnedTestHosts(sources, ["assert.ok(url.includes('/items'));"])).toEqual([
+      'https://api.example.com'
+    ]);
+    expect(
+      findUnpinnedTestHosts(sources, ["assert.ok(calls[0].startsWith('https://api.example.com/v1/items'));"])
+    ).toEqual([]);
+    // Nothing to pin when the sources name no absolute URL.
+    expect(findUnpinnedTestHosts(["const x = 1;"], ['const y = 2;'])).toEqual([]);
+  });
+
   it('finds supported test files and rejects structure-only output', () => {
     expect(
       findPluginTestFiles(['tools.ts', 'tools.test.ts', 'fixtures.json', 'client.test.mjs'])
@@ -446,6 +505,44 @@ export type UnrelatedRuntimeType = { ignored: true };`;
         tools: []
       })
     ).toThrow('at least one executable test');
+  });
+
+  it('tells both builder prompts to observe the API before trusting a green suite', () => {
+    // The IMF plugin was rewritten across four base URLs on the strength of a
+    // fully mocked, fully passing suite. Both prompts must send the model to
+    // the API itself, and the create prompt's example must model the URL
+    // assertion rather than the ignore-the-URL mock it used to show.
+    const create = buildSystemPrompt({ sourceUrls: [] });
+    expect(create).toMatch(/call every endpoint with bash \(curl\) BEFORE writing client code/i);
+    expect(create).toMatch(/a 2xx is not success/i);
+    expect(create).toMatch(/204 and an empty body/i);
+    expect(create).toMatch(/assert\.equal\(fetchMock\.calls\[0\], 'https:\/\/api\.example\.com\/things\/1'\)/);
+    expect(create).toMatch(/calling one zero-argument tool against the real API/i);
+
+    const edit = buildSystemPrompt({ editMode: true, pluginDir: '/p', name: 'P' });
+    expect(edit).toMatch(/mocked tests cannot tell you whether the plugin works/i);
+    expect(edit).toMatch(/curl it first/i);
+    expect(edit).toMatch(/never by guessing another base URL/i);
+  });
+
+  it('fails validation when no test pins the API host', () => {
+    const base = {
+      files: ['tools.ts', 'tools.test.ts', 'README.md'],
+      readme: '# Plugin\n\n## Endpoint Inventory\n\n- things',
+      tools: [{ name: 'get_thing', callable: true, card: requiredCard }],
+      sources: ["const BASE = 'https://api.example.com';"]
+    };
+    expect(() =>
+      validatePluginArtifacts({ ...base, testSources: ["assert.ok(url.includes('/things'));"] })
+    ).toThrow(/pins the API host/i);
+    expect(() =>
+      validatePluginArtifacts({
+        ...base,
+        testSources: ["assert.equal(calls[0], 'https://api.example.com/things/1');"]
+      })
+    ).not.toThrow();
+    // Callers that do not supply test sources keep the old behavior.
+    expect(() => validatePluginArtifacts(base)).not.toThrow();
   });
 
   it('requires runtime tools and an endpoint inventory', () => {

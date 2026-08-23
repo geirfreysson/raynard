@@ -152,6 +152,32 @@ describe('shared generated-plugin SDK', () => {
     }
   });
 
+  it('names the URL when a 200 body is not JSON', async () => {
+    // The IMF SDMX gateway answers a query that matches nothing with 204 and an
+    // empty body, and some gateways answer a wrong path with a 200 HTML page.
+    // Both used to surface as a bare "Unexpected token '<'" with no URL, so the
+    // agent could not tell which request had failed and guessed at base URLs.
+    const mocked = mockFetch(() => ({ status: 200, body: '<!DOCTYPE html><html>Not found</html>' }));
+    try {
+      await expect(apiGet('https://api.example.com/external/sdmx/3.0/dataflow')).rejects.toThrow(
+        /HTTP 200.*not JSON.*\/external\/sdmx\/3\.0\/dataflow.*DOCTYPE/s
+      );
+    } finally {
+      mocked.restore();
+    }
+  });
+
+  it('says the body was empty when a 204 carries no content', async () => {
+    const mocked = mockFetch(() => ({ status: 204, body: '' }));
+    try {
+      await expect(apiGet('https://api.example.com/structure/dataflow')).rejects.toThrow(
+        /HTTP 204.*empty body.*\/structure\/dataflow/s
+      );
+    } finally {
+      mocked.restore();
+    }
+  });
+
   it('does not cache failed API responses', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'raynard-sdk-cache-'));
     const mocked = mockFetch(() => ({ status: 503, body: { message: 'Unavailable' } }));

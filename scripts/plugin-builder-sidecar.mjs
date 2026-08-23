@@ -20,6 +20,8 @@ import {
   hasAuthoredPluginWork,
   bashCommandEscapesRoot,
   resolveInsideRoot,
+  assessLiveToolResult,
+  selectLiveSmokeTool,
   validatePluginArtifacts,
   WORKSPACE_ESCAPE_MESSAGE
 } from './plugin-builder-core.mjs';
@@ -106,17 +108,81 @@ function runCommand(command, args, options = {}) {
     child.stderr.on('data', (chunk) => {
       stderrText += chunk;
     });
-    child.on('error', reject);
+    let timer = null;
+    if (options.timeoutMs) {
+      timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`${command} timed out after ${Math.round(options.timeoutMs / 1000)}s.`));
+      }, options.timeoutMs);
+    }
+    child.on('error', (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
     child.on('close', (code) => {
-      if (code !== 0) {
+      if (timer) clearTimeout(timer);
+      if (code !== 0 && !options.allowFailure) {
         reject(new Error(stderrText.trim() || stdout.trim() || `${command} exited with ${code}.`));
         return;
       }
-      resolve({ stdout, stderr: stderrText });
+      resolve({ stdout, stderr: stderrText, code });
     });
     if (options.stdin) child.stdin.end(options.stdin);
     else child.stdin.end();
   });
+}
+
+/** The runner prints one JSON object per call, on success and on failure. */
+function lastJsonLine(stdout) {
+  const line = String(stdout || '')
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .at(-1);
+  try {
+    return JSON.parse(line || '{}');
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Executes one real tool against the real API.
+ *
+ * This is the only step in the gate that can observe the world. Mocked tests
+ * cannot: an IMF plugin passed 11/11 through four different base URLs because
+ * every mock matched on a path substring and nothing ever made a request.
+ */
+async function runLiveSmokeCall(runnerPath, tools) {
+  const tool = selectLiveSmokeTool(tools);
+  if (!tool) {
+    emit({ type: 'status', status: 'live_check_skipped:no_zero_argument_tool' });
+    return;
+  }
+  emit({ type: 'status', status: `live_check:${tool.name}` });
+  let stdout = '';
+  try {
+    ({ stdout } = await runCommand(process.execPath, [runnerPath], {
+      stdin: JSON.stringify({ pluginDir, toolName: tool.name, args: {} }),
+      allowFailure: true,
+      timeoutMs: 60_000
+    }));
+  } catch (error) {
+    throw new Error(
+      `The live check could not run ${tool.name}: ${error.message}`
+    );
+  }
+  const assessment = assessLiveToolResult(lastJsonLine(stdout));
+  if (assessment.skipped) {
+    emit({ type: 'status', status: `live_check_skipped:${tool.name}` });
+    return;
+  }
+  if (!assessment.ok) {
+    throw new Error(
+      `Calling ${tool.name} against the real API failed: ${assessment.message}\nThe mocked tests cannot see this. Call the endpoint yourself with bash (curl) to see what it actually returns — status, headers, and body — then fix the request and the response parsing to match. If the host is unreachable because this machine is offline, say so instead of guessing at a new base URL.`
+    );
+  }
+  emit({ type: 'status', status: `live_check_passed:${tool.name}` });
 }
 
 async function validatePluginWorkspace() {
@@ -137,36 +203,34 @@ async function validatePluginWorkspace() {
   }
   // Source text so validation can check that every credential the plugin reads
   // is also declared and documented.
-  const sources = await Promise.all(
-    files
-      .filter((name) => /\.(?:ts|js|mjs)$/i.test(name) && !/\.(?:test|spec)\./i.test(name))
-      .map((name) => readFile(`${pluginDir}/${name}`, 'utf8').catch(() => ''))
-  );
+  const readAll = (names) =>
+    Promise.all(names.map((name) => readFile(`${pluginDir}/${name}`, 'utf8').catch(() => '')));
+  const codeFiles = files.filter((name) => /\.(?:ts|js|mjs)$/i.test(name));
+  const sources = await readAll(codeFiles.filter((name) => !/\.(?:test|spec)\./i.test(name)));
+  const testSources = await readAll(codeFiles.filter((name) => /\.(?:test|spec)\./i.test(name)));
   const runnerPath = String(request.pluginRunnerPath || '').trim();
   if (!runnerPath) throw new Error('Plugin tool runner path is missing.');
   const listed = await runCommand(process.execPath, [runnerPath], {
     stdin: JSON.stringify({ pluginDir, listTools: true })
   });
-  const lastLine = listed.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .at(-1);
-  const payload = JSON.parse(lastLine || '{}');
+  const payload = lastJsonLine(listed.stdout);
   if (!payload.ok) throw new Error(payload.error || 'Could not load plugin tools.');
+  const tools = payload.result?.tools;
   const validation = validatePluginArtifacts({
     files,
     readme,
-    tools: payload.result?.tools,
+    tools,
     samplePrompts,
     catalogMetadata,
     auth,
     sources,
+    testSources,
     requireSamplePrompts: true,
     requireCatalogMetadata: true
   });
   emit({ type: 'status', status: `running_tests:${validation.testFiles.join(',')}` });
   await runCommand(process.execPath, ['--test', ...validation.testFiles]);
+  await runLiveSmokeCall(runnerPath, tools);
   emit({
     type: 'status',
     status: `validation_passed:${validation.testFiles.length}_tests:${validation.toolCount}_tools`
@@ -487,6 +551,48 @@ async function promptWithResume(text) {
   resumeAttempts += result.resumeAttempts;
 }
 
+let liveCheckWarning = '';
+
+/**
+ * Lists the plugin's tools and runs the live smoke call once.
+ * Returns the failure message, or '' when it passed or could not run.
+ */
+async function attemptLiveCheck() {
+  const runnerPath = String(request.pluginRunnerPath || '').trim();
+  if (!runnerPath) return '';
+  try {
+    const listed = await runCommand(process.execPath, [runnerPath], {
+      stdin: JSON.stringify({ pluginDir, listTools: true }),
+      allowFailure: true,
+      timeoutMs: 60_000
+    });
+    const payload = lastJsonLine(listed.stdout);
+    if (!payload.ok) return String(payload.error || 'the plugin\'s tools could not be loaded');
+    await runLiveSmokeCall(runnerPath, payload.result?.tools);
+    return '';
+  } catch (error) {
+    return error && error.message ? error.message : String(error);
+  }
+}
+
+/**
+ * The edit-turn counterpart of the fresh build's gate. An edit is one
+ * conversational step, so a still-broken API does not fail the turn — but it
+ * must never be reported as done either.
+ */
+async function runEditLiveCheck() {
+  if (!madeFileEdits) return '';
+  const failure = await attemptLiveCheck();
+  if (!failure) return '';
+  emit({ type: 'status', status: 'live_check_failed_retrying' });
+  await promptWithResume(
+    `The change is written, but the plugin still does not work against the real API:\n${failure}\nCall the failing endpoint with bash (curl) to see the real status, headers, and body, then correct the request and the parsing. Do not guess at another base URL.`
+  );
+  const second = await attemptLiveCheck();
+  if (!second) return '';
+  return `Live API check still failing after one repair attempt:\n${second}`;
+}
+
 try {
   emit({ type: 'status', status: 'builder_started' });
   await promptWithResume(buildUserPrompt(request));
@@ -507,6 +613,11 @@ try {
       stopReason: lastAssistantStopReason,
       errorMessage: lastAssistantError
     });
+    // An edit turn skips whole-plugin validation, but "test and fix the API"
+    // arrives as an edit, and mocked tests answer it with a confident green.
+    // One live call, one repair attempt, and an honest note if it is still
+    // broken — never a silent claim that the fix worked.
+    liveCheckWarning = await runEditLiveCheck();
   } else {
     // Check HOW the turn ended before checking WHAT it produced. A run that hit
     // the output limit or lost its stream also fails validation, and validating
@@ -524,7 +635,7 @@ try {
     } catch (validationError) {
       emit({ type: 'status', status: 'validation_failed_retrying' });
       await promptWithResume(
-        `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, and ensure runtime tool discovery succeeds.`
+        `The required validation failed:\n${validationError.message}\nFix the plugin, run every node --test test file, ensure runtime tool discovery succeeds, and verify one tool against the real API with bash before finishing.`
       );
       assertBuilderTurnCompleted({
         editMode: false,
@@ -536,7 +647,8 @@ try {
     }
   }
   unsubscribe();
-  emit({ type: 'done', text: finalText || (request.editMode ? 'Done.' : 'Plugin builder completed.') });
+  const doneText = finalText || (request.editMode ? 'Done.' : 'Plugin builder completed.');
+  emit({ type: 'done', text: liveCheckWarning ? `${doneText}\n\n${liveCheckWarning}` : doneText });
 } catch (error) {
   unsubscribe();
   const message = error && error.message ? error.message : String(error);
