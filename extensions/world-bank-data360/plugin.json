@@ -18,9 +18,9 @@
   "status": "bundled",
   "createdAt": "2026-08-16T00:00:00.000Z",
   "samplePrompts": [
-    "Find Data360 indicators for total population and show Kenya's values since 2015.",
-    "Search for female labor force participation indicators, then fetch recent data for Bangladesh.",
-    "Which Data360 poverty indicators are available in World Development Indicators?"
+    "How has Kenya's population changed since 2015?",
+    "Compare female labour force participation in Bangladesh, India and Pakistan.",
+    "How has extreme poverty in Nigeria changed over the last twenty years?"
   ],
   "sourceUrls": [
     "https://data360.worldbank.org/en/api",

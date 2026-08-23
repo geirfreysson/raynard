@@ -19,8 +19,8 @@
   "createdAt": "2026-08-16T00:00:00.000Z",
   "samplePrompts": [
     "Who are the highest-scoring midfielders in FPL right now, and what does Mohamed Salah's fixture run look like?",
-    "Show me the standings of my classic league 314 and tell me how the leader's gameweek 5 squad was set up.",
-    "How is FPL entry 12345 doing this season — current rank, points per gameweek, and which chips have they played?"
+    "Which teams have the easiest fixture run over the next few gameweeks?",
+    "How did the latest gameweek go — average score, results, and the standout performers?"
   ],
   "sourceUrls": [
     "https://www.postman.com/fplassist/fpl-assist/collection/zqlmv01/fantasy-premier-league-api"

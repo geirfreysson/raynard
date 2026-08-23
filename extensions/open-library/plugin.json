@@ -13,8 +13,8 @@
   "createdAt": "2026-08-15T00:00:00.000Z",
   "samplePrompts": [
     "Find books about Icelandic folklore.",
-    "Show me books written by Ursula K. Le Guin.",
-    "Search for books about building open source communities."
+    "What has Ursula K. Le Guin written, and when did each book come out?",
+    "I want to read about how open source communities are built — what's out there?"
   ],
   "sourceUrls": [
     "https://openlibrary.org/dev/docs/api/search"
