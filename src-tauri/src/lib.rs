@@ -1,4 +1,5 @@
 mod extension_contribution;
+mod scheduled_tasks;
 
 use extension_contribution::{
     contribution_test_files, prepare_extension_contribution_in, ContributionMetadata,
@@ -25,7 +26,13 @@ const KEYRING_SERVICE: &str = "ai.raynard";
 const INLINE_RESULT_DATA_LIMIT_BYTES: usize = 128 * 1024;
 const CHAT_HISTORY_INDEX_VERSION: u32 = 1;
 static CHAT_HISTORY_INDEX_LOCK: Mutex<()> = Mutex::new(());
+static SCHEDULED_TASK_LOCK: Mutex<()> = Mutex::new(());
 static BUNDLED_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+#[derive(Default)]
+struct ScheduledTaskWakeState {
+    channel: Mutex<Option<Channel<i64>>>,
+}
 
 #[derive(Default)]
 struct StreamCancelState {
@@ -222,6 +229,15 @@ struct StoredChatMessage {
     /// its inline Install action survives chat navigation and app restarts.
     #[serde(rename = "extensionRecommendation", default)]
     extension_recommendation: Option<Value>,
+    /// Pending/created host scheduling metadata. It contains no credentials.
+    #[serde(rename = "scheduledTaskRequest", default)]
+    scheduled_task_request: Option<Value>,
+    #[serde(rename = "scheduledTaskId", default)]
+    scheduled_task_id: Option<String>,
+    #[serde(rename = "scheduledTaskName", default)]
+    scheduled_task_name: Option<String>,
+    #[serde(rename = "scheduledExecutionId", default)]
+    scheduled_execution_id: Option<String>,
     /// Token counts for the turn that produced this message
     /// ({ input, output, cacheRead, cacheWrite, totalTokens, contextTokens,
     /// contextWindow }). Counts only — never text, ids, or headers.
@@ -557,6 +573,203 @@ async fn list_bookmarks(
     .map_err(|error| format!("Could not join bookmark listing task: {error}"))?
 }
 
+fn scheduled_tasks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("scheduled-tasks").join("tasks.json"))
+}
+
+#[tauri::command]
+fn subscribe_scheduled_tasks(
+    state: tauri::State<'_, ScheduledTaskWakeState>,
+    on_wake: Channel<i64>,
+) -> Result<(), String> {
+    *state
+        .channel
+        .lock()
+        .map_err(|_| "Could not subscribe to scheduled tasks.".to_string())? =
+        Some(on_wake.clone());
+    on_wake
+        .send(now_millis())
+        .map_err(|error| format!("Could not wake the scheduled-task runner: {error}"))
+}
+
+#[tauri::command]
+async fn list_scheduled_tasks(
+    app: tauri::AppHandle,
+) -> Result<Vec<scheduled_tasks::ScheduledTask>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::list(&scheduled_tasks_path(&app)?)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task listing: {error}"))?
+}
+
+fn validate_task_destination(
+    app: &tauri::AppHandle,
+    draft: &scheduled_tasks::ScheduledTaskDraft,
+) -> Result<(), String> {
+    if draft.destination_type == "existingChat" {
+        let chat_id = draft.destination_chat_id.as_deref().unwrap_or_default();
+        if !chat_history_path(app, chat_id)?.is_file() {
+            return Err("The selected destination chat no longer exists.".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn normalize_task_destination(draft: &mut scheduled_tasks::ScheduledTaskDraft) {
+    if draft.destination_type == "existingChat" {
+        draft.destination_chat_id = draft.destination_chat_id.as_deref().map(normalize_chat_id);
+    }
+}
+
+#[tauri::command]
+async fn create_scheduled_task(
+    app: tauri::AppHandle,
+    mut draft: scheduled_tasks::ScheduledTaskDraft,
+) -> Result<scheduled_tasks::ScheduledTask, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        normalize_task_destination(&mut draft);
+        validate_task_destination(&app, &draft)?;
+        scheduled_tasks::create(&scheduled_tasks_path(&app)?, draft)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task creation: {error}"))?
+}
+
+#[tauri::command]
+async fn update_scheduled_task(
+    app: tauri::AppHandle,
+    task_id: String,
+    mut draft: scheduled_tasks::ScheduledTaskDraft,
+) -> Result<scheduled_tasks::ScheduledTask, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        normalize_task_destination(&mut draft);
+        validate_task_destination(&app, &draft)?;
+        scheduled_tasks::update(&scheduled_tasks_path(&app)?, &task_id, draft)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task update: {error}"))?
+}
+
+#[tauri::command]
+async fn set_scheduled_task_enabled(
+    app: tauri::AppHandle,
+    task_id: String,
+    enabled: bool,
+) -> Result<scheduled_tasks::ScheduledTask, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::set_enabled(&scheduled_tasks_path(&app)?, &task_id, enabled)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task state update: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_scheduled_task(app: tauri::AppHandle, task_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::delete(&scheduled_tasks_path(&app)?, &task_id)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task deletion: {error}"))?
+}
+
+#[tauri::command]
+async fn list_due_scheduled_tasks(
+    app: tauri::AppHandle,
+) -> Result<Vec<scheduled_tasks::ScheduledTask>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::due(&scheduled_tasks_path(&app)?)
+    })
+    .await
+    .map_err(|error| format!("Could not join due-task listing: {error}"))?
+}
+
+#[tauri::command]
+async fn claim_scheduled_task(
+    app: tauri::AppHandle,
+    task_id: String,
+    manual: bool,
+) -> Result<scheduled_tasks::ScheduledExecution, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::claim(&scheduled_tasks_path(&app)?, &task_id, manual)
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task claim: {error}"))?
+}
+
+#[tauri::command]
+async fn complete_scheduled_task(
+    app: tauri::AppHandle,
+    task_id: String,
+    execution_id: String,
+    status: String,
+    error: Option<String>,
+    destination_chat_id: Option<String>,
+) -> Result<scheduled_tasks::ScheduledTask, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::complete(
+            &scheduled_tasks_path(&app)?,
+            &task_id,
+            &execution_id,
+            &status,
+            error,
+            destination_chat_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task completion: {error}"))?
+}
+
+#[tauri::command]
+async fn assign_scheduled_task_chat(
+    app: tauri::AppHandle,
+    task_id: String,
+    execution_id: String,
+    chat_id: String,
+) -> Result<scheduled_tasks::ScheduledTask, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::assign_destination_chat(
+            &scheduled_tasks_path(&app)?,
+            &task_id,
+            &execution_id,
+            &chat_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("Could not join scheduled-task destination update: {error}"))?
+}
+
 #[tauri::command]
 async fn list_chat_bookmarks(
     app: tauri::AppHandle,
@@ -840,6 +1053,19 @@ async fn delete_chat_history(
     let store = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let safe_chat_id = normalize_chat_id(&chat_id);
+        let _scheduled_guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        let targeting =
+            scheduled_tasks::tasks_targeting_chat(&scheduled_tasks_path(&app)?, &safe_chat_id)?;
+        if !targeting.is_empty() {
+            return Err(format!(
+                "This chat is used by scheduled task{}: {}. Retarget or delete {} first.",
+                if targeting.len() == 1 { "" } else { "s" },
+                targeting.join(", "),
+                if targeting.len() == 1 { "it" } else { "them" }
+            ));
+        }
         let path = chat_history_path(&app, &safe_chat_id)?;
         if path.is_file() {
             fs::remove_file(path).map_err(|error| format!("Could not delete chat: {error}"))?;
@@ -2329,6 +2555,7 @@ struct MainAgentReply {
     provider: String,
     model: String,
     build_request: Option<Value>,
+    scheduled_task_request: Option<Value>,
     /// Structured terminal outcome such as an available-extension
     /// recommendation. Opaque JSON decoded defensively by the renderer.
     result: Option<Value>,
@@ -2377,6 +2604,7 @@ struct MainAgentStreamEvent {
     args: Option<Value>,
     result: Option<Value>,
     build_request: Option<Value>,
+    scheduled_task_request: Option<Value>,
     /// Sidecar `retry` payload, passed through untouched so the renderer can say
     /// which attempt is running and why.
     retry: Option<Value>,
@@ -2536,6 +2764,8 @@ async fn run_main_agent_stream(
     on_event: Channel<MainAgentStreamEvent>,
     messages: Vec<ChatMessage>,
     mode: String,
+    scheduled_execution: Option<bool>,
+    scheduler_context: Option<Value>,
 ) -> Result<MainAgentReply, String> {
     let mut config = resolve_model_config(Some(&app))?;
     if config.auth_method == AuthMethod::OAuth {
@@ -2576,6 +2806,7 @@ async fn run_main_agent_stream(
         .into_iter()
         .filter(|extension| !extension.installed)
         .collect::<Vec<_>>();
+    let chats = load_or_rebuild_chat_history_index_in(&chat_history_dir(&app)?)?;
     let sidecar_request = json!({
         "messages": messages
             .iter()
@@ -2590,7 +2821,11 @@ async fn run_main_agent_stream(
         "plugins": plugins,
         // Kept out of the system prompt. The sidecar exposes this catalog only
         // after the model calls its on-demand missing-capability search tool.
-        "availableExtensions": available_extensions
+        "availableExtensions": available_extensions,
+        "scheduledExecution": scheduled_execution.unwrap_or(false),
+        "schedulerContext": scheduler_context.unwrap_or_else(|| json!({ "timeZone": "UTC" })),
+        "chats": chats.iter().take(100).map(|chat| json!({ "id": chat.chat_id, "name": chat.name })).collect::<Vec<_>>(),
+        "currentChatId": chat_id
     });
 
     let mut child = Command::new(resolve_node_command())
@@ -2635,6 +2870,7 @@ async fn run_main_agent_stream(
     let reader = BufReader::new(stdout);
     let mut answer = String::new();
     let mut build_request = None;
+    let mut scheduled_task_request = None;
     let mut turn_result = None;
     let mut turn_usage: Option<Value> = None;
     let artifact_root = result_artifacts_dir(&app)?;
@@ -2666,6 +2902,7 @@ async fn run_main_agent_stream(
                 args: None,
                 result: None,
                 build_request: None,
+                scheduled_task_request: None,
                 retry: None,
                 usage: None,
             });
@@ -2674,6 +2911,7 @@ async fn run_main_agent_stream(
                 provider: config.provider,
                 model: config.model,
                 build_request,
+                scheduled_task_request,
                 result: turn_result,
                 usage: turn_usage,
             });
@@ -2717,6 +2955,9 @@ async fn run_main_agent_stream(
         if event_type == "build_request" {
             build_request = payload.get("buildRequest").cloned();
         }
+        if event_type == "scheduled_task_request" {
+            scheduled_task_request = payload.get("scheduledTaskRequest").cloned();
+        }
         if event_type == "done" {
             turn_result = payload.get("result").cloned();
         }
@@ -2749,6 +2990,7 @@ async fn run_main_agent_stream(
                 args: None,
                 result: None,
                 build_request: None,
+                scheduled_task_request: None,
                 // Carries resumeAttempts, so the host can say the turn was
                 // retried rather than presenting a one-shot failure.
                 retry: Some(payload.clone()),
@@ -2780,6 +3022,7 @@ async fn run_main_agent_stream(
             args: payload.get("args").cloned(),
             result: payload.get("result").cloned(),
             build_request: payload.get("buildRequest").cloned(),
+            scheduled_task_request: payload.get("scheduledTaskRequest").cloned(),
             // `retry` events reach the channel through this generic relay; the
             // whole payload rides along so the renderer needs no new columns.
             retry: if event_type == "retry" {
@@ -2814,6 +3057,7 @@ async fn run_main_agent_stream(
             args: None,
             result: None,
             build_request: None,
+            scheduled_task_request: None,
             retry: None,
             usage: None,
         });
@@ -2822,6 +3066,7 @@ async fn run_main_agent_stream(
             provider: config.provider,
             model: config.model,
             build_request,
+            scheduled_task_request,
             result: turn_result,
             usage: turn_usage,
         });
@@ -2835,6 +3080,7 @@ async fn run_main_agent_stream(
         provider: config.provider,
         model: config.model,
         build_request,
+        scheduled_task_request,
         result: turn_result,
         usage: turn_usage,
     })
@@ -4213,29 +4459,47 @@ fn packaged_node_path_for(executable: &Path, node_name: &str) -> Option<PathBuf>
     Some(executable.parent()?.join(node_name))
 }
 
-/// A packaged app has no reliable current directory, so bundle resources are
-/// resolved from the Tauri resource root captured during setup. The
-/// directory-relative candidates keep `tauri dev` and the test suite working.
-fn resolve_runtime_script_path(script_name: &str) -> Result<PathBuf, String> {
-    if let Some(path) = BUNDLED_RESOURCE_DIR
-        .get()
-        .map(|resource_dir| packaged_runtime_scripts_dir_for(resource_dir))
-        .map(|scripts| scripts.join(script_name))
-        .filter(|path| path.is_file())
-    {
-        return Ok(path);
-    }
+fn select_runtime_script_path(
+    current_dir: &Path,
+    resource_dir: Option<&Path>,
+    script_name: &str,
+    prefer_development_sources: bool,
+) -> Option<PathBuf> {
+    let development = [
+        current_dir.join("scripts").join(script_name),
+        current_dir.join("..").join("scripts").join(script_name),
+    ];
+    let packaged = resource_dir
+        .map(packaged_runtime_scripts_dir_for)
+        .map(|scripts| scripts.join(script_name));
 
+    if prefer_development_sources {
+        development
+            .into_iter()
+            .chain(packaged)
+            .find(|path| path.is_file())
+    } else {
+        packaged
+            .into_iter()
+            .chain(development)
+            .find(|path| path.is_file())
+    }
+}
+
+/// Development must execute the repository scripts directly: Tauri also copies
+/// the gitignored staged runtime into `target/debug`, and that copy can be older
+/// than a sidecar edited during `tauri dev`. Release builds invert the order so
+/// a packaged app never depends on its working directory or developer files.
+fn resolve_runtime_script_path(script_name: &str) -> Result<PathBuf, String> {
     let current =
         env::current_dir().map_err(|error| format!("Could not read current directory: {error}"))?;
-    let candidates = [
-        current.join("scripts").join(script_name),
-        current.join("..").join("scripts").join(script_name),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| format!("Could not find scripts/{script_name}."))
+    select_runtime_script_path(
+        &current,
+        BUNDLED_RESOURCE_DIR.get().map(PathBuf::as_path),
+        script_name,
+        cfg!(debug_assertions),
+    )
+    .ok_or_else(|| format!("Could not find scripts/{script_name}."))
 }
 
 /// Node is only on `PATH` for developer machines. A packaged app must use the
@@ -4803,6 +5067,10 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 sources: message.sources,
                 credential_request: message.credential_request,
                 extension_recommendation: message.extension_recommendation,
+                scheduled_task_request: message.scheduled_task_request,
+                scheduled_task_id: message.scheduled_task_id,
+                scheduled_task_name: message.scheduled_task_name,
+                scheduled_execution_id: message.scheduled_execution_id,
                 usage: message.usage,
             })
         })
@@ -5989,12 +6257,13 @@ mod tests {
         parse_moonshot_balance, parse_stored_credential, plugin_credential_account,
         provider_preset, read_catalog_extension_detail_from, read_catalog_extensions,
         read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
-        remove_chat_history_index_row_in, save_plugin_cache_settings, share_deep_link_payload,
-        steer_command_type, upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in,
-        AuthMethod, BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
-        PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
-        StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
-        APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
+        remove_chat_history_index_row_in, save_plugin_cache_settings, select_runtime_script_path,
+        share_deep_link_payload, steer_command_type, upsert_bookmark_cache,
+        upsert_chat_history_index_in, write_bookmark_in, AuthMethod, BookmarkCache,
+        BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool, PluginBuilderRequest,
+        PluginCacheSettings, ProviderQuota, RuntimeToolsCache, StoredBookmark, StoredChatMessage,
+        StoredCredential, StreamEvent, UsageTotals, APP_URL_SCHEME, KEYCHAIN_CACHE,
+        OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::json;
     use std::fs;
@@ -6162,6 +6431,34 @@ mod tests {
     }
 
     #[test]
+    fn development_prefers_live_sidecars_while_release_prefers_bundled_copies() {
+        let root = std::env::temp_dir().join(format!(
+            "raynard-sidecar-resolution-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let current = root.join("project");
+        let live = current.join("scripts").join("main-agent-sidecar.mjs");
+        let resources = root.join("resources");
+        let bundled = packaged_runtime_scripts_dir_for(&resources).join("main-agent-sidecar.mjs");
+        fs::create_dir_all(live.parent().unwrap()).unwrap();
+        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        fs::write(&live, "// live").unwrap();
+        fs::write(&bundled, "// stale staged copy").unwrap();
+
+        assert_eq!(
+            select_runtime_script_path(&current, Some(&resources), "main-agent-sidecar.mjs", true,),
+            Some(live.clone())
+        );
+        assert_eq!(
+            select_runtime_script_path(&current, Some(&resources), "main-agent-sidecar.mjs", false,),
+            Some(bundled)
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn large_stream_result_data_moves_to_an_artifact() {
         let root = std::env::temp_dir().join(format!(
             "raynard-result-artifact-{}-{}",
@@ -6221,6 +6518,10 @@ mod tests {
             sources: None,
             credential_request: None,
             extension_recommendation: None,
+            scheduled_task_request: None,
+            scheduled_task_id: None,
+            scheduled_task_name: None,
+            scheduled_execution_id: None,
             usage: None,
         }];
 
@@ -6807,6 +7108,10 @@ mod tests {
             sources: None,
             credential_request: None,
             extension_recommendation: None,
+            scheduled_task_request: None,
+            scheduled_task_id: None,
+            scheduled_task_name: None,
+            scheduled_execution_id: None,
             usage: None,
         }]);
 
@@ -7049,6 +7354,10 @@ mod tests {
             sources: None,
             credential_request: None,
             extension_recommendation: None,
+            scheduled_task_request: None,
+            scheduled_task_id: None,
+            scheduled_task_name: None,
+            scheduled_execution_id: None,
             usage: Some(usage.clone()),
         }]);
 
@@ -7076,6 +7385,10 @@ mod tests {
             sources: None,
             credential_request: None,
             extension_recommendation: None,
+            scheduled_task_request: None,
+            scheduled_task_id: None,
+            scheduled_task_name: None,
+            scheduled_execution_id: None,
             usage: None,
         }]);
 
@@ -7321,6 +7634,10 @@ mod tests {
                 sources: None,
                 credential_request: Some(request.clone()),
                 extension_recommendation: Some(recommendation.clone()),
+                scheduled_task_request: None,
+                scheduled_task_id: None,
+                scheduled_task_name: None,
+                scheduled_execution_id: None,
                 usage: None,
             },
             StoredChatMessage {
@@ -7341,6 +7658,10 @@ mod tests {
                 sources: None,
                 credential_request: Some(request.clone()),
                 extension_recommendation: Some(recommendation.clone()),
+                scheduled_task_request: None,
+                scheduled_task_id: None,
+                scheduled_task_name: None,
+                scheduled_execution_id: None,
                 usage: None,
             },
         ]);
@@ -7369,6 +7690,7 @@ pub fn run() {
         .manage(AgentSteerState::default())
         .manage(ProviderQuotaCache::default())
         .manage(BookmarkStoreState::default())
+        .manage(ScheduledTaskWakeState::default())
         .manage(PendingDeepLinks::default())
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
@@ -7379,6 +7701,24 @@ pub fn run() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 let _ = BUNDLED_RESOURCE_DIR.set(resource_dir);
             }
+
+            if let Ok(path) = scheduled_tasks_path(app.handle()) {
+                let _guard = SCHEDULED_TASK_LOCK.lock().ok();
+                let _ = scheduled_tasks::recover_interrupted(&path);
+            }
+            let scheduled_handle = app.handle().clone();
+            thread::spawn(move || loop {
+                thread::sleep(std::time::Duration::from_secs(30));
+                let channel = scheduled_handle
+                    .state::<ScheduledTaskWakeState>()
+                    .channel
+                    .lock()
+                    .ok()
+                    .and_then(|channel| channel.clone());
+                if let Some(channel) = channel {
+                    let _ = channel.send(now_millis());
+                }
+            });
 
             // A cold launch has already consumed its URL by the time the plugin
             // is up, so it is read back explicitly; everything after arrives
@@ -7404,12 +7744,17 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
+            assign_scheduled_task_chat,
             cancel_model_chat_stream,
+            claim_scheduled_task,
+            complete_scheduled_task,
+            create_scheduled_task,
             steer_main_agent_stream,
             clear_generated_plugin_cache,
             delete_bookmark,
             delete_chat_history,
             delete_generated_plugin,
+            delete_scheduled_task,
             save_plugin_credential,
             delete_plugin_credential,
             execute_generated_plugin_tool,
@@ -7424,6 +7769,8 @@ pub fn run() {
             list_generated_plugins,
             list_chat_history,
             list_model_providers,
+            list_due_scheduled_tasks,
+            list_scheduled_tasks,
             open_extension_contribution_folder,
             read_catalog_extension,
             read_generated_plugin,
@@ -7444,9 +7791,12 @@ pub fn run() {
             scaffold_plugin_capability,
             set_active_model_provider,
             set_active_provider,
+            set_scheduled_task_enabled,
             sign_out_provider,
             submit_provider_oauth_code,
-            subscribe_deep_links
+            subscribe_deep_links,
+            subscribe_scheduled_tasks,
+            update_scheduled_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

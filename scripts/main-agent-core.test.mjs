@@ -10,6 +10,7 @@ import {
   createGeneratedPluginTools,
   createExtensionRecommendationTool,
   createModel,
+  createScheduledTaskTool,
   createUsageTotal,
   addUsage,
   emptyUsage,
@@ -156,6 +157,60 @@ describe('main agent core', () => {
     expect(build).toContain('Do not answer a build request with code');
     expect(build).toContain('request_plugin_build');
     expect(build).toContain('Only the separate Pi coding agent may write plugin files');
+  });
+
+  it('routes recurring work to the host scheduling tool and disables recursion during runs', () => {
+    const enabled = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['oecd_data'],
+      scheduling: {
+        enabled: true,
+        localDateTime: '2026-08-23T14:30:00Z',
+        timeZone: 'Europe/London',
+        currentChatId: 'chat-one',
+        chats: [{ id: 'chat-one', name: 'Inflation research' }]
+      }
+    });
+    const execution = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['oecd_data'],
+      scheduling: { enabled: false }
+    });
+
+    expect(enabled).toMatch(/FIRST and ONLY tool call is request_scheduled_task/);
+    expect(enabled).toContain('chat-one: Inflation research');
+    expect(execution).toMatch(/already a scheduled execution/i);
+    expect(execution).toMatch(/never create another scheduled task/i);
+  });
+
+  it('normalizes a quarterly scheduling request into a terminating draft', async () => {
+    const requests = [];
+    const tool = createScheduledTaskTool(Type, (request) => requests.push(request), {
+      context: {
+        localDateTime: '2026-08-23T14:30:00Z',
+        timeZone: 'Europe/London',
+        chats: [{ id: 'chat-one', name: 'Inflation research' }]
+      }
+    });
+    const result = await tool.execute('schedule-1', {
+      name: 'Iceland inflation comparison',
+      prompt: 'Check Iceland inflation and compare it with the OECD.',
+      frequency: 'quarterly'
+    });
+
+    expect(tool.name).toBe('request_scheduled_task');
+    expect(result.terminate).toBe(true);
+    expect(requests).toEqual([
+      expect.objectContaining({
+        destinationType: 'newChat',
+        schedule: expect.objectContaining({
+          frequency: 'quarterly',
+          timeZone: 'Europe/London',
+          dayOfMonth: 23,
+          monthOfYear: 8
+        })
+      })
+    ]);
   });
 
   it('clarifies the data source instead of proposing a plugin without a credible API', () => {

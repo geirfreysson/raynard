@@ -12,6 +12,7 @@ import {
   Plug,
   Plus,
   Share2,
+  Timer,
   Trash2,
   type IconNode
 } from 'lucide';
@@ -62,6 +63,7 @@ import {
   type ChatMessage,
   type PluginBuilderRequest,
   type SteerDelivery,
+  type ScheduledTaskRequest,
   type TurnUsage
 } from './agent-runtime';
 import {
@@ -239,6 +241,11 @@ type StoredChatMessage = {
    * source of the context meter and the per-chat figures in `/status`.
    */
   usage?: TurnUsage;
+  /** Host-owned scheduling proposal awaiting confirmation, or the task that was created. */
+  scheduledTaskRequest?: ScheduledTaskRequest;
+  scheduledTaskId?: string;
+  scheduledTaskName?: string;
+  scheduledExecutionId?: string;
 };
 
 type StoredCredentialRequest = {
@@ -290,6 +297,25 @@ type StoredBookmark = {
 type BookmarkList = {
   bookmarks: StoredBookmark[];
   total: number;
+};
+
+type ScheduledTask = ScheduledTaskRequest & {
+  id: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string;
+  lastRunAt?: string;
+  lastStatus?: string;
+  lastError?: string;
+  activeExecutionId?: string;
+};
+
+type ScheduledExecution = {
+  executionId: string;
+  manual: boolean;
+  scheduledFor: string;
+  task: ScheduledTask;
 };
 
 type GeneratedPlugin = {
@@ -394,7 +420,7 @@ type PluginScaffoldStatus = {
   hasRuntimeTools: boolean;
   status: string;
 };
-type SidebarView = 'chats' | 'plugins' | 'bookmarks';
+type SidebarView = 'chats' | 'plugins' | 'bookmarks' | 'scheduled';
 
 // The plugin a Build-mode chat is actively editing. Once set, later Build-mode
 // messages route straight to the coding agent for this plugin.
@@ -434,6 +460,7 @@ const DEFAULT_SPLASH_PROMPTS = [
 ] as const;
 const appIcons: Record<string, IconNode> = {
   bookmark: Bookmark,
+  stopwatch: Timer,
   'book-open': BookOpen,
   database: Database,
   ellipsis: Ellipsis,
@@ -479,6 +506,9 @@ app.innerHTML = `
       <button id="bookmarksToggle" class="sidebar-rail-btn" type="button" aria-label="Bookmarks" aria-pressed="false">
         ${iconSvg('bookmark')}
       </button>
+      <button id="scheduledToggle" class="sidebar-rail-btn" type="button" aria-label="Scheduled tasks" aria-pressed="false">
+        ${iconSvg('stopwatch')}
+      </button>
       <button id="newChatRail" class="sidebar-rail-btn" type="button" aria-label="New chat">
         ${iconSvg('plus')}
       </button>
@@ -496,6 +526,7 @@ app.innerHTML = `
       <nav id="chatHistoryList" class="chat-history-list" aria-label="Chat history"></nav>
       <nav id="pluginList" class="chat-history-list is-hidden" aria-label="Generated plugins"></nav>
       <nav id="bookmarkList" class="chat-history-list bookmark-list is-hidden" aria-label="Bookmarks"></nav>
+      <nav id="scheduledTaskList" class="chat-history-list scheduled-task-list is-hidden" aria-label="Scheduled tasks"></nav>
       <p id="chatHistoryStatus" class="chat-history-status"></p>
     </aside>
 
@@ -653,6 +684,7 @@ const shell = document.querySelector<HTMLElement>('.app-shell');
 const chatsToggle = document.querySelector<HTMLButtonElement>('#chatsToggle');
 const pluginsToggle = document.querySelector<HTMLButtonElement>('#pluginsToggle');
 const bookmarksToggle = document.querySelector<HTMLButtonElement>('#bookmarksToggle');
+const scheduledToggle = document.querySelector<HTMLButtonElement>('#scheduledToggle');
 const newChatRail = document.querySelector<HTMLButtonElement>('#newChatRail');
 const chatSidebar = document.querySelector<HTMLElement>('#chatSidebar');
 const sidebarClose = document.querySelector<HTMLButtonElement>('#sidebarClose');
@@ -660,6 +692,7 @@ const newChatButton = document.querySelector<HTMLButtonElement>('#newChatButton'
 const chatHistoryList = document.querySelector<HTMLElement>('#chatHistoryList');
 const pluginList = document.querySelector<HTMLElement>('#pluginList');
 const bookmarkList = document.querySelector<HTMLElement>('#bookmarkList');
+const scheduledTaskList = document.querySelector<HTMLElement>('#scheduledTaskList');
 const chatHistoryStatus = document.querySelector<HTMLElement>('#chatHistoryStatus');
 const introForm = document.querySelector<HTMLFormElement>('#introForm');
 const introInput = document.querySelector<HTMLTextAreaElement>('#introInput');
@@ -737,6 +770,9 @@ let bookmarkRows: StoredBookmark[] = [];
 let bookmarkTotal = 0;
 let bookmarkLoading = false;
 let bookmarkRefreshQueued = false;
+let scheduledTasks: ScheduledTask[] = [];
+let scheduledTaskRunnerActive = false;
+const scheduledTaskQueue: Array<{ taskId: string; manual: boolean }> = [];
 let activeBookmarks = new Map<string, StoredBookmark>();
 let selectedPluginId = '';
 let selectedCatalogExtensionSlug = '';
@@ -787,6 +823,7 @@ initProviderOnboarding().catch(() => {
 });
 void refreshChatHistory();
 void refreshGeneratedPlugins();
+void refreshScheduledTasks();
 syncModeControls();
 
 // Shared answers. The subscription drains anything the OS delivered before the
@@ -798,6 +835,12 @@ void subscribeDeepLinks(APP_SCHEME, (encoded) => void openSharedAnswer(encoded))
 });
 const devShare = readDevShareHash(window.location.hash);
 if (devShare) void openSharedAnswer(devShare);
+
+const scheduledWakeChannel = new Channel<number>(() => void enqueueDueScheduledTasks());
+void invoke('subscribe_scheduled_tasks', { onWake: scheduledWakeChannel }).catch(() => {
+  // An older host has no scheduler. The sidebar commands will surface that
+  // mismatch if the user opens it.
+});
 
 introForm?.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -938,6 +981,14 @@ bookmarksToggle?.addEventListener('click', () => {
   }
   setSidebarOpen(!shell?.classList.contains('sidebar-open'));
 });
+scheduledToggle?.addEventListener('click', () => {
+  if (sidebarView !== 'scheduled') {
+    setSidebarView('scheduled');
+    void refreshScheduledTasks();
+    return;
+  }
+  setSidebarOpen(!shell?.classList.contains('sidebar-open'));
+});
 
 sidebarClose?.addEventListener('click', () => setSidebarOpen(false));
 newChatButton?.addEventListener('click', () => {
@@ -963,6 +1014,7 @@ async function loadEnvStatus() {
   const status = await invoke<LlmEnvStatus>('load_llm_env_status');
   llmEnvStatus = status;
   renderComposerModelLabel();
+  if (status.configured) void enqueueDueScheduledTasks();
 }
 
 /**
@@ -2346,6 +2398,8 @@ function setSidebarOpen(open: boolean) {
       ? pluginsToggle
       : sidebarView === 'bookmarks'
         ? bookmarksToggle
+        : sidebarView === 'scheduled'
+          ? scheduledToggle
         : chatsToggle;
   activeToggle?.setAttribute('aria-pressed', String(open));
 }
@@ -2356,16 +2410,25 @@ function setSidebarView(view: SidebarView) {
   chatsToggle?.classList.toggle('is-active', view === 'chats');
   pluginsToggle?.classList.toggle('is-active', view === 'plugins');
   bookmarksToggle?.classList.toggle('is-active', view === 'bookmarks');
+  scheduledToggle?.classList.toggle('is-active', view === 'scheduled');
   chatsToggle?.setAttribute('aria-pressed', String(view === 'chats'));
   pluginsToggle?.setAttribute('aria-pressed', String(view === 'plugins'));
   bookmarksToggle?.setAttribute('aria-pressed', String(view === 'bookmarks'));
+  scheduledToggle?.setAttribute('aria-pressed', String(view === 'scheduled'));
   if (chatHistoryList) chatHistoryList.classList.toggle('is-hidden', view !== 'chats');
   if (pluginList) pluginList.classList.toggle('is-hidden', view !== 'plugins');
   if (bookmarkList) bookmarkList.classList.toggle('is-hidden', view !== 'bookmarks');
+  if (scheduledTaskList) scheduledTaskList.classList.toggle('is-hidden', view !== 'scheduled');
   const title = chatSidebar?.querySelector('h2');
   if (title) {
     title.textContent =
-      view === 'plugins' ? 'Extensions' : view === 'bookmarks' ? 'Bookmarks' : 'Chats';
+      view === 'plugins'
+        ? 'Extensions'
+        : view === 'bookmarks'
+          ? 'Bookmarks'
+          : view === 'scheduled'
+            ? 'Scheduled tasks'
+            : 'Chats';
   }
   newChatButton?.classList.toggle('is-hidden', view !== 'chats');
   if (chatHistoryStatus) {
@@ -2379,6 +2442,7 @@ function sidebarStatusText(view: SidebarView) {
     if (bookmarkLoading && !bookmarkRows.length) return 'Loading bookmarks…';
     return bookmarkTotal ? '' : 'No bookmarks yet.';
   }
+  if (view === 'scheduled') return scheduledTasks.length ? '' : 'No scheduled tasks yet.';
   return chatHistoryRows.length ? '' : 'No saved chats yet.';
 }
 
@@ -3299,6 +3363,452 @@ function renderBookmarks() {
   }
 }
 
+async function refreshScheduledTasks() {
+  try {
+    scheduledTasks = await invoke<ScheduledTask[]>('list_scheduled_tasks');
+    renderScheduledTasks();
+    if (sidebarView === 'scheduled' && chatHistoryStatus) {
+      chatHistoryStatus.textContent = sidebarStatusText('scheduled');
+    }
+  } catch (error) {
+    if (sidebarView === 'scheduled' && chatHistoryStatus) {
+      chatHistoryStatus.textContent = getErrorMessage(error, 'Could not load scheduled tasks.');
+    }
+  }
+}
+
+function scheduleSummary(task: Pick<ScheduledTask, 'schedule' | 'enabled' | 'activeExecutionId'>) {
+  if (task.activeExecutionId) return 'Running now';
+  const label = task.schedule.frequency[0].toUpperCase() + task.schedule.frequency.slice(1);
+  return `${task.enabled ? label : 'Paused'} · ${task.schedule.time}`;
+}
+
+function renderScheduledTasks() {
+  if (!scheduledTaskList) return;
+  scheduledTaskList.replaceChildren();
+  for (const task of scheduledTasks) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `scheduled-task-row${task.enabled ? '' : ' is-paused'}`;
+    const title = document.createElement('strong');
+    title.textContent = task.name;
+    const schedule = document.createElement('span');
+    schedule.textContent = scheduleSummary(task);
+    const next = document.createElement('span');
+    next.textContent = task.enabled ? `Next ${formatChatDate(task.nextRunAt)}` : 'Not scheduled';
+    row.append(title, schedule, next);
+    row.addEventListener('click', () => openScheduledTask(task));
+    scheduledTaskList.appendChild(row);
+  }
+}
+
+function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest): ScheduledTaskRequest {
+  const data = new FormData(form);
+  const frequency = String(data.get('frequency')) as ScheduledTaskRequest['schedule']['frequency'];
+  const destination = String(data.get('destination'));
+  return {
+    name: String(data.get('name') || '').trim(),
+    prompt: String(data.get('prompt') || '').trim(),
+    destinationType: destination === 'newChat' ? 'newChat' : 'existingChat',
+    destinationChatId:
+      destination === 'newChat'
+        ? fallback.destinationType === 'newChat'
+          ? fallback.destinationChatId
+          : undefined
+        : destination,
+    schedule: {
+      frequency,
+      time: String(data.get('time') || ''),
+      timeZone: fallback.schedule.timeZone,
+      dayOfWeek: frequency === 'weekly' ? Number(data.get('dayOfWeek')) : undefined,
+      dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
+        ? Number(data.get('dayOfMonth'))
+        : undefined,
+      monthOfYear: ['quarterly', 'yearly'].includes(frequency)
+        ? Number(data.get('monthOfYear'))
+        : undefined
+    }
+  };
+}
+
+function renderTaskEditor(
+  root: HTMLElement,
+  draft: ScheduledTaskRequest,
+  options: { submitLabel: string; onSubmit: (draft: ScheduledTaskRequest, status: HTMLElement) => Promise<void> }
+) {
+  root.replaceChildren();
+  const form = document.createElement('form');
+  form.className = 'scheduled-task-editor';
+  form.innerHTML = `
+    <label><span>Name</span><input name="name" required maxlength="120"></label>
+    <label><span>Prompt</span><textarea name="prompt" required rows="4"></textarea></label>
+    <label><span>Destination</span><select name="destination"></select></label>
+    <div class="scheduled-task-schedule-grid">
+      <label><span>Repeats</span><select name="frequency">
+        <option value="daily">Daily</option><option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option>
+        <option value="yearly">Yearly</option>
+      </select></label>
+      <label><span>Time</span><input name="time" type="time" required></label>
+      <label data-calendar-field="weekday"><span>Weekday</span><select name="dayOfWeek">
+        <option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option>
+        <option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="7">Sunday</option>
+      </select></label>
+      <label data-calendar-field="day"><span>Day</span><input name="dayOfMonth" type="number" min="1" max="31"></label>
+      <label data-calendar-field="month"><span>Anchor month</span><input name="monthOfYear" type="number" min="1" max="12"></label>
+    </div>
+    <p class="scheduled-task-timezone"></p>
+    <p class="scheduled-task-form-status" aria-live="polite"></p>
+    <div class="scheduled-task-actions"><button type="submit" class="capability-primary-action"></button></div>
+  `;
+  const name = form.elements.namedItem('name') as HTMLInputElement;
+  const prompt = form.elements.namedItem('prompt') as HTMLTextAreaElement;
+  const destination = form.elements.namedItem('destination') as HTMLSelectElement;
+  const frequency = form.elements.namedItem('frequency') as HTMLSelectElement;
+  const time = form.elements.namedItem('time') as HTMLInputElement;
+  const weekday = form.elements.namedItem('dayOfWeek') as HTMLSelectElement;
+  const day = form.elements.namedItem('dayOfMonth') as HTMLInputElement;
+  const month = form.elements.namedItem('monthOfYear') as HTMLInputElement;
+  name.value = draft.name;
+  prompt.value = draft.prompt;
+  destination.add(new Option('Dedicated task chat', 'newChat'));
+  for (const chat of chatHistoryRows) destination.add(new Option(chat.name, chat.chatId));
+  if (
+    draft.destinationType === 'existingChat' &&
+    draft.destinationChatId &&
+    !chatHistoryRows.some((chat) => chat.chatId === draft.destinationChatId)
+  ) {
+    destination.add(
+      new Option(
+        draft.destinationChatId === activeChatMeta.chatId ? activeChatMeta.name : 'Selected chat',
+        draft.destinationChatId
+      )
+    );
+  }
+  destination.value = draft.destinationType === 'existingChat' ? draft.destinationChatId || '' : 'newChat';
+  if (!destination.value) destination.value = 'newChat';
+  frequency.value = draft.schedule.frequency;
+  time.value = draft.schedule.time;
+  weekday.value = String(draft.schedule.dayOfWeek || 1);
+  day.value = String(draft.schedule.dayOfMonth || 1);
+  month.value = String(draft.schedule.monthOfYear || 1);
+  const timezone = form.querySelector<HTMLElement>('.scheduled-task-timezone');
+  if (timezone) timezone.textContent = `Timezone: ${draft.schedule.timeZone}`;
+  const syncFields = () => {
+    const value = frequency.value;
+    form.querySelector<HTMLElement>('[data-calendar-field="weekday"]')?.classList.toggle('is-hidden', value !== 'weekly');
+    form.querySelector<HTMLElement>('[data-calendar-field="day"]')?.classList.toggle('is-hidden', !['monthly', 'quarterly', 'yearly'].includes(value));
+    form.querySelector<HTMLElement>('[data-calendar-field="month"]')?.classList.toggle('is-hidden', !['quarterly', 'yearly'].includes(value));
+  };
+  frequency.addEventListener('change', syncFields);
+  syncFields();
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (submit) submit.textContent = options.submitLabel;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const status = form.querySelector<HTMLElement>('.scheduled-task-form-status');
+    if (!status || !submit) return;
+    submit.disabled = true;
+    status.textContent = 'Saving…';
+    try {
+      await options.onSubmit(taskDraftFromForm(form, draft), status);
+    } catch (error) {
+      status.textContent = getErrorMessage(error, 'Could not save the task.');
+      submit.disabled = false;
+    }
+  });
+  root.appendChild(form);
+}
+
+function openScheduledTask(task: ScheduledTask) {
+  if (!pluginDetailView || !messages) return;
+  mainViewRevision += 1;
+  pluginDetailView.replaceChildren();
+  const header = document.createElement('header');
+  header.className = 'plugin-detail-header';
+  const heading = document.createElement('h1');
+  heading.textContent = task.name;
+  const meta = document.createElement('p');
+  meta.textContent = `${scheduleSummary(task)} · Next ${formatChatDate(task.nextRunAt)}`;
+  header.append(heading, meta);
+  pluginDetailView.appendChild(header);
+  const editor = document.createElement('section');
+  editor.className = 'plugin-detail-section';
+  pluginDetailView.appendChild(editor);
+  renderTaskEditor(editor, task, {
+    submitLabel: 'Save changes',
+    onSubmit: async (draft, status) => {
+      const updated = await invoke<ScheduledTask>('update_scheduled_task', { taskId: task.id, draft });
+      status.textContent = 'Saved.';
+      await refreshScheduledTasks();
+      openScheduledTask(updated);
+    }
+  });
+  const actions = document.createElement('div');
+  actions.className = 'scheduled-task-actions scheduled-task-detail-actions';
+  const pause = document.createElement('button');
+  pause.type = 'button';
+  pause.textContent = task.enabled ? 'Pause' : 'Resume';
+  pause.addEventListener('click', async () => {
+    const updated = await invoke<ScheduledTask>('set_scheduled_task_enabled', { taskId: task.id, enabled: !task.enabled });
+    await refreshScheduledTasks();
+    openScheduledTask(updated);
+  });
+  const run = document.createElement('button');
+  run.type = 'button';
+  run.textContent = 'Run now';
+  run.disabled = Boolean(task.activeExecutionId);
+  run.addEventListener('click', () => {
+    run.disabled = true;
+    run.textContent = 'Queued';
+    queueScheduledTask(task.id, true);
+  });
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = 'Delete';
+  remove.className = 'scheduled-task-delete';
+  remove.disabled = Boolean(task.activeExecutionId);
+  remove.addEventListener('click', async () => {
+    await invoke('delete_scheduled_task', { taskId: task.id });
+    await refreshScheduledTasks();
+    showConversation();
+  });
+  actions.append(pause, run, remove);
+  if (task.destinationChatId) {
+    const openChat = document.createElement('button');
+    openChat.type = 'button';
+    openChat.textContent = 'Open destination chat';
+    openChat.addEventListener('click', () => void openSavedChat(task.destinationChatId!));
+    actions.prepend(openChat);
+  }
+  pluginDetailView.appendChild(actions);
+  if (task.lastRunAt) {
+    const last = document.createElement('p');
+    last.className = 'plugin-detail-hint';
+    last.textContent = `Last run: ${formatChatDate(task.lastRunAt)} · ${task.lastStatus || 'unknown'}${task.lastError ? ` · ${task.lastError}` : ''}`;
+    pluginDetailView.appendChild(last);
+  }
+  shell?.classList.add('plugin-view');
+  shell?.classList.remove('pre-chat');
+  pluginDetailView.classList.remove('is-hidden');
+  messages.classList.add('is-hidden');
+  chatForm?.classList.add('is-hidden');
+  document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
+}
+
+async function enqueueDueScheduledTasks() {
+  if (!llmEnvStatus?.configured) return;
+  try {
+    const due = await invoke<ScheduledTask[]>('list_due_scheduled_tasks');
+    for (const task of due) queueScheduledTask(task.id, false);
+  } catch {
+    // Provider onboarding or an older host can make startup temporarily unable
+    // to run tasks. The next host wake retries without losing the due time.
+  }
+}
+
+function queueScheduledTask(taskId: string, manual: boolean) {
+  if (!scheduledTaskQueue.some((entry) => entry.taskId === taskId)) {
+    scheduledTaskQueue.push({ taskId, manual });
+  }
+  void drainScheduledTaskQueue();
+}
+
+async function drainScheduledTaskQueue() {
+  if (scheduledTaskRunnerActive) return;
+  const next = scheduledTaskQueue.shift();
+  if (!next) return;
+  const known = scheduledTasks.find((task) => task.id === next.taskId);
+  if (known?.destinationChatId && chatRuns.has(known.destinationChatId)) {
+    scheduledTaskQueue.push(next);
+    window.setTimeout(() => void drainScheduledTaskQueue(), 2_000);
+    return;
+  }
+  scheduledTaskRunnerActive = true;
+  try {
+    const execution = await invoke<ScheduledExecution>('claim_scheduled_task', {
+      taskId: next.taskId,
+      manual: next.manual
+    });
+    await refreshScheduledTasks();
+    await runScheduledExecution(execution);
+  } catch (error) {
+    console.error('Could not run scheduled task:', getErrorMessage(error));
+  } finally {
+    scheduledTaskRunnerActive = false;
+    await refreshScheduledTasks();
+    void drainScheduledTaskQueue();
+  }
+}
+
+async function scheduledChatSnapshot(task: ScheduledTask): Promise<{
+  meta: ChatMeta;
+  stored: StoredChatMessage[];
+}> {
+  if (task.destinationChatId) {
+    const chat = await invoke<ChatHistoryPayload>('read_chat_history', {
+      chatId: task.destinationChatId
+    });
+    return {
+      meta: {
+        chatId: chat.chatId,
+        name: chat.name,
+        createdAt: chat.createdAt,
+        updatedAt: chat.updatedAt,
+        activeBuildPlugin: chat.activeBuildPlugin
+      },
+      stored: recoverInterruptedMessages(chat.messages).messages
+    };
+  }
+  const chatId = createSessionId();
+  const meta = createChatMeta(chatId, task.name);
+  meta.name = `Scheduled · ${task.name}`;
+  return { meta, stored: [] };
+}
+
+async function runScheduledExecution(execution: ScheduledExecution) {
+  const task = execution.task;
+  let destinationChatId: string | undefined;
+  let completionStatus = 'completed';
+  let completionError: string | undefined;
+  try {
+    const snapshot = await scheduledChatSnapshot(task);
+    destinationChatId = snapshot.meta.chatId;
+    if (chatRuns.has(destinationChatId)) {
+      throw new Error('The destination chat is busy. Use Run now after its current turn finishes.');
+    }
+    const userRecord: StoredChatMessage = {
+      role: 'user',
+      text: task.prompt,
+      timestamp: Date.now(),
+      scheduledTaskName: task.name,
+      scheduledExecutionId: execution.executionId
+    };
+    const assistantRecord: StoredChatMessage = {
+      role: 'assistant',
+      text: 'Thinking…',
+      timestamp: Date.now(),
+      status: 'running',
+      scheduledTaskName: task.name,
+      scheduledExecutionId: execution.executionId
+    };
+    snapshot.stored.push(userRecord, assistantRecord);
+    const modelMessages = snapshot.stored
+      .slice(0, -1)
+      .filter((message) => !message.modeStatus)
+      .map((message) => ({ role: message.role, content: message.text }));
+    const run = chatRuns.begin(
+      destinationChatId,
+      'scheduled',
+      snapshot.meta,
+      snapshot.stored,
+      mainViewRevision
+    );
+    if (!run) throw new Error('The destination chat is already running.');
+    const refreshVisible = () => {
+      if (activeSessionId !== destinationChatId) return;
+      bindChatState(snapshot.meta, snapshot.stored);
+      renderStoredTranscript();
+      syncRunControls();
+    };
+    await persistChatSnapshot(snapshot.meta, snapshot.stored);
+    if (!task.destinationChatId) {
+      await invoke('assign_scheduled_task_chat', {
+        taskId: task.id,
+        executionId: execution.executionId,
+        chatId: destinationChatId
+      });
+    }
+    await refreshChatHistory();
+    refreshVisible();
+    let streamed = '';
+    let thinking = '';
+    let credentialRequest: CredentialRequest | undefined;
+    let recommendation: ExtensionRecommendation | undefined;
+    try {
+      const reply = await runMainAgentStream(
+        modelMessages,
+        'explore',
+        {
+          onStreamId: (streamId) => {
+            chatRuns.setStreamId(destinationChatId!, run.id, streamId);
+            syncRunControls();
+          },
+          onDelta: (delta) => {
+            streamed += delta;
+            assistantRecord.text = streamed || 'Thinking…';
+            refreshVisible();
+          },
+          onThinkingDelta: (delta) => {
+            thinking += delta;
+            assistantRecord.thinking = thinking.trim() || undefined;
+          },
+          onToolResult: (toolCall) => {
+            const pluginName = pluginNameForTool(toolCall.toolName);
+            const card = extractResultCard(toolCall, pluginName);
+            let cardIndex: number | undefined;
+            if (card) cardIndex = (assistantRecord.cards ??= []).push(card) - 1;
+            const source = extractToolSource(toolCall.result, toolCall.toolName, pluginName);
+            if (source && cardIndex !== undefined) source.cardIndex = cardIndex;
+            if (source) (assistantRecord.sources ??= []).push(source);
+            persistChatSnapshotQuietly(snapshot.meta, snapshot.stored);
+            refreshVisible();
+          },
+          onCredentialRequest: (request) => {
+            credentialRequest = request;
+          },
+          onExtensionRecommendation: (nextRecommendation) => {
+            recommendation = nextRecommendation;
+          }
+        },
+        destinationChatId,
+        true
+      );
+      if (credentialRequest) {
+        assistantRecord.credentialRequest = credentialRequest;
+        assistantRecord.text = credentialPromptCopy(credentialRequest).title;
+      } else if (reply.buildRequest) {
+        assistantRecord.text = `This scheduled run needs approval to build ${reply.buildRequest.name}. Open the chat and ask again to review the plugin build.`;
+      } else {
+        assistantRecord.text = reply.content || streamed || 'The model returned an empty response.';
+      }
+      assistantRecord.extensionRecommendation = recommendation ?? reply.extensionRecommendation;
+      assistantRecord.provider = reply.provider;
+      assistantRecord.model = reply.model;
+      assistantRecord.usage = reply.usage;
+      assistantRecord.thinking = thinking.trim() || undefined;
+      assistantRecord.status = 'completed';
+      assistantRecord.timestamp = Date.now();
+      await persistChatSnapshot(snapshot.meta, snapshot.stored);
+      await refreshChatHistory();
+      refreshVisible();
+    } catch (error) {
+      completionStatus = 'error';
+      completionError = getErrorMessage(error);
+      assistantRecord.text = completionError;
+      assistantRecord.error = completionError;
+      assistantRecord.status = 'error';
+      assistantRecord.timestamp = Date.now();
+      await persistChatSnapshot(snapshot.meta, snapshot.stored);
+      refreshVisible();
+    } finally {
+      chatRuns.finish(destinationChatId!, run.id);
+      syncRunControls();
+      renderChatHistory();
+    }
+  } catch (error) {
+    completionStatus = 'error';
+    completionError = getErrorMessage(error);
+  }
+  await invoke('complete_scheduled_task', {
+    taskId: task.id,
+    executionId: execution.executionId,
+    status: completionStatus,
+    error: completionError,
+    destinationChatId
+  });
+}
+
 async function loadChatBookmarks(chatId: string) {
   const entries = await invoke<StoredBookmark[]>('list_chat_bookmarks', { chatId });
   return new Map(entries.map((entry) => [entry.messageKey, entry]));
@@ -3336,7 +3846,7 @@ function renderChatHistory() {
     const running = chatRuns.get(chat.chatId);
     openButton.innerHTML = `
       <span class="chat-history-title">${escapeHtml(chat.name)}</span>
-      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : 'Thinking'}` : ''}</span>
+      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : running.kind === 'scheduled' ? 'Scheduled task' : 'Thinking'}` : ''}</span>
     `;
     openButton.addEventListener('click', () => void openSavedChat(chat.chatId));
     row.appendChild(openButton);
@@ -3532,7 +4042,14 @@ function renderStoredTranscript() {
 
 async function deleteSavedChat(chatId: string) {
   if (chatRuns.has(chatId)) return;
-  await invoke('delete_chat_history', { chatId });
+  try {
+    await invoke('delete_chat_history', { chatId });
+  } catch (error) {
+    if (chatHistoryStatus) {
+      chatHistoryStatus.textContent = getErrorMessage(error, 'Could not delete the chat.');
+    }
+    return;
+  }
   if (chatId === activeSessionId) {
     resetConversationState();
     messages?.replaceChildren();
@@ -3670,6 +4187,12 @@ function renderStoredMessage(message: StoredChatMessage) {
   renderedMessageArticles.set(message, article);
   if (message.modeStatus) article.classList.add('mode-status-message');
   if (message.sharedImport) renderSharedAnswerBanner(article);
+  if (message.scheduledTaskName) {
+    const origin = document.createElement('p');
+    origin.className = 'scheduled-message-origin';
+    origin.textContent = `Scheduled · ${message.scheduledTaskName}`;
+    article.prepend(origin);
+  }
   if (message.role === 'assistant' && message.builderRun) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) {
@@ -3684,6 +4207,10 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && message.extensionRecommendation) {
     renderExtensionRecommendation(article, message.extensionRecommendation);
   }
+  if (message.role === 'assistant' && message.scheduledTaskRequest) {
+    const body = article.querySelector<HTMLElement>('.message-text');
+    if (body) renderScheduledTaskConfirmation(body, message);
+  }
   if (message.role === 'assistant' && message.modelFailure) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderModelFailure(body, message.modelFailure);
@@ -3694,15 +4221,98 @@ function renderStoredMessage(message: StoredChatMessage) {
   // Returning to a chat whose turn is still running: restore the liveness row so
   // a backgrounded run does not look like it was dropped.
   if (message.role === 'assistant' && !message.builderRun && message.status === 'running') {
-    const live = chatRuns.get(activeSessionId)?.kind === 'agent';
+    const kind = chatRuns.get(activeSessionId)?.kind;
+    const live = kind === 'agent' || kind === 'scheduled';
     setAgentActivity(article, agentActivityLabel({ running: live, streaming: false }));
   }
   syncMessageActions(article, message);
 }
 
+function renderScheduledTaskConfirmation(body: HTMLElement, record: StoredChatMessage) {
+  const request = record.scheduledTaskRequest;
+  if (!request) return;
+  if (record.scheduledTaskId) {
+    const created = scheduledTasks.find((entry) => entry.id === record.scheduledTaskId);
+    body.replaceChildren();
+    const panel = document.createElement('section');
+    panel.className = 'scheduled-task-created';
+    const icon = document.createElement('span');
+    icon.className = 'scheduled-task-created-icon';
+    icon.innerHTML = iconSvg('stopwatch');
+    const copy = document.createElement('div');
+    copy.className = 'scheduled-task-created-copy';
+    const eyebrow = document.createElement('span');
+    eyebrow.className = 'scheduled-task-created-eyebrow';
+    eyebrow.textContent = 'Scheduled task created';
+    const title = document.createElement('strong');
+    title.textContent = request.name;
+    const frequency = request.schedule.frequency;
+    const parts = [
+      `${frequency[0].toUpperCase()}${frequency.slice(1)} at ${request.schedule.time}`,
+      request.destinationType === 'newChat' ? 'dedicated chat' : 'this chat'
+    ];
+    if (created?.enabled) parts.push(`next ${formatChatDate(created.nextRunAt)}`);
+    const summary = document.createElement('span');
+    summary.className = 'scheduled-task-created-summary';
+    summary.textContent = parts.join(' · ');
+    copy.append(eyebrow, title, summary);
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'scheduled-task-created-open';
+    open.textContent = 'Open';
+    open.addEventListener('click', async () => {
+      await refreshScheduledTasks();
+      const task = scheduledTasks.find((entry) => entry.id === record.scheduledTaskId);
+      if (task) {
+        setSidebarView('scheduled');
+        openScheduledTask(task);
+      }
+    });
+    panel.append(icon, copy, open);
+    body.appendChild(panel);
+    return;
+  }
+
+  const panel = document.createElement('section');
+  panel.className = 'capability-confirmation scheduled-task-confirmation';
+  const title = document.createElement('h3');
+  title.textContent = 'Create scheduled task?';
+  const hint = document.createElement('p');
+  hint.textContent = 'Review the recurring prompt and schedule. Nothing is saved until you confirm.';
+  const editor = document.createElement('div');
+  panel.append(title, hint, editor);
+  body.replaceChildren(panel);
+  renderTaskEditor(editor, request, {
+    submitLabel: 'Create task',
+    onSubmit: async (draft, status) => {
+      await persistActiveChatHistory();
+      const task = await invoke<ScheduledTask>('create_scheduled_task', { draft });
+      record.scheduledTaskRequest = draft;
+      record.scheduledTaskId = task.id;
+      record.text = `Scheduled: ${task.name}`;
+      record.status = 'completed';
+      await persistActiveChatHistory();
+      await refreshScheduledTasks();
+      status.textContent = 'Created.';
+      renderScheduledTaskConfirmation(body, record);
+    }
+  });
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'capability-secondary-action scheduled-task-dismiss';
+  dismiss.textContent = 'Dismiss';
+  dismiss.addEventListener('click', async () => {
+    record.scheduledTaskRequest = undefined;
+    record.text = 'Canceled scheduled task. Nothing was created.';
+    body.textContent = record.text;
+    await persistActiveChatHistory();
+  });
+  panel.querySelector('.scheduled-task-actions')?.appendChild(dismiss);
+}
+
 function syncMessageActions(article: HTMLElement, message: StoredChatMessage) {
   const existing = article.querySelector<HTMLElement>(':scope > .message-actions');
-  if (!canBookmarkMessage(message)) {
+  if (message.scheduledTaskRequest || !canBookmarkMessage(message)) {
     existing?.remove();
     return;
   }
@@ -4135,6 +4745,7 @@ async function startAgentTurn(content: string) {
 
   try {
     let requestedBuild: AgentBuildRequest | undefined;
+    let requestedSchedule: ScheduledTaskRequest | undefined;
     let requestedCredential: CredentialRequest | undefined;
     let recommendedExtension: ExtensionRecommendation | undefined;
     /**
@@ -4253,6 +4864,10 @@ async function startAgentTurn(content: string) {
         requestedBuild = request;
         void logAgentTurnEvent('build_request', { request, mode: turnMode }, turnSessionId);
       },
+      onScheduledTaskRequest: (request) => {
+        requestedSchedule = request;
+        void logAgentTurnEvent('scheduled_task_request', { request }, turnSessionId);
+      },
       onCredentialRequest: (request) => {
         requestedCredential = request;
         void logAgentTurnEvent('credential_request', { request, mode: turnMode }, turnSessionId);
@@ -4351,6 +4966,24 @@ async function startAgentTurn(content: string) {
     settled = true;
     if (thinkingPreview.parentElement) {
       thinkingPreview.remove();
+    }
+
+    requestedSchedule = reply.scheduledTaskRequest ?? requestedSchedule;
+    if (requestedSchedule) {
+      assistantRecord.text = `Review scheduled task: ${requestedSchedule.name}`;
+      assistantRecord.thinking = thinking.trim() || undefined;
+      assistantRecord.status = 'completed';
+      assistantRecord.scheduledTaskRequest = requestedSchedule;
+      assistantRecord.error = undefined;
+      if (turnIsActive() && pendingBody) {
+        pending.classList.remove('pending');
+        renderScheduledTaskConfirmation(pendingBody, assistantRecord);
+        turnChatMessages.push({ role: 'assistant', content: assistantRecord.text });
+      }
+      await persistChatSnapshot(turnMeta, turnStored);
+      await refreshChatHistory();
+      syncRemountedTurn();
+      return;
     }
 
     if (requestedCredential) {
@@ -4474,7 +5107,7 @@ function syncRunControls() {
   // The composer stays live through an agent run: typing into it is how the
   // agent is steered. A builder run has no steering channel, so it keeps the
   // old lock.
-  if (chatInput) chatInput.disabled = run?.kind === 'builder';
+  if (chatInput) chatInput.disabled = run?.kind === 'builder' || run?.kind === 'scheduled';
   renderPendingQueue();
   if (!stopStreamButton) return;
   stopStreamButton.classList.toggle('is-hidden', !visible);

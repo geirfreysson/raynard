@@ -16,6 +16,9 @@ generated API plugins.
 - `src/agent-runtime.ts`: typed frontend boundary for main-agent and plugin-builder streams.
 - `src/build-request-flow.ts`: Explore-to-Build mode transition rules.
 - `src/chat-run-registry.ts`: per-chat ownership for concurrent main-agent and builder runs.
+- `src-tauri/src/scheduled_tasks.rs`: persisted recurring schedules, due-task
+  claiming, calendar/time-zone calculation, completion, and interrupted-run
+  recovery.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
@@ -77,6 +80,12 @@ generated API plugins.
   catalog entries not yet copied into app data (`Available`). Installing copies
   a bundled folder into app-local `generated-plugins`, where it becomes an
   ordinary, editable extension.
+- The timer icon opens Scheduled tasks. Recurring requests first render an
+  editable host confirmation; saving creates a daily, weekly, monthly,
+  quarterly, or yearly Explore task in the selected time zone. A task targets
+  either a dedicated task chat or an existing chat and can be edited, paused,
+  resumed, run immediately, or deleted from its detail screen. Run now does not
+  move the recurring schedule.
 - The composer stays live while an Explore turn is working. Enter queues what
   you type as a **steering** message the agent picks up at its next tool-round
   boundary; Alt+Enter queues a **follow-up** that waits until the agent would
@@ -193,6 +202,41 @@ terminates the selected chat's main-agent or builder sidecar process; Pi also
 receives `SIGTERM` and aborts that run. Runs are owned per chat, so other chats
 can continue concurrently. Navigating back to a busy chat reconnects the
 renderer to its in-memory messages and stream controls.
+
+## Scheduled Tasks
+
+Scheduling is a host-owned Explore flow, not a separate agent mode and not a
+background capability granted to generated plugins.
+
+1. When the user asks for recurring work, the main agent's first and only tool
+   call is `request_scheduled_task`. The tool returns a structured draft with a
+   name, execution-only prompt, destination, recurrence, local time, and IANA
+   time zone. It does not perform the requested research in that turn.
+2. `src/main.ts` renders the draft as an editable confirmation. Saving calls
+   `create_scheduled_task`; Rust validates the destination and calendar fields
+   before persisting the task under app-local data at
+   `scheduled-tasks/tasks.json`.
+3. `src-tauri/src/lib.rs` owns a 30-second wake loop and streams wake events to
+   the renderer through `subscribe_scheduled_tasks`. The renderer lists and
+   claims due work, queues executions one at a time, and waits when a target
+   chat already owns another run.
+4. A scheduled execution is an ordinary main Pi agent run with scheduling
+   disabled, so it cannot recursively create another task. It uses Explore,
+   the currently selected provider/model, installed plugin tools, and the
+   normal result-card/source persistence path.
+5. Dedicated tasks create one chat on their first run and reuse it thereafter.
+   Existing-chat tasks append to the selected chat. Both the user and assistant
+   records carry the task name and execution ID so the transcript can label
+   their origin.
+6. Scheduled work cannot silently enter Build. A missing capability is recorded
+   as an explanation to open the chat and request the build interactively;
+   credential requests likewise remain user-owned.
+7. Completing a run records its status, error, last-run time, and destination.
+   A manual **Run now** does not advance the recurring occurrence. Startup
+   clears abandoned execution IDs and marks those runs interrupted.
+8. The scheduler runs only while the Raynard process is alive. A task left due
+   while the app is closed is claimed once after the next configured launch;
+   missed occurrences are not replayed individually.
 
 ## Sharing an Answer
 
@@ -452,7 +496,8 @@ On macOS, Tauri data for this application is normally stored under:
 ~/Library/Application Support/ai.raynard/
 ├── chat-history/
 ├── agent-turn-logs/
-└── generated-plugins/
+├── generated-plugins/
+└── scheduled-tasks/tasks.json
 ```
 
 `chat-history/index.json` is the persistent sidebar index, not a conversation.

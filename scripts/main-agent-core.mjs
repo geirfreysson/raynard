@@ -233,7 +233,7 @@ export function toAgentMessages(messages, auth) {
     );
 }
 
-export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
+export function buildMainAgentSystemPrompt({ mode, toolNames, plugins, scheduling }) {
   const names = Array.isArray(toolNames) && toolNames.length ? toolNames.join(', ') : '(none)';
   const installedPlugins = Array.isArray(plugins) ? plugins.filter((plugin) => plugin && plugin.slug) : [];
   const pluginList = installedPlugins.length
@@ -254,14 +254,26 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins }) {
     mode === 'build'
       ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For an existing-plugin change, call request_plugin_build. For a new capability, call it only when a concrete API and official documentation URL are established; otherwise clarify the intended source with answer_without_api. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
       : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Offer Build mode only when a concrete, credible API source has been identified. Otherwise use answer_without_api to clarify where the information should come from, suggest plausible public APIs, or ask whether the user meant a relevant installed plugin. When the user asks to modify an existing plugin, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
+  const schedulePolicy = scheduling?.enabled !== false
+    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling language removed. Generate a concise name. Default the destination to a dedicated new chat unless the user explicitly identifies an existing chat. For an existing chat, use an exact ID from the saved-chat list. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving.`
+    : `4. SCHEDULE: This is already a scheduled execution. Perform the supplied prompt normally and never create another scheduled task.`;
+  const scheduleFirstAction = scheduling?.enabled !== false
+    ? 'request_scheduled_task for recurring work, '
+    : '';
+  const savedChats = Array.isArray(scheduling?.chats) && scheduling.chats.length
+    ? scheduling.chats.map((chat) => `${chat.id}: ${chat.name}`).join(', ')
+    : '(none)';
 
   return `You are Raynard, a concise research agent with access to API-backed tools.
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
-Your first response MUST be a tool call and contain no narration. Call one or more installed API tools for data, search_available_extensions for a factual question no installed tool can answer, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
+Your first response MUST be a tool call and contain no narration. Call ${scheduleFirstAction}one or more installed API tools for data, search_available_extensions for a factual question no installed tool can answer, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
 1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
 3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. For a factual or data question that no installed tool can answer, call search_available_extensions with the user's needed capability before calling answer_without_api or proposing a new request_plugin_build. This on-demand check keeps the extension catalog out of the default context. If the result contains a clearly relevant extension, call recommend_available_extension with its exact slug and a concise answer; the host will attach its Install button. If no catalog entry clearly fits, use answer_without_api. In either response, end the offer with: "Or provide me with an API documentation site and I can build one." Do NOT call request_plugin_build merely because access is missing. A new-plugin build is appropriate only after the user supplies or confirms a credible official API documentation URL. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
+${schedulePolicy}
+
+Scheduling context: current local date/time ${scheduling?.localDateTime || '(unknown)'}, timezone ${scheduling?.timeZone || 'UTC'}, current chat ${scheduling?.currentChatId || '(none)'}. Saved chats: ${savedChats}.
 
 ${modePolicy}
 
@@ -324,6 +336,87 @@ Presenting data (charts):
 - Emitting a chart block is an ordinary Explore-mode answer format. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the tools and writing a chart block — never by calling request_plugin_build.
 
 Available installed API tools: ${names}.`;
+}
+
+export function createScheduledTaskTool(Type, onRequest, options = {}) {
+  const context = options.context || {};
+  const now = new Date(context.localDateTime || Date.now());
+  const validNow = Number.isNaN(now.getTime()) ? new Date() : now;
+  const defaultTime = `${String(validNow.getHours()).padStart(2, '0')}:${String(validNow.getMinutes()).padStart(2, '0')}`;
+  const knownChats = new Set(
+    (Array.isArray(context.chats) ? context.chats : []).map((chat) => String(chat.id || ''))
+  );
+  if (context.currentChatId) knownChats.add(String(context.currentChatId));
+  return {
+    name: 'request_scheduled_task',
+    label: 'Request Scheduled Task',
+    description:
+      'Prepare recurring work for host-rendered user confirmation. This does not create the task until the user confirms it.',
+    parameters: Type.Object({
+      name: Type.String({ description: 'Concise task name.' }),
+      prompt: Type.String({ description: 'The work to perform each run, without scheduling language.' }),
+      destinationType: Type.Optional(Type.Union([Type.Literal('newChat'), Type.Literal('existingChat')])),
+      destinationChatId: Type.Optional(Type.String({ description: 'Exact saved chat ID for an existing-chat destination.' })),
+      frequency: Type.Union([
+        Type.Literal('daily'),
+        Type.Literal('weekly'),
+        Type.Literal('monthly'),
+        Type.Literal('quarterly'),
+        Type.Literal('yearly')
+      ]),
+      time: Type.Optional(Type.String({ description: 'Local 24-hour clock time in HH:MM.' })),
+      dayOfWeek: Type.Optional(Type.Integer({ description: 'Monday=1 through Sunday=7.' })),
+      dayOfMonth: Type.Optional(Type.Integer({ description: 'Calendar day from 1 through 31.' })),
+      monthOfYear: Type.Optional(Type.Integer({ description: 'Anchor month from 1 through 12.' }))
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const frequency = String(args?.frequency || '');
+      const destinationType = args?.destinationType === 'existingChat' ? 'existingChat' : 'newChat';
+      const destinationChatId = String(args?.destinationChatId || '').trim();
+      if (destinationType === 'existingChat' && !knownChats.has(destinationChatId)) {
+        return {
+          content: [{ type: 'text', text: 'That destination chat is not available. Clarify which saved chat to use.' }],
+          details: { type: 'scheduled-task-request-rejected', reason: 'unknown-chat' },
+          terminate: false
+        };
+      }
+      const request = {
+        name: String(args?.name || '').trim().slice(0, 120),
+        prompt: String(args?.prompt || '').trim(),
+        destinationType,
+        destinationChatId: destinationType === 'existingChat' ? destinationChatId : undefined,
+        schedule: {
+          frequency,
+          time: /^\d{2}:\d{2}$/.test(String(args?.time || '')) ? String(args.time) : defaultTime,
+          timeZone: String(context.timeZone || 'UTC'),
+          dayOfWeek:
+            frequency === 'weekly'
+              ? Number(args?.dayOfWeek) || ((validNow.getDay() + 6) % 7) + 1
+              : undefined,
+          dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
+            ? Number(args?.dayOfMonth) || validNow.getDate()
+            : undefined,
+          monthOfYear: ['quarterly', 'yearly'].includes(frequency)
+            ? Number(args?.monthOfYear) || validNow.getMonth() + 1
+            : undefined
+        }
+      };
+      if (!request.name || !request.prompt) {
+        return {
+          content: [{ type: 'text', text: 'A scheduled task needs both a name and an execution prompt.' }],
+          details: { type: 'scheduled-task-request-rejected', reason: 'missing-content' },
+          terminate: false
+        };
+      }
+      onRequest(request);
+      return {
+        content: [{ type: 'text', text: 'The scheduled task is ready for user confirmation.' }],
+        details: { type: 'scheduled-task-request', ...request },
+        terminate: true
+      };
+    }
+  };
 }
 
 export function buildPiTypeFromSchema(Type, schemaNode) {
