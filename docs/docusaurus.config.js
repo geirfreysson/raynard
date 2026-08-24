@@ -12,8 +12,10 @@ const config = {
     v4: true,
   },
 
-  url: 'http://localhost',
-  baseUrl: '/',
+  url: 'https://geirfreysson.github.io',
+  baseUrl: '/raynard/',
+  organizationName: 'geirfreysson',
+  projectName: 'raynard',
   onBrokenLinks: 'throw',
 
   i18n: {

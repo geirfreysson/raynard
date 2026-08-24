@@ -1,5 +1,5 @@
 {
-  "shareBaseUrl": "http://localhost:3000",
+  "shareBaseUrl": "https://geirfreysson.github.io/raynard",
   "appScheme": "raynard",
   "downloadUrl": "https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg",
   "downloads": {
