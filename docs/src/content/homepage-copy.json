@@ -104,55 +104,45 @@
     "items": [
       {
         "title": "Ask about right now",
-        "prompt": "Is Nvidia down three days in a row?",
-        "body": "That’s a stock API. Flights, fixtures or your own systems work the same.",
+        "prompt": "Who should I captain this week? Check the actual fixtures.",
+        "body": "That’s the FPL API. Prices, flights or your own systems work the same.",
         "bullets": [
           "Fetched when you ask, not recalled",
-          "Shows the records behind the number"
+          "Shows the records behind the answer"
         ],
-        "mediaLabel": "Placeholder for a live data answer screenshot"
+        "mediaLabel": "Placeholder for a live Fantasy Premier League answer screenshot"
       },
       {
-        "title": "Ask what no chatbot can reach",
-        "prompt": "Does wine actually wreck my sleep? Check the last six months.",
-        "body": "Your sleep, your customers, your company’s own systems — all behind a login.",
+        "title": "No invented answers",
+        "prompt": "I want to read about how open source communities are built.",
+        "body": "Real editions from a real catalogue, each linked back to its record.",
         "bullets": [
-          "Or: which customers cancelled last month?",
-          "Keys in your keychain, chats on your machine"
+          "The source data stays with the answer",
+          "Send the whole thing as a link"
         ],
-        "mediaLabel": "Placeholder for a private data answer screenshot",
+        "mediaLabel": "Placeholder for an Open Library answer with sources screenshot",
         "reverse": true
-      },
-      {
-        "title": "For when being wrong is expensive",
-        "prompt": "Which of these can I put in the board deck?",
-        "body": "Every figure keeps the record it came from.",
-        "bullets": [
-          "Each number links back to its source",
-          "Send the whole answer as a link"
-        ],
-        "mediaLabel": "Placeholder for a cited answer screenshot"
       },
       {
         "title": "The question that asks itself",
-        "prompt": "Every Monday at 8: sales this week vs the same week last month.",
-        "body": "Worked out against live data each time, waiting when you open the app.",
+        "prompt": "Every morning at 7: what’s new on Hacker News that isn’t about AI?",
+        "body": "Daily to yearly, in your time zone, waiting when you open the app.",
         "bullets": [
-          "Daily to yearly, in your time zone",
+          "Lands in its own chat, or one you have",
           "Pause it, edit it, or run it early"
         ],
-        "mediaLabel": "Placeholder for a scheduled task screenshot",
-        "reverse": true
+        "mediaLabel": "Placeholder for a scheduled task screenshot"
       },
       {
         "title": "And if it’s not on the list",
         "prompt": "Add World Bank data — it’s at data360.worldbank.org/en/api",
-        "body": "Point Raynard at an API’s docs and it builds the connection.",
+        "body": "Any API with docs, including the one behind your company’s login.",
         "bullets": [
           "Built and tested once you approve it",
-          "Available in every chat from then on"
+          "Keys in your keychain, chats on your machine"
         ],
-        "mediaLabel": "Placeholder for the extension build flow screenshot"
+        "mediaLabel": "Placeholder for the extension build flow screenshot",
+        "reverse": true
       }
     ]
   },
