@@ -103,59 +103,54 @@
     "placeholderText": "Screenshot",
     "items": [
       {
-        "title": "Ask about the thing that changed this morning",
-        "prompt": "Is Nvidia down three days in a row? And what usually happens next?",
-        "body": "Raynard checks today’s actual closes and works it out. A chatbot that half-remembers the web gives you a confident number and no way to check it.",
+        "title": "Ask about right now",
+        "prompt": "Is Nvidia down three days in a row?",
+        "body": "That’s a stock API. Flights, fixtures or your own systems work the same.",
         "bullets": [
-          "Reads the live prices as they stand right now, not a summary of a page about them",
-          "Shows the closes it checked, so you can see the working",
-          "Ask a follow-up and it fetches again instead of guessing"
+          "Fetched when you ask, not recalled",
+          "Shows the records behind the number"
         ],
-        "mediaLabel": "Placeholder for a live share-price answer screenshot"
+        "mediaLabel": "Placeholder for a live data answer screenshot"
       },
       {
-        "title": "Ask about data no chatbot can reach",
-        "prompt": "Does a glass of wine actually wreck my sleep? Check the last six months.",
-        "body": "Your sleep, your training, your customers, your company’s own orders system. It sits behind a login, so no search engine has ever seen it.",
+        "title": "Ask what no chatbot can reach",
+        "prompt": "Does wine actually wreck my sleep? Check the last six months.",
+        "body": "Your sleep, your customers, your company’s own systems — all behind a login.",
         "bullets": [
-          "Works the same on your business — “which customers cancelled last month, and what were they paying?”",
-          "Or on the internal API nobody ever built a dashboard for: paste the docs, approve the connection, ask the question",
-          "API keys live in your operating system’s keychain, and your chats stay on your own machine — there’s no Raynard server"
+          "Or: which customers cancelled last month?",
+          "Keys in your keychain, chats on your machine"
         ],
-        "mediaLabel": "Placeholder for a private-account analysis screenshot",
+        "mediaLabel": "Placeholder for a private data answer screenshot",
         "reverse": true
       },
       {
         "title": "For when being wrong is expensive",
-        "prompt": "Which of these can I put in the board deck? Show me where each number came from.",
-        "body": "Every figure keeps the record it came from, so you can check it now, check it again next month, or hand someone else the whole thing.",
+        "prompt": "Which of these can I put in the board deck?",
+        "body": "Every figure keeps the record it came from.",
         "bullets": [
-          "Each number links back to the exact record behind it",
-          "The supporting data is saved alongside the answer, so it still checks out later",
-          "Send an answer as a link — no account needed to read it"
+          "Each number links back to its source",
+          "Send the whole answer as a link"
         ],
-        "mediaLabel": "Placeholder for a cited answer with source links screenshot"
+        "mediaLabel": "Placeholder for a cited answer screenshot"
       },
       {
         "title": "The question that asks itself",
-        "prompt": "Every Monday at 8, tell me whether last week’s sales were up or down on the same week last month — and which products moved.",
-        "body": "Set it once and the answer is waiting when you open the app. Daily, weekly, monthly, quarterly or yearly, in your own time zone.",
+        "prompt": "Every Monday at 8: sales this week vs the same week last month.",
+        "body": "Worked out against live data each time, waiting when you open the app.",
         "bullets": [
-          "The comparison is worked out against live data every time, not carried over from last week’s answer",
-          "Lands in a chat of its own, or one you already have",
-          "Pause it, run it early, or change the question whenever you like"
+          "Daily to yearly, in your time zone",
+          "Pause it, edit it, or run it early"
         ],
-        "mediaLabel": "Placeholder for a scheduled task and its result screenshot",
+        "mediaLabel": "Placeholder for a scheduled task screenshot",
         "reverse": true
       },
       {
-        "title": "And if it’s not on the list, just say so",
-        "prompt": "Add World Bank data for me to chat with — it’s at data360.worldbank.org/en/api",
-        "body": "Point Raynard at an API’s documentation and it writes the connection, tests it against the real thing, and keeps it for next time.",
+        "title": "And if it’s not on the list",
+        "prompt": "Add World Bank data — it’s at data360.worldbank.org/en/api",
+        "body": "Point Raynard at an API’s docs and it builds the connection.",
         "bullets": [
-          "Builds and tests the connector from a prompt, after you approve it",
-          "Available in every chat from then on",
-          "Keep it on your own machine or share it"
+          "Built and tested once you approve it",
+          "Available in every chat from then on"
         ],
         "mediaLabel": "Placeholder for the extension build flow screenshot"
       }
