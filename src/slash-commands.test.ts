@@ -10,9 +10,17 @@ describe('filterSlashCommands', () => {
   });
 
   it('narrows to one command on a distinguishing prefix', () => {
-    expect(filterSlashCommands('/s').map((entry) => entry.command)).toEqual(['/status']);
+    expect(filterSlashCommands('/sta').map((entry) => entry.command)).toEqual(['/status']);
+    expect(filterSlashCommands('/set').map((entry) => entry.command)).toEqual(['/settings']);
     expect(filterSlashCommands('/mod').map((entry) => entry.command)).toEqual(['/models']);
     expect(filterSlashCommands('/ext').map((entry) => entry.command)).toEqual(['/extensions']);
+  });
+
+  it('keeps every command a shared prefix still matches', () => {
+    expect(filterSlashCommands('/s').map((entry) => entry.command)).toEqual([
+      '/settings',
+      '/status'
+    ]);
   });
 
   it('keeps an exactly typed command visible', () => {

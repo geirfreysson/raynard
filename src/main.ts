@@ -13,6 +13,7 @@ import {
   Play,
   Plug,
   Plus,
+  Settings,
   Share2,
   Timer,
   Trash2,
@@ -34,6 +35,12 @@ import {
   taskStatus,
   type RunTone
 } from './scheduled-task-view';
+import {
+  applyAppUpdateState,
+  renderSettingsView,
+  updateNeedsAttention,
+  type AppUpdateState
+} from './settings-view';
 import { createCoalescedSaveQueue } from './chat-persistence';
 import type { ExtensionRecommendation } from './extension-recommendation';
 import {
@@ -483,6 +490,7 @@ const appIcons: Record<string, IconNode> = {
   pause: Pause,
   play: Play,
   plug: Plug,
+  settings: Settings,
   'share-2': Share2,
   'trash-2': Trash2
 };
@@ -524,6 +532,9 @@ app.innerHTML = `
       </button>
       <button id="newChatRail" class="sidebar-rail-btn" type="button" aria-label="New chat">
         ${iconSvg('plus')}
+      </button>
+      <button id="settingsToggle" class="sidebar-rail-btn sidebar-rail-settings" type="button" aria-label="Settings" aria-pressed="false">
+        ${iconSvg('settings')}
       </button>
     </aside>
 
@@ -698,6 +709,7 @@ const chatsToggle = document.querySelector<HTMLButtonElement>('#chatsToggle');
 const pluginsToggle = document.querySelector<HTMLButtonElement>('#pluginsToggle');
 const bookmarksToggle = document.querySelector<HTMLButtonElement>('#bookmarksToggle');
 const scheduledToggle = document.querySelector<HTMLButtonElement>('#scheduledToggle');
+const settingsToggle = document.querySelector<HTMLButtonElement>('#settingsToggle');
 const newChatRail = document.querySelector<HTMLButtonElement>('#newChatRail');
 const chatSidebar = document.querySelector<HTMLElement>('#chatSidebar');
 const sidebarClose = document.querySelector<HTMLButtonElement>('#sidebarClose');
@@ -850,6 +862,8 @@ void subscribeDeepLinks(APP_SCHEME, (encoded) => void openSharedAnswer(encoded))
 const devShare = readDevShareHash(window.location.hash);
 if (devShare) void openSharedAnswer(devShare);
 
+watchAppUpdates();
+
 const scheduledWakeChannel = new Channel<number>(() => void enqueueDueScheduledTasks());
 void invoke('subscribe_scheduled_tasks', { onWake: scheduledWakeChannel }).catch(() => {
   // An older host has no scheduler. The sidebar commands will surface that
@@ -995,6 +1009,10 @@ bookmarksToggle?.addEventListener('click', () => {
   }
   setSidebarOpen(!shell?.classList.contains('sidebar-open'));
 });
+settingsToggle?.addEventListener('click', () => {
+  void openSettingsPage();
+});
+
 scheduledToggle?.addEventListener('click', () => {
   if (sidebarView !== 'scheduled') {
     setSidebarView('scheduled');
@@ -1203,6 +1221,12 @@ async function runSlashCommand(typed: string, input: HTMLTextAreaElement | null)
   }
   if (command === '/status') {
     await openStatusCommandFlow(input);
+    return true;
+  }
+  if (command === '/settings') {
+    if (input) input.value = '';
+    hideSlashMenu();
+    await openSettingsPage();
     return true;
   }
   return false;
@@ -1603,6 +1627,80 @@ async function openStatusCommandFlow(input: HTMLTextAreaElement | null) {
   openStatusModal({ chat: currentChatUsage(), totals }, () =>
     invoke<ProviderQuota>('read_provider_quota')
   );
+}
+
+/**
+ * Opens Settings in the shared detail section, the same place plugin and
+ * scheduled-task screens use.
+ *
+ * The four update commands are handed over as thunks so `settings-view.ts`
+ * never imports Tauri; `open_external_url` is only needed for the manual
+ * download, since `attachExternalLinkHandler` already routes ordinary links.
+ */
+async function openSettingsPage() {
+  if (!pluginDetailView || !messages) return;
+  mainViewRevision += 1;
+
+  let state: AppUpdateState;
+  try {
+    state = await invoke<AppUpdateState>('get_app_update_state');
+  } catch (error) {
+    console.error('Could not read the update state:', getErrorMessage(error));
+    return;
+  }
+
+  activeScheduledTaskId = null;
+  selectedPluginId = '';
+  selectedCatalogExtensionSlug = '';
+  renderGeneratedPlugins();
+  renderScheduledTasks();
+
+  pluginDetailView.replaceChildren();
+  const page = document.createElement('div');
+  page.className = 'settings-view';
+  pluginDetailView.appendChild(page);
+  renderSettingsView(
+    page,
+    {
+      check: () => invoke<AppUpdateState>('check_for_app_update'),
+      download: () => invoke<AppUpdateState>('download_app_update'),
+      install: () => invoke<AppUpdateState>('install_app_update'),
+      openExternal: async (url: string) => {
+        await invoke('open_external_url', { url });
+      }
+    },
+    state
+  );
+
+  shell?.classList.add('plugin-view');
+  shell?.classList.remove('pre-chat');
+  pluginDetailView.classList.remove('is-hidden');
+  messages.classList.add('is-hidden');
+  chatForm?.classList.add('is-hidden');
+  document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
+  settingsToggle?.setAttribute('aria-pressed', 'true');
+}
+
+/**
+ * Subscribes to update pushes for the life of the process.
+ *
+ * The dot on the rail is the only ambient signal this app has — there is no
+ * toast surface — so a background check that finds something has to be visible
+ * without stealing the screen.
+ */
+function watchAppUpdates() {
+  const onState = new Channel<AppUpdateState>();
+  onState.onmessage = (state) => {
+    applyAppUpdateState(state);
+    settingsToggle?.classList.toggle('has-update', updateNeedsAttention(state));
+  };
+  invoke<AppUpdateState>('subscribe_app_updates', { onState })
+    .then((state) => {
+      settingsToggle?.classList.toggle('has-update', updateNeedsAttention(state));
+    })
+    .catch((error) => {
+      console.error('Could not subscribe to app updates:', getErrorMessage(error));
+    });
 }
 
 function openModelsModal() {
@@ -2670,6 +2768,7 @@ async function removeGeneratedPlugin(pluginId: string) {
   if (selectedPluginId === pluginId) {
     selectedPluginId = '';
     pluginDetailView?.classList.add('is-hidden');
+    settingsToggle?.setAttribute('aria-pressed', 'false');
     messages?.classList.remove('is-hidden');
     chatForm?.classList.remove('is-hidden');
     shell?.classList.remove('plugin-view');
@@ -2970,6 +3069,7 @@ function renderPluginDetail(
       ? 'Installed Extension'
       : 'Your Extension';
   pluginDetailView.innerHTML = '';
+  settingsToggle?.setAttribute('aria-pressed', 'false');
 
   const header = document.createElement('header');
   header.className = 'plugin-detail-header';
@@ -3692,6 +3792,7 @@ function openScheduledTask(task: ScheduledTask) {
   activeScheduledTaskId = task.id;
   renderScheduledTasks();
   pluginDetailView.replaceChildren();
+  settingsToggle?.setAttribute('aria-pressed', 'false');
   const status = taskStatus(task);
   const now = Date.now();
 
@@ -4296,6 +4397,7 @@ async function deleteSavedChat(chatId: string) {
     shell?.classList.add('pre-chat');
     shell?.classList.remove('plugin-view');
     pluginDetailView?.classList.add('is-hidden');
+    settingsToggle?.setAttribute('aria-pressed', 'false');
     messages?.classList.remove('is-hidden');
     chatForm?.classList.remove('is-hidden');
   }
@@ -4394,6 +4496,7 @@ async function startNewConversation(options: { showPreChat: boolean }) {
   selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();
   pluginDetailView?.classList.add('is-hidden');
+  settingsToggle?.setAttribute('aria-pressed', 'false');
   messages?.classList.remove('is-hidden');
   chatForm?.classList.remove('is-hidden');
   document.querySelector<HTMLElement>('.intro-stage')?.classList.remove('is-hidden');
@@ -6588,6 +6691,7 @@ function showConversation() {
   selectedCatalogExtensionSlug = '';
   renderGeneratedPlugins();
   pluginDetailView?.classList.add('is-hidden');
+  settingsToggle?.setAttribute('aria-pressed', 'false');
   messages?.classList.remove('is-hidden');
   chatForm?.classList.remove('is-hidden');
   document.querySelector<HTMLElement>('.intro-stage')?.classList.remove('is-hidden');

@@ -174,6 +174,52 @@ test('tagged releases validate their version and publish the binary with its che
   expect(publishJob).toContain('docs/static/install.ps1');
 });
 
+test('every platform stages an updater fragment and the release merges them', async () => {
+  const workflow = await readFile(
+    join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'),
+    'utf8'
+  );
+  const config = JSON.parse(
+    await readFile(join(scriptsDir, '../src-tauri/tauri.conf.json'), 'utf8')
+  );
+
+  // Without these two the build produces no .sig at all, and the merge step
+  // below fails the release rather than shipping an unusable manifest.
+  expect(config.bundle.createUpdaterArtifacts).toBe(true);
+  expect(config.plugins.updater.pubkey).toMatch(/\S/);
+  expect(config.plugins.updater.endpoints).toEqual([
+    'https://github.com/geirfreysson/raynard/releases/latest/download/latest.json'
+  ]);
+
+  // Every platform in the manifest must have a job that signs and stages it.
+  for (const target of ['darwin-aarch64', 'linux-x86_64', 'windows-x86_64']) {
+    expect(workflow).toContain(`build-updater-manifest.mjs fragment`);
+    expect(workflow).toContain(target);
+  }
+  expect(workflow.match(/TAURI_SIGNING_PRIVATE_KEY:/g)).toHaveLength(3);
+
+  // The macOS updater payload only exists when the app bundle is built too.
+  expect(workflow).toContain('--bundles app,dmg');
+  expect(workflow).toContain('Raynard-${version}-mac-arm64.app.tar.gz');
+
+  const publishJob = workflow.slice(workflow.indexOf('  publish-release:'));
+  const merge = publishJob.indexOf('build-updater-manifest.mjs merge');
+  const upload = publishJob.indexOf('gh release upload "$GITHUB_REF_NAME"');
+  expect(merge).toBeGreaterThan(-1);
+  expect(upload).toBeGreaterThan(merge);
+
+  // A fragment staged before its job's checksum loop would leave a stray
+  // .sha256 behind after the merge deletes the fragment itself.
+  for (const [checksum, fragment] of [
+    [workflow.indexOf('Raynard-mac-arm64.dmg.sha256'), workflow.indexOf('Stage the macOS updater fragment')],
+    [workflow.indexOf('rm checksums.tmp'), workflow.indexOf('Stage the Linux updater fragment')],
+    [workflow.indexOf('Get-FileHash'), workflow.indexOf('Stage the Windows updater fragment')]
+  ]) {
+    expect(checksum).toBeGreaterThan(-1);
+    expect(fragment).toBeGreaterThan(checksum);
+  }
+});
+
 test('the docs download surfaces use stable assets published by every latest release', async () => {
   const [workflow, shareConfigRaw, homepage, downloadHelper, gettingStarted] = await Promise.all([
     readFile(join(scriptsDir, '../.github/workflows/release-macos-arm64.yml'), 'utf8'),

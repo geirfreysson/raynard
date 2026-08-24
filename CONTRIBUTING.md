@@ -31,8 +31,8 @@ output.
 - Add screenshots or a short recording for visible UI changes.
 - Let the pull-request checks finish before requesting review.
 
-## License prerequisite
+## License
 
-This repository does not currently declare a project license. The maintainer
-must choose and add a `LICENSE` before inviting or accepting public
-contributions, then update this section with the contribution licensing terms.
+This project is released under the MIT License; see [`LICENSE`](LICENSE) for the
+full text. By submitting a contribution you agree that it is licensed under the
+same terms.

@@ -140,7 +140,13 @@ jobs:
           test "$native_count" -gt 0
 
       - name: Build, sign, notarize, and staple DMG
-        run: npm run tauri:build -- --target aarch64-apple-darwin --bundles dmg --ci
+        # `app` as well as `dmg`: the DMG is not an updater artifact. The
+        # updater installs Raynard.app.tar.gz, which Tauri only writes when the
+        # app bundle is itself a build target.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --target aarch64-apple-darwin --bundles app,dmg --ci
 
       - name: Notarize and staple DMG container
         shell: bash
@@ -180,20 +186,61 @@ jobs:
           hdiutil detach "$mount_dir"
           trap - EXIT
 
+      # The DMG verification above says nothing about the tarball the updater
+      # will actually install. An unsigned or unstapled app inside it passes
+      # every other gate in this workflow and then fails on the user's machine.
+      - name: Verify the updater payload is the notarized app
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir=src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          tarball="$(find "$bundle_dir" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$tarball" || { echo "No .app.tar.gz was produced; createUpdaterArtifacts is off." >&2; exit 1; }
+          test -f "$tarball.sig" || { echo "The updater tarball was not signed." >&2; exit 1; }
+          extract_dir="$(mktemp -d)"
+          tar -xzf "$tarball" -C "$extract_dir"
+          app_path="$(find "$extract_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          if ! xcrun stapler validate "$app_path"; then
+            echo "The app inside the updater tarball is not stapled. Tauri archived it" >&2
+            echo "before notarization completed; the tarball must be rebuilt from the" >&2
+            echo "stapled bundle and re-signed with 'npx tauri signer sign'." >&2
+            exit 1
+          fi
+
       - name: Stage macOS release assets
         shell: bash
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          source_dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          bundle_dir=src-tauri/target/aarch64-apple-darwin/release/bundle
+          source_dmg="$(find "$bundle_dir/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          source_tarball="$(find "$bundle_dir/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$source_dmg"
+          test -n "$source_tarball"
           mkdir -p release-assets
           cp "$source_dmg" "release-assets/Raynard-${version}-mac-arm64.dmg"
           cp "$source_dmg" "release-assets/Raynard-mac-arm64.dmg"
+          # The tarball is the update payload, so it ships versioned only:
+          # latest.json names the tagged asset, never a floating alias.
+          cp "$source_tarball" "release-assets/Raynard-${version}-mac-arm64.app.tar.gz"
           (
             cd release-assets
             shasum -a 256 "Raynard-${version}-mac-arm64.dmg" > "Raynard-${version}-mac-arm64.dmg.sha256"
             shasum -a 256 "Raynard-mac-arm64.dmg" > "Raynard-mac-arm64.dmg.sha256"
+            shasum -a 256 "Raynard-${version}-mac-arm64.app.tar.gz" > "Raynard-${version}-mac-arm64.app.tar.gz.sha256"
           )
+
+      # After the checksums, so the fragment is not itself checksummed: the
+      # merge step deletes the fragment but would leave a stray .sha256 behind.
+      - name: Stage the macOS updater fragment
+        run: |
+          node scripts/build-updater-manifest.mjs fragment \
+            darwin-aarch64 \
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos \
+            "Raynard-$(node -p "require('./package.json').version")-mac-arm64.app.tar.gz"
 
       - name: Upload macOS release assets
         uses: actions/upload-artifact@v4
@@ -273,6 +320,8 @@ jobs:
           # linuxdeploy strip it again only risks breaking a signed-upstream
           # executable.
           NO_STRIP: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         # --verbose because Tauri reports a linuxdeploy failure as a bare
         # "failed to run linuxdeploy" and swallows the child's stderr, which is
         # the only place the actual cause is written.
@@ -314,6 +363,15 @@ jobs:
             done < checksums.tmp
             rm checksums.tmp
           )
+
+      # The AppImage is its own updater artifact, so no extra asset is staged
+      # here — only the signature that vouches for the one already uploaded.
+      - name: Stage the Linux updater fragment
+        run: |
+          node scripts/build-updater-manifest.mjs fragment \
+            linux-x86_64 \
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage \
+            "Raynard-$(node -p "require('./package.json').version")-linux-x86_64.AppImage"
 
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
@@ -376,6 +434,9 @@ jobs:
           cargo check --manifest-path src-tauri/Cargo.toml
 
       - name: Build NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc --bundles nsis --ci
 
       - name: Install and verify Windows standalone runtime
@@ -403,6 +464,16 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 (Join-Path release-assets $name)).Hash.ToLowerInvariant()
             [IO.File]::WriteAllText((Join-Path release-assets "$name.sha256"), "$hash  $name`n")
           }
+
+      # The installer is its own updater artifact; only its signature is staged.
+      - name: Stage the Windows updater fragment
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          node scripts/build-updater-manifest.mjs fragment `
+            windows-x86_64 `
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis `
+            "Raynard-$version-windows-x64-setup.exe"
 
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
@@ -435,6 +506,12 @@ jobs:
         run: |
           cp docs/static/install.sh release-assets/install.sh
           cp docs/static/install.ps1 release-assets/install.ps1
+
+      # Merges the three per-platform fragments into the manifest installed
+      # copies poll. It fails the release rather than publishing a manifest
+      # that silently strands a platform.
+      - name: Build the updater manifest
+        run: node scripts/build-updater-manifest.mjs merge release-assets
 
       - name: Publish tagged GitHub release
         env:

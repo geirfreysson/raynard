@@ -2,6 +2,7 @@
   "name": "raynard",
   "version": "0.4.0",
   "description": "Barebones Raynard-inspired Tauri desktop chat app",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {

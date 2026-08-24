@@ -74,11 +74,52 @@ The Apple Silicon workflow reuses the same secret material as
 - `APPLE_API_KEY_ID`: App Store Connect key ID
 - `APPLE_API_ISSUER`: App Store Connect issuer ID
 
+The updater needs two more, which are not Apple's and are not
+interchangeable with them:
+
+- `TAURI_SIGNING_PRIVATE_KEY`: contents of the minisign private key
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password that key was generated with
+
+The key deliberately has a password. GitHub will not accept an empty secret
+value, and a build whose `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is undefined does
+not fall back to signing without one — the CLI tries to prompt, finds no
+terminal, and fails the release with `incorrect updater private key password:
+Device not configured`. A real password keeps both secrets ordinary, and
+encrypts the key at rest on disk and inside the secret.
+
 Repository secrets can be copied to this repository, or the existing values
 can be exposed as organization secrets. A pushed `v*` tag builds a signed,
-notarized DMG, verifies it, uploads it as a workflow artifact, and attaches it
-to a draft GitHub release. A manual workflow run builds and uploads the
-artifact without creating a release.
+notarized DMG for macOS plus the Linux and Windows packages, verifies each one,
+merges the per-platform updater fragments into `latest.json`, and publishes a
+non-draft GitHub release marked `--latest` with versioned assets, stable
+aliases, and SHA-256 checksums. A manual workflow run builds and uploads the
+artifacts without creating a release.
+
+## Updater signing key
+
+Update packages are signed with a minisign keypair that is entirely separate
+from Apple code signing. Apple's signature says the app is not tampered with;
+this one says the update came from us.
+
+```bash
+npx tauri signer generate -w ~/.tauri/raynard.key -p "<password>"
+```
+
+The public half lives in `src-tauri/tauri.conf.json` under
+`plugins.updater.pubkey` and is not a secret. The private half is
+`~/.tauri/raynard.key`.
+
+**Keep the private key and its password somewhere durable before the first
+release that uses them.** An installed copy only accepts an update signed by the
+public key it was built with. Losing either half means no later release can be
+signed for the copies already in the wild: they keep working, but can never
+update again — recovering means shipping a build with a new public key that
+every user installs by hand. Neither half is recoverable from the public key,
+from a published release, or from the GitHub secret, which is write-only.
+
+Rotating the key is free only while nothing has been published under it. Once a
+release ships, the public key in `tauri.conf.json` is a commitment to everyone
+who installs it.
 
 ## Release verification
 

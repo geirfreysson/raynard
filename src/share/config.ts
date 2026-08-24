@@ -12,3 +12,10 @@ export const SHARE_BASE_URL = String(
 export const APP_SCHEME: string = shareConfig.appScheme;
 
 export const DOWNLOAD_URL: string = shareConfig.downloadUrl;
+
+/**
+ * Release downloads by platform key. Rust decides which key applies — only it
+ * can tell a Debian install from an AppImage one — and the settings page looks
+ * the URL up here so the addresses stay in `share.config.json` alone.
+ */
+export const DOWNLOADS: Record<string, string> = shareConfig.downloads;
