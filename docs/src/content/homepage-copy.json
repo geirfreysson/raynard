@@ -104,38 +104,38 @@
     "items": [
       {
         "title": "Ask about right now",
-        "prompt": "Who should I captain this week? Check the actual fixtures.",
-        "body": "That’s the FPL API. Prices, flights or your own systems work the same.",
+        "prompt": "What are people on Hacker News actually arguing about today?",
+        "body": "That’s the Hacker News API. A stock, transit or in-house API works the same.",
         "bullets": [
           "Fetched when you ask, not recalled",
           "Shows the records behind the answer"
         ],
-        "mediaLabel": "Placeholder for a live Fantasy Premier League answer screenshot"
+        "mediaLabel": "Placeholder for a live Hacker News answer screenshot"
       },
       {
-        "title": "No invented answers",
-        "prompt": "I want to read about how open source communities are built.",
-        "body": "Real editions from a real catalogue, each linked back to its record.",
+        "title": "No invented numbers",
+        "prompt": "How does GDP per person in the EU compare with the US?",
+        "body": "Real figures from the World Bank, each linked to the record behind it.",
         "bullets": [
           "The source data stays with the answer",
           "Send the whole thing as a link"
         ],
-        "mediaLabel": "Placeholder for an Open Library answer with sources screenshot",
+        "mediaLabel": "Placeholder for a cited World Bank GDP comparison screenshot",
         "reverse": true
       },
       {
         "title": "The question that asks itself",
-        "prompt": "Every morning at 7: what’s new on Hacker News that isn’t about AI?",
+        "prompt": "Every Monday: analyse Arsenal’s next match.",
         "body": "Daily to yearly, in your time zone, waiting when you open the app.",
         "bullets": [
           "Lands in its own chat, or one you have",
           "Pause it, edit it, or run it early"
         ],
-        "mediaLabel": "Placeholder for a scheduled task screenshot"
+        "mediaLabel": "Placeholder for a scheduled Fantasy Premier League task screenshot"
       },
       {
         "title": "And if it’s not on the list",
-        "prompt": "Add World Bank data — it’s at data360.worldbank.org/en/api",
+        "prompt": "Add UK crime data — the docs are at data.police.uk/docs",
         "body": "Any API with docs, including the one behind your company’s login.",
         "bullets": [
           "Built and tested once you approve it",
