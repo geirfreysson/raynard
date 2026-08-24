@@ -1,0 +1,52 @@
+{
+  "author": "Geir Freysson",
+  "category": "Data",
+  "contributes": {
+    "tools": [
+      {
+        "description": "Search the complete official Eurostat SDMX dataflow catalogue by words in a dataset title or by online dataset code. Use this first for topic questions when the exact code is unknown; all query words must occur in the title/code. Returns exact datasetCode values for eurostat_get_dataset_metadata and eurostat_query_data. Results are relevance-ranked, then alphabetical; use offset and limit to page. The catalogue is cached by the host (24 hours by default).",
+        "hasCard": true,
+        "name": "eurostat_search_datasets"
+      },
+      {
+        "description": "Get official Eurostat metadata for one exact online dataset code returned by eurostat_search_datasets. Use this before querying data to confirm the title, total observation count, overall oldest/latest periods, latest update, source institution, data-structure version, and explanatory-metadata link. This does not return dimension positions or observations; call eurostat_query_data next with narrow dimension and time filters.",
+        "hasCard": true,
+        "name": "eurostat_get_dataset_metadata"
+      },
+      {
+        "description": "Query observations from one exact Eurostat online dataset code through the Statistics API and decode its JSON-stat 2.0 cube into labelled rows. Use eurostat_search_datasets first when the code is unknown and eurostat_get_dataset_metadata to inspect coverage. Dimension filters are exact code/value pairs; repeat a dimension to request several values. With no explicit time selection the tool sends lastTimePeriod=1. A time/time_period filter, lastTimePeriod, or since/until range are mutually exclusive except since+until may be combined. Every non-empty cell is retained in the filterable card; text is bounded by displayLimit. Queries above maxCells fail with instructions to narrow filters, preventing oversized model results.",
+        "hasCard": true,
+        "name": "eurostat_query_data"
+      }
+    ]
+  },
+  "createdAt": "2026-08-16T21:37:46.000Z",
+  "description": "Search Eurostat datasets, inspect official dataset metadata, and retrieve filtered statistical observations as labelled JSON-stat rows.",
+  "homepage": "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started",
+  "icon": "database",
+  "id": "raynard.catalog.eurostat",
+  "name": "Eurostat",
+  "samplePrompts": [
+    "Which EU countries have the highest youth unemployment right now?",
+    "Compare the population of Germany, France and Italy in the latest Eurostat figures.",
+    "How has Iceland's GDP changed since 2015?"
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started",
+    "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/api",
+    "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-detailed-guidelines/api-statistics",
+    "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-detailed-guidelines/sdmx3-0/structure-queries",
+    "https://ec.europa.eu/eurostat/web/user-guides/data-browser/api-data-access/api-getting-started/catalogue-api"
+  ],
+  "status": "bundled",
+  "tags": [
+    "eurostat",
+    "sdmx",
+    "macroeconomics",
+    "official-statistics",
+    "europe",
+    "api"
+  ],
+  "version": "0.1.0"
+}
