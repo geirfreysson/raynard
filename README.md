@@ -80,3 +80,7 @@ For now, `runAgentTurnStream()` calls the Tauri backend command that performs a 
 - `@mariozechner/pi-ai`
 
 When you replace this with a fuller agent loop, keep orchestration inside this runtime boundary and load secrets from `.env` through Tauri commands rather than `VITE_` variables.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
