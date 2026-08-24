@@ -1,0 +1,73 @@
+{
+  "author": "Raynard",
+  "category": "Social",
+  "contributes": {
+    "tools": [
+      {
+        "name": "x_search_recent_posts",
+        "description": "Search public recent X posts using GET /2/tweets/search/recent. Use X recent-search query syntax in query; the API returns a recent matching page, not the full historical archive. max_results defaults to 10 and the API accepts 10-100. Use next_token from the result to fetch the next page. start_time and end_time are ISO 8601 UTC timestamps and only filter when included in the request. Results include public metrics, author expansion, conversation_id, and X status URLs; call x_get_post for a single post or search conversation_id:<id> to inspect a thread/conversation page permitted by your X API access tier.",
+        "hasCard": true
+      },
+      {
+        "name": "x_get_conversation_posts",
+        "description": "Fetch a recent-search page for one X conversation/thread using query conversation_id:<conversation_id> against GET /2/tweets/search/recent. conversation_id is usually the root post ID returned on each post. max_results defaults to 10 and must be 10-100; use next_token to page. This returns posts in the conversation that are visible to recent search and permitted by your X API tier, with public metrics and author expansions.",
+        "hasCard": true
+      },
+      {
+        "name": "x_get_post",
+        "description": "Retrieve one public X post by numeric tweet/post ID using GET /2/tweets/:id. Returns text, author expansion, conversation_id for thread lookup, referenced tweet IDs, and public engagement metrics. Use IDs found from x_search_recent_posts or x_get_user_posts; use x_search_recent_posts with query conversation_id:<conversation_id> for conversation/thread pages permitted by the API tier.",
+        "hasCard": true
+      },
+      {
+        "name": "x_get_user_by_username",
+        "description": "Look up a public X account by username using GET /2/users/by/username/:username. Returns account ID needed for x_get_user_posts, display name, bio/location/url where public, verification flag, created_at, profile image URL, and public account metrics.",
+        "hasCard": true
+      },
+      {
+        "name": "x_get_user_posts",
+        "description": "List recent public posts authored by a numeric X user ID using GET /2/users/:id/tweets. Use x_get_user_by_username first when you only have a handle. max_results defaults to 10 and this endpoint accepts 5-100. pagination_token must be the opaque meta.next_token returned by this same endpoint. exclude can omit replies, retweets, or both; start_time/end_time are ISO 8601 UTC filters honored when allowed by your API access tier.",
+        "hasCard": true
+      },
+      {
+        "name": "x_get_trends_by_location",
+        "description": "Get the current X trending topics for one supported geographic location using GET /2/trends/by/woeid/:woeid. The location is identified by a Yahoo! Where On Earth ID (WOEID). Common official IDs are Worldwide 1, United States 23424977, United Kingdom 23424975, Japan 23424856, New York 2459115, Los Angeles 2442047, London 44418, and Tokyo 1118370. Results are returned in X trend order, max_trends defaults to 20 and accepts 1-50, and tweet_count can be absent for a topic. The app-only bearer-token limit documented by X is 75 requests per 15 minutes.",
+        "hasCard": true
+      }
+    ]
+  },
+  "description": "Explore public X (Twitter) data through the official X API, including current location trends, recent post search, individual post lookup, public user lookup, and user-authored public post timelines with citations and result cards.",
+  "homepage": "https://docs.x.com/x-api/overview",
+  "icon": "message-square",
+  "id": "raynard.catalog.x-api",
+  "name": "X",
+  "samplePrompts": [
+    "Find recent posts from XDevelopers about API updates.",
+    "Look up the public X account @XDevelopers.",
+    "What is trending on X in London right now?"
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://docs.x.com/x-api/overview",
+    "https://docs.x.com/x-api/trends/get-trends-by-woeid"
+  ],
+  "status": "bundled",
+  "tags": [
+    "x-api",
+    "twitter",
+    "social-media",
+    "public-posts",
+    "developer-platform",
+    "api"
+  ],
+  "version": "0.1.0",
+  "auth": {
+    "credentials": [
+      {
+        "key": "X_API_BEARER_TOKEN",
+        "label": "X API bearer token / API key",
+        "description": "Bearer token or API key from an X developer project/app; endpoint availability depends on your X API access tier.",
+        "signupUrl": "https://developer.x.com/en/portal/dashboard"
+      }
+    ]
+  }
+}
