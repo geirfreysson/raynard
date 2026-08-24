@@ -1384,6 +1384,113 @@ fn open_extension_contribution_folder(app: tauri::AppHandle, folder: String) -> 
     Ok(())
 }
 
+/// Mirrors `EXTENSION_NAME_MAX_LENGTH` in `src/extension-rename.ts`.
+const PLUGIN_DISPLAY_NAME_MAX_LENGTH: usize = 64;
+
+/// Collapses whitespace so two extensions cannot differ only by spacing, and so
+/// a control character cannot smuggle a line break into a sidebar row.
+fn normalize_plugin_display_name(raw: &str) -> String {
+    raw.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Rewrites one extension's display `name` in its manifest, leaving every other
+/// key and its authored order alone. Split out of the command so the rewrite and
+/// its collision rules are testable without a `tauri::AppHandle`.
+fn rename_generated_plugin_in(
+    root: &Path,
+    plugin_dir: &Path,
+    raw_name: &str,
+) -> Result<(), String> {
+    let name = normalize_plugin_display_name(raw_name);
+    if name.is_empty() {
+        return Err("Enter a name for this extension.".to_string());
+    }
+    if name.chars().count() > PLUGIN_DISPLAY_NAME_MAX_LENGTH {
+        return Err(format!(
+            "Keep the name to {PLUGIN_DISPLAY_NAME_MAX_LENGTH} characters or fewer."
+        ));
+    }
+
+    // resolve_generated_plugin_by_id accepts an id, a directory name, or a
+    // case-insensitive display name, so a name colliding with any of those on
+    // another extension makes every later lookup ambiguous rather than ugly.
+    let lowered = name.to_lowercase();
+    let entries =
+        fs::read_dir(root).map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let other_dir = entry.path();
+        if !other_dir.is_dir() {
+            continue;
+        }
+        if other_dir.canonicalize().ok().as_deref() == Some(plugin_dir) {
+            continue;
+        }
+        let Some(other) =
+            read_generated_plugin_manifest(&other_dir, &other_dir.join("plugin.json"))
+        else {
+            continue;
+        };
+        let dir_name = other_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if other.id.trim().to_lowercase() == lowered
+            || other.name.trim().to_lowercase() == lowered
+            || dir_name == lowered
+        {
+            return Err("Another extension already uses that name.".to_string());
+        }
+    }
+
+    let manifest_path = plugin_dir.join("plugin.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
+    let mut manifest: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
+    let object = manifest
+        .as_object_mut()
+        .ok_or_else(|| "The extension manifest is not a JSON object.".to_string())?;
+    object.insert("name".to_string(), Value::String(name));
+    let serialized = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("Could not serialize plugin manifest: {error}"))?;
+    fs::write(&manifest_path, format!("{serialized}\n"))
+        .map_err(|error| format!("Could not write plugin manifest: {error}"))
+}
+
+/// Renames an extension's display name in its manifest. The directory slug is
+/// deliberately untouched: it is what the agent routes on, what chats persist
+/// as `activeBuildPlugin.dir`, and what plugin data and keychain accounts are
+/// keyed by, so moving it would strand all three.
+#[tauri::command]
+fn rename_generated_plugin(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    name: String,
+) -> Result<GeneratedPluginDetail, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let root = generated_plugins_dir(&app)?;
+    rename_generated_plugin_in(&root, &plugin_dir, &name)?;
+
+    let mut detail = read_plugin_detail_files(&plugin_dir)?;
+    enrich_generated_plugin_tools_from_runtime(&mut detail.plugin, &plugin_dir);
+    annotate_plugin_credentials(&mut detail.plugin);
+    Ok(detail)
+}
+
 #[tauri::command]
 fn delete_generated_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
     let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
@@ -6355,19 +6462,19 @@ mod tests {
         format_quota_window, generated_plugin_source_mtime_millis, install_catalog_extension_from,
         load_bookmark_cache_in, load_generated_plugin_runtime_tools_cached,
         load_or_rebuild_chat_history_index_in, merge_turn_usage, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
-        packaged_node_path_for, packaged_runtime_scripts_dir_for, parse_chatgpt_usage,
-        parse_moonshot_balance, parse_stored_credential, plugin_credential_account,
-        provider_preset, read_catalog_extension_detail_from, read_catalog_extensions,
-        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
-        rebuild_chat_history_index_in, remove_chat_history_index_row_in,
-        save_plugin_cache_settings, select_runtime_script_path, set_chat_history_unread_in,
-        share_deep_link_payload, steer_command_type, upsert_bookmark_cache,
-        upsert_chat_history_index_in, write_bookmark_in, AuthMethod, BookmarkCache,
-        BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool, PluginBuilderRequest,
-        PluginCacheSettings, ProviderQuota, RuntimeToolsCache, StoredBookmark, StoredChatMessage,
-        StoredCredential, StreamEvent, UsageTotals, APP_URL_SCHEME, KEYCHAIN_CACHE,
-        OAUTH_REFRESH_MARGIN_MS,
+        normalize_plugin_display_name, normalize_plugin_slug, normalize_stored_messages,
+        now_millis, oauth_needs_refresh, packaged_node_path_for, packaged_runtime_scripts_dir_for,
+        parse_chatgpt_usage, parse_moonshot_balance, parse_stored_credential,
+        plugin_credential_account, provider_preset, read_catalog_extension_detail_from,
+        read_catalog_extensions, read_generated_plugin_manifest, read_keychain_account,
+        read_plugin_cache_settings, rebuild_chat_history_index_in,
+        remove_chat_history_index_row_in, rename_generated_plugin_in, save_plugin_cache_settings,
+        select_runtime_script_path, set_chat_history_unread_in, share_deep_link_payload,
+        steer_command_type, upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in,
+        AuthMethod, BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
+        PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
+        StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
+        APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -7183,6 +7290,91 @@ mod tests {
     }
 
     #[test]
+    fn plugin_display_names_collapse_whitespace_and_control_characters() {
+        assert_eq!(
+            normalize_plugin_display_name("  Hacker\t\tNews \n"),
+            "Hacker News"
+        );
+        assert_eq!(normalize_plugin_display_name("D&D"), "D&D");
+        assert_eq!(normalize_plugin_display_name("   "), "");
+    }
+
+    fn write_rename_fixture(root: &Path, slug: &str, id: &str, name: &str) -> PathBuf {
+        let plugin_dir = root.join(slug);
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(
+                "{{\n  \"id\": \"{id}\",\n  \"sdkVersion\": 1,\n  \"name\": \"{name}\",\n  \"description\": \"Fixture\",\n  \"version\": \"0.1.0\"\n}}\n"
+            ),
+        )
+        .expect("write manifest");
+        plugin_dir.canonicalize().expect("canonicalize plugin dir")
+    }
+
+    #[test]
+    fn renaming_an_extension_rewrites_only_the_name_and_keeps_the_authored_key_order() {
+        let root = std::env::temp_dir().join(format!("raynard-rename-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create root");
+        let plugin_dir = write_rename_fixture(&root, "dnd-5e-api", "raynard.generated.dnd", "D&D");
+
+        rename_generated_plugin_in(&root, &plugin_dir, "  Dungeons &   Dragons ")
+            .expect("rename plugin");
+
+        let raw = fs::read_to_string(plugin_dir.join("plugin.json")).expect("read manifest");
+        let manifest: Value = serde_json::from_str(&raw).expect("parse manifest");
+        let keys: Vec<_> = manifest
+            .as_object()
+            .expect("manifest object")
+            .keys()
+            .cloned()
+            .collect();
+        // preserve_order is what stops the rewrite alphabetizing an author's file.
+        assert_eq!(
+            keys,
+            vec!["id", "sdkVersion", "name", "description", "version"]
+        );
+        assert_eq!(
+            manifest.get("name").and_then(Value::as_str),
+            Some("Dungeons & Dragons")
+        );
+        assert_eq!(
+            manifest.get("description").and_then(Value::as_str),
+            Some("Fixture")
+        );
+        // The slug the agent routes on must survive a display-name change.
+        assert!(plugin_dir.is_dir());
+        assert_eq!(
+            manifest.get("id").and_then(Value::as_str),
+            Some("raynard.generated.dnd")
+        );
+
+        fs::remove_dir_all(&root).expect("remove root");
+    }
+
+    #[test]
+    fn renaming_an_extension_refuses_a_name_that_another_extension_already_resolves_by() {
+        let root = std::env::temp_dir().join(format!("raynard-rename-clash-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create root");
+        let plugin_dir = write_rename_fixture(&root, "dnd-5e-api", "raynard.generated.dnd", "D&D");
+        write_rename_fixture(&root, "news-reader", "hacker-news", "Hacker News");
+
+        for clash in ["hacker news", "HACKER-NEWS", "News-Reader"] {
+            assert_eq!(
+                rename_generated_plugin_in(&root, &plugin_dir, clash),
+                Err("Another extension already uses that name.".to_string()),
+                "expected {clash} to be refused"
+            );
+        }
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, "   ").is_err());
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, &"x".repeat(65)).is_err());
+        // Its own current name is not a clash with itself.
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, "D&D").is_ok());
+
+        fs::remove_dir_all(&root).expect("remove root");
+    }
+
+    #[test]
     fn generated_plugin_rejects_a_manifest_without_the_current_sdk_version() {
         let plugin_dir = std::env::temp_dir().join(format!("raynard-old-plugin-{}", now_millis()));
         fs::create_dir_all(&plugin_dir).expect("create plugin dir");
@@ -7935,6 +8127,7 @@ pub fn run() {
             open_extension_contribution_folder,
             read_catalog_extension,
             read_generated_plugin,
+            rename_generated_plugin,
             read_chat_history,
             read_result_artifact,
             read_provider_quota,

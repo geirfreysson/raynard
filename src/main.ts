@@ -10,6 +10,7 @@ import {
   PackageMinus,
   PanelLeftClose,
   Pause,
+  Pencil,
   Play,
   Plug,
   Plus,
@@ -52,6 +53,7 @@ import {
   groupExtensions
 } from './extension-groups';
 import { shouldShowExtensionOnboarding } from './extension-launch';
+import { validateExtensionRename } from './extension-rename';
 import {
   extensionInstallActionLabel,
   shortExtensionDescription,
@@ -496,6 +498,7 @@ const appIcons: Record<string, IconNode> = {
   plus: Plus,
   'panel-left-close': PanelLeftClose,
   pause: Pause,
+  pencil: Pencil,
   play: Play,
   plug: Plug,
   settings: Settings,
@@ -661,6 +664,24 @@ app.innerHTML = `
         </div>
       </section>
 
+      <section id="extensionRenameModal" class="extension-delete-modal-overlay is-hidden" aria-hidden="true">
+        <form id="extensionRenameForm" class="extension-delete-modal extension-rename-modal" role="dialog" aria-modal="true" aria-labelledby="extensionRenameTitle">
+          <header class="extension-delete-header">
+            <h2 id="extensionRenameTitle">Rename Extension</h2>
+            <p>Changes the name shown in the sidebar. The folder and tool names stay as they are.</p>
+          </header>
+          <label class="extension-rename-field">
+            <span>Name</span>
+            <input id="extensionRenameInput" maxlength="64" autocomplete="off" spellcheck="false" required>
+          </label>
+          <p id="extensionRenameStatus" class="extension-rename-status" aria-live="polite"></p>
+          <div class="extension-delete-actions">
+            <button id="extensionRenameCancel" class="extension-delete-secondary" type="button">Cancel</button>
+            <button id="extensionRenameSave" class="extension-rename-primary" type="submit">Save</button>
+          </div>
+        </form>
+      </section>
+
       <section id="pluginCacheModal" class="plugin-cache-modal-overlay is-hidden" aria-hidden="true">
         <div class="plugin-cache-modal" role="dialog" aria-modal="true" aria-labelledby="pluginCacheTitle">
           <header class="plugin-cache-header">
@@ -775,6 +796,12 @@ const extensionDeleteTitle = document.querySelector<HTMLElement>('#extensionDele
 const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
 const extensionDeleteCancel = document.querySelector<HTMLButtonElement>('#extensionDeleteCancel');
 const extensionDeleteConfirm = document.querySelector<HTMLButtonElement>('#extensionDeleteConfirm');
+const extensionRenameModal = document.querySelector<HTMLElement>('#extensionRenameModal');
+const extensionRenameForm = document.querySelector<HTMLFormElement>('#extensionRenameForm');
+const extensionRenameInput = document.querySelector<HTMLInputElement>('#extensionRenameInput');
+const extensionRenameStatus = document.querySelector<HTMLElement>('#extensionRenameStatus');
+const extensionRenameCancel = document.querySelector<HTMLButtonElement>('#extensionRenameCancel');
+const extensionRenameSave = document.querySelector<HTMLButtonElement>('#extensionRenameSave');
 const pluginCacheModal = document.querySelector<HTMLElement>('#pluginCacheModal');
 const pluginCacheTitle = document.querySelector<HTMLElement>('#pluginCacheTitle');
 const pluginCacheHint = document.querySelector<HTMLElement>('#pluginCacheHint');
@@ -845,6 +872,7 @@ let pendingExtensionDelete:
       resolve: (confirmed: boolean) => void;
     }
   | null = null;
+let activeExtensionRename: GeneratedPlugin | null = null;
 let activePluginCache: { pluginId: string; label: string } | null = null;
 let activeExtensionContribution:
   | { detail: GeneratedPluginDetail; prepared?: PreparedExtensionContribution }
@@ -959,6 +987,15 @@ extensionDeleteModal?.addEventListener('click', (event) => {
     resolveExtensionDelete(false);
   }
 });
+extensionRenameCancel?.addEventListener('click', closeExtensionRenameModal);
+extensionRenameInput?.addEventListener('input', syncExtensionRenameState);
+extensionRenameForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveExtensionRename();
+});
+extensionRenameModal?.addEventListener('click', (event) => {
+  if (event.target === extensionRenameModal) closeExtensionRenameModal();
+});
 pluginCacheCancel?.addEventListener('click', closePluginCacheModal);
 pluginCacheSave?.addEventListener('click', () => void saveActivePluginCacheSettings());
 pluginCacheClear?.addEventListener('click', () => void clearActivePluginCache());
@@ -987,6 +1024,7 @@ document.addEventListener('keydown', (event) => {
   closeExtensionsModal();
   closePluginDetailMenu();
   if (activePluginCache) closePluginCacheModal();
+  if (activeExtensionRename) closeExtensionRenameModal();
   if (activeExtensionContribution) closeExtensionContributionModal();
   if (pendingExtensionDelete) resolveExtensionDelete(false);
 });
@@ -2841,6 +2879,72 @@ function resolveExtensionDelete(confirmed: boolean) {
   pending.resolve(confirmed);
 }
 
+function openExtensionRenameModal(plugin: GeneratedPlugin) {
+  if (!extensionRenameModal || !extensionRenameInput || !extensionRenameSave) return;
+  activeExtensionRename = plugin;
+  extensionRenameInput.value = plugin.name;
+  extensionRenameSave.disabled = true;
+  if (extensionRenameStatus) extensionRenameStatus.textContent = '';
+  extensionRenameModal.classList.remove('is-hidden');
+  extensionRenameModal.setAttribute('aria-hidden', 'false');
+  extensionRenameInput.focus();
+  extensionRenameInput.select();
+}
+
+function closeExtensionRenameModal() {
+  activeExtensionRename = null;
+  extensionRenameModal?.classList.add('is-hidden');
+  extensionRenameModal?.setAttribute('aria-hidden', 'true');
+}
+
+/** Validates as the user types so Save is only live for a name that can land. */
+function syncExtensionRenameState() {
+  if (!activeExtensionRename || !extensionRenameInput || !extensionRenameSave) return;
+  const result = validateExtensionRename(
+    extensionRenameInput.value,
+    activeExtensionRename,
+    generatedPlugins
+  );
+  extensionRenameSave.disabled = !result.ok || !result.changed;
+  if (extensionRenameStatus) {
+    extensionRenameStatus.textContent = result.ok ? '' : result.error;
+  }
+}
+
+async function saveExtensionRename() {
+  const plugin = activeExtensionRename;
+  if (!plugin || !extensionRenameInput || !extensionRenameSave) return;
+  const result = validateExtensionRename(extensionRenameInput.value, plugin, generatedPlugins);
+  if (!result.ok) {
+    if (extensionRenameStatus) extensionRenameStatus.textContent = result.error;
+    return;
+  }
+  if (!result.changed) {
+    closeExtensionRenameModal();
+    return;
+  }
+
+  extensionRenameSave.disabled = true;
+  if (extensionRenameStatus) extensionRenameStatus.textContent = 'Renaming…';
+  try {
+    const detail = await invoke<GeneratedPluginDetail>('rename_generated_plugin', {
+      pluginId: plugin.id,
+      name: result.name
+    });
+    closeExtensionRenameModal();
+    await refreshGeneratedPlugins();
+    if (selectedPluginId === detail.plugin.id) renderPluginDetail(detail);
+  } catch (error) {
+    extensionRenameSave.disabled = false;
+    if (extensionRenameStatus) {
+      extensionRenameStatus.textContent = getErrorMessage(
+        error,
+        `Could not rename ${plugin.name}.`
+      );
+    }
+  }
+}
+
 function closePluginDetailMenu() {
   const menu = pluginDetailView?.querySelector<HTMLElement>('.plugin-detail-menu');
   const toggle = pluginDetailView?.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
@@ -3119,7 +3223,11 @@ function renderPluginDetail(
           </button>
           <div class="plugin-detail-menu is-hidden" role="menu">
             ${removalAction === 'delete'
-              ? `<button type="button" role="menuitem" data-plugin-action="contribute">
+              ? `<button type="button" role="menuitem" data-plugin-action="rename">
+                  ${iconSvg('pencil')}
+                  <span>Rename</span>
+                </button>
+                <button type="button" role="menuitem" data-plugin-action="contribute">
                   ${iconSvg('git-pull-request')}
                   <span>Prepare PR</span>
                 </button>`
@@ -3145,6 +3253,10 @@ function renderPluginDetail(
   header.querySelector<HTMLButtonElement>('[data-plugin-action="cache"]')?.addEventListener('click', () => {
     closePluginDetailMenu();
     void openPluginCacheModal(plugin.id, plugin.name);
+  });
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="rename"]')?.addEventListener('click', () => {
+    closePluginDetailMenu();
+    openExtensionRenameModal(plugin);
   });
   header.querySelector<HTMLButtonElement>('[data-plugin-action="contribute"]')?.addEventListener('click', () => {
     closePluginDetailMenu();

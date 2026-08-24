@@ -22,6 +22,7 @@ generated API plugins.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
+- `src/extension-rename.ts`: display-name normalization and collision rules for renaming a locally authored extension.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
 - `src/result-card/template-fields.ts`: the single walker over the `CardBlock` union; drives both example data and share-link projection.
 - `src/share/`: share-link payload, codec, degradation ladder, share sheet, and deep-link import.
@@ -78,7 +79,16 @@ generated API plugins.
   the assistant output typography while retaining the existing card color.
 - The plugin sidebar lists generated plugins and opens a detail screen with
   metadata, runtime tools, card previews, README content, and selected source
-  files. Splash prompts are intentionally not displayed on this screen.
+  files. Splash prompts are intentionally not displayed on this screen. Its `⋯`
+  menu offers Rename for a locally authored extension. Rename changes only the
+  manifest's display `name`: the directory slug is what the agent routes on,
+  what chats persist as `activeBuildPlugin.dir`, and what plugin data and
+  keychain accounts are keyed by, so it stays put. An installed catalog
+  extension is not renameable, because reinstalling it would silently restore
+  the bundled name. `resolve_generated_plugin_by_id` accepts an id, a directory
+  name, or a case-insensitive display name, so both `src/extension-rename.ts`
+  and `rename_generated_plugin` reject a name that collides with any of those
+  on another extension.
 - `/extensions` opens a catalog with the user's installed extensions and the
   pre-approved extensions bundled with the app. It separates locally coded
   extensions (`Your extensions`), installed catalog entries (`Installed`), and
