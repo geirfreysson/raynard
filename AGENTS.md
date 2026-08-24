@@ -77,18 +77,32 @@ generated API plugins.
   are collapsed by default. Their disclosure label uses each plugin card's
   singular/plural names (`1 monster`, `2 monsters`, `1 resource`) and matches
   the assistant output typography while retaining the existing card color.
-- The plugin sidebar lists generated plugins and opens a detail screen with
-  metadata, runtime tools, card previews, README content, and selected source
-  files. Splash prompts are intentionally not displayed on this screen. Its `⋯`
-  menu offers Rename for a locally authored extension. Rename changes only the
-  manifest's display `name`: the directory slug is what the agent routes on,
-  what chats persist as `activeBuildPlugin.dir`, and what plugin data and
-  keychain accounts are keyed by, so it stays put. An installed catalog
-  extension is not renameable, because reinstalling it would silently restore
-  the bundled name. `resolve_generated_plugin_by_id` accepts an id, a directory
-  name, or a case-insensitive display name, so both `src/extension-rename.ts`
-  and `rename_generated_plugin` reject a name that collides with any of those
-  on another extension.
+- The plugin sidebar lists generated plugins and opens a detail screen ordered
+  by what the reader can act on: header, manifest, API keys, tools, card
+  previews, README, then `tools.ts`. `src/extension-detail-view.ts` holds that
+  order and the key wording, and `renderPluginDetail` appends sections in the
+  order that function returns. An extension that needs a key says so in a
+  header pill (`API key needed` / `API key added`) and offers the same
+  Add/Replace action both as a header button and as the first `⋯` menu item,
+  so a key is never below the fold. An extension with no credentials renders
+  no setup section at all. Tool rows are collapsed `<details>`: the summary is
+  the tool name plus the first sentence of its model-facing description, and
+  the body holds the full description and the parameter schema rendered as
+  name/type/required rows rather than raw JSON. The manifest leads and is read
+  rather than dumped — category, author, version, SDK, status, homepage, tags,
+  and documentation links, with ids, paths, and the raw `plugin.json` behind
+  two disclosures. Card previews and each source file fold too, and a preview
+  mounts its React card only when its fold is first opened. Splash prompts are
+  intentionally not displayed on this screen. Its `⋯` menu offers Rename for a
+  locally authored extension. Rename changes only the manifest's display
+  `name`: the directory slug is what the agent routes on, what chats persist
+  as `activeBuildPlugin.dir`, and what plugin data and keychain accounts are
+  keyed by, so it stays put. An installed catalog extension is not renameable,
+  because reinstalling it would silently restore the bundled name.
+  `resolve_generated_plugin_by_id` accepts an id, a directory name, or a case-
+  insensitive display name, so both `src/extension-rename.ts` and
+  `rename_generated_plugin` reject a name that collides with any of those on
+  another extension.
 - `/extensions` opens a catalog with the user's installed extensions and the
   pre-approved extensions bundled with the app. It separates locally coded
   extensions (`Your extensions`), installed catalog entries (`Installed`), and

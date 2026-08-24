@@ -6,6 +6,7 @@ import {
   Database,
   Ellipsis,
   GitPullRequest,
+  KeyRound,
   MessageSquare,
   PackageMinus,
   PanelLeftClose,
@@ -54,6 +55,17 @@ import {
 } from './extension-groups';
 import { shouldShowExtensionOnboarding } from './extension-launch';
 import { validateExtensionRename } from './extension-rename';
+import {
+  extensionDetailSectionOrder,
+  extensionKeyAction,
+  extensionKeyHint,
+  extensionKeyStatus,
+  extensionManifestMetadata,
+  extensionSourceLabel,
+  extensionToolParameters,
+  extensionToolSummary,
+  type ExtensionDetailSection
+} from './extension-detail-view';
 import {
   extensionInstallActionLabel,
   shortExtensionDescription,
@@ -493,6 +505,7 @@ const appIcons: Record<string, IconNode> = {
   database: Database,
   ellipsis: Ellipsis,
   'git-pull-request': GitPullRequest,
+  key: KeyRound,
   'message-square': MessageSquare,
   'package-minus': PackageMinus,
   plus: Plus,
@@ -3185,6 +3198,12 @@ async function revealExtensionContribution() {
   }
 }
 
+/**
+ * The extension detail screen, ordered by what the reader can act on: the name
+ * and its key state, then the key itself, then what the extension does. Ids,
+ * paths, and source are real debugging aids but they are not what the screen is
+ * for, so they sit at the bottom behind a disclosure.
+ */
 function renderPluginDetail(
   detail: GeneratedPluginDetail,
   options: { availableExtension?: CatalogExtension } = {}
@@ -3192,7 +3211,11 @@ function renderPluginDetail(
   if (!pluginDetailView) return;
   const { plugin } = detail;
   const availableExtension = options.availableExtension;
-  const requiresKey = availableExtension?.requiresKey ?? Boolean(plugin.credentials.length);
+  const readOnly = Boolean(availableExtension);
+  const declaredCredentials = plugin.credentials || [];
+  const requiresKey = availableExtension?.requiresKey ?? Boolean(declaredCredentials.length);
+  const keyStatus = extensionKeyStatus(declaredCredentials, { readOnly, requiresKey });
+  const keyAction = extensionKeyAction(declaredCredentials, { readOnly });
   const removalAction = extensionRemovalAction(plugin, catalogExtensions);
   const removalLabel = removalAction === 'uninstall' ? 'Uninstall' : 'Delete';
   const kicker = availableExtension
@@ -3205,12 +3228,25 @@ function renderPluginDetail(
 
   const header = document.createElement('header');
   header.className = 'plugin-detail-header';
+  const facts = [
+    plugin.version ? `v${plugin.version}` : '',
+    availableExtension?.category || '',
+    availableExtension?.author ? `by ${availableExtension.author}` : '',
+    `${plugin.tools.length || availableExtension?.tools?.length || 0} ${
+      (plugin.tools.length || availableExtension?.tools?.length || 0) === 1 ? 'tool' : 'tools'
+    }`
+  ].filter(Boolean);
   header.innerHTML = `
     <div class="plugin-detail-title">
       <span class="plugin-detail-kicker">${kicker}</span>
       <h1>${escapeHtml(plugin.name)}</h1>
       <p>${escapeHtml(plugin.description || 'No description provided.')}</p>
-      ${requiresKey ? '<span class="extension-requires-key-pill">Requires key</span>' : ''}
+      <div class="plugin-detail-facts">
+        ${keyStatus
+          ? `<span class="extension-requires-key-pill${keyStatus.configured ? ' is-configured' : ''}">${escapeHtml(keyStatus.text)}</span>`
+          : ''}
+        ${facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join('')}
+      </div>
     </div>
     ${availableExtension
       ? `<div class="plugin-detail-actions plugin-detail-install-actions">
@@ -3218,10 +3254,19 @@ function renderPluginDetail(
           <span class="plugin-detail-install-status" aria-live="polite"></span>
         </div>`
       : `<div class="plugin-detail-actions">
+          ${keyAction
+            ? `<button class="extensions-install-button plugin-detail-key" type="button" data-plugin-action="credentials">${escapeHtml(keyAction.label)}</button>`
+            : ''}
           <button class="plugin-detail-menu-toggle" type="button" aria-label="Plugin options" aria-haspopup="menu" aria-expanded="false">
             ${iconSvg('ellipsis')}
           </button>
           <div class="plugin-detail-menu is-hidden" role="menu">
+            ${keyAction
+              ? `<button type="button" role="menuitem" data-plugin-action="credentials">
+                  ${iconSvg('key')}
+                  <span>${escapeHtml(keyAction.label)}</span>
+                </button>`
+              : ''}
             ${removalAction === 'delete'
               ? `<button type="button" role="menuitem" data-plugin-action="rename">
                   ${iconSvg('pencil')}
@@ -3249,6 +3294,16 @@ function renderPluginDetail(
     const opening = menu?.classList.contains('is-hidden') ?? false;
     menu?.classList.toggle('is-hidden', !opening);
     menuToggle.setAttribute('aria-expanded', String(opening));
+  });
+  // The header button and the menu item are the same action.
+  header.querySelectorAll<HTMLButtonElement>('[data-plugin-action="credentials"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      closePluginDetailMenu();
+      if (!keyAction) return;
+      openPluginCredentialModal(plugin, credentialRequirements(plugin, keyAction.keys), () => {
+        void openGeneratedPlugin(plugin.id);
+      });
+    });
   });
   header.querySelector<HTMLButtonElement>('[data-plugin-action="cache"]')?.addEventListener('click', () => {
     closePluginDetailMenu();
@@ -3294,54 +3349,11 @@ function renderPluginDetail(
   });
   pluginDetailView.appendChild(header);
 
-  const meta = document.createElement('dl');
-  meta.className = 'plugin-detail-meta';
-  appendPluginResultRow(meta, 'ID', plugin.id);
-  appendPluginResultRow(meta, 'Version', plugin.version || 'n/a');
-  appendPluginResultRow(meta, 'Status', availableExtension ? 'Available' : plugin.status || 'n/a');
-  if (availableExtension) {
-    appendPluginResultRow(meta, 'Category', availableExtension.category || 'n/a');
-    appendPluginResultRow(meta, 'Author', availableExtension.author || 'n/a');
-    appendPluginResultRow(meta, 'Homepage', availableExtension.homepage || 'n/a');
-  }
-  appendPluginResultRow(meta, 'Created', plugin.createdAt || 'n/a');
-  appendPluginResultRow(meta, 'Directory', plugin.directory);
-  appendPluginResultRow(meta, 'Manifest', plugin.manifestPath);
-  appendPluginResultRow(meta, 'Entrypoint', plugin.entryPath);
-  pluginDetailView.appendChild(meta);
-
-  const tools = document.createElement('section');
-  tools.className = 'plugin-detail-section';
-  tools.innerHTML = '<h2>Tools</h2>';
-  const detailTools = plugin.tools.length ? plugin.tools : availableExtension?.tools ?? [];
-  if (detailTools.length) {
-    const list = document.createElement('div');
-    list.className = 'plugin-tool-list';
-    for (const tool of detailTools) {
-      const item = document.createElement('div');
-      item.className = 'plugin-tool-row';
-      item.innerHTML = `
-        <code>${escapeHtml(tool.name)}</code>
-        <span>
-          ${escapeHtml(tool.description || 'No description provided.')}
-          ${'parameters' in tool
-            ? `<small>${escapeHtml(stringifyPromptJson(tool.parameters || { type: 'object', properties: {} }))}</small>`
-            : ''}
-        </span>
-      `;
-      list.appendChild(item);
-    }
-    tools.appendChild(list);
-  } else {
-    const empty = document.createElement('p');
-    empty.className = 'plugin-detail-empty';
-    empty.textContent = 'This plugin manifest does not declare any tools.';
-    tools.appendChild(empty);
-  }
-  pluginDetailView.appendChild(tools);
-
-  renderPluginCredentials(plugin, { readOnly: Boolean(availableExtension) });
-  renderPluginCardPreviews(plugin);
+  const sections = new Map<ExtensionDetailSection, Node>();
+  const credentials = buildPluginCredentialsSection(plugin, { readOnly });
+  if (credentials) sections.set('setup', credentials);
+  sections.set('tools', buildPluginToolsSection(plugin, availableExtension));
+  sections.set('cards', buildPluginCardPreviewsSection(plugin));
 
   if (detail.readme.trim()) {
     const readme = document.createElement('section');
@@ -3351,31 +3363,251 @@ function renderPluginDetail(
     readmeBody.className = 'message-text';
     renderMessageText(readmeBody, detail.readme, true);
     readme.appendChild(readmeBody);
-    pluginDetailView.appendChild(readme);
+    sections.set('readme', readme);
   }
 
-  pluginDetailView.appendChild(createPluginCodeSection('plugin.json', detail.manifestText));
-  pluginDetailView.appendChild(createPluginCodeSection('tools.ts', detail.code || '// No tools.ts found.'));
+  sections.set('manifest', buildPluginManifestSection(detail, availableExtension));
+  sections.set('source', createPluginCodeSection('tools.ts', detail.code || '// No tools.ts found.'));
+
+  for (const name of extensionDetailSectionOrder({
+    hasCredentials: Boolean(credentials),
+    hasReadme: sections.has('readme')
+  })) {
+    const node = sections.get(name);
+    if (node) pluginDetailView.appendChild(node);
+  }
 }
 
-// Preview every plugin tool's result card using synthesized example data.
-function renderPluginCredentials(
+/** The declarations the credential modal needs, for a subset of a plugin's keys. */
+function credentialRequirements(
   plugin: GeneratedPlugin,
-  options: { readOnly?: boolean } = {}
-) {
-  if (!pluginDetailView) return;
-  const section = document.createElement('section');
-  section.className = 'plugin-detail-section';
-  section.innerHTML = '<h2>Credentials</h2>';
+  keys: string[]
+): PluginCredentialRequirement[] {
+  const wanted = new Set(keys);
+  return (plugin.credentials || [])
+    .filter((credential) => wanted.has(credential.key))
+    .map((credential) => ({
+      key: credential.key,
+      label: credential.label,
+      description: credential.description,
+      signupUrl: credential.signupUrl
+    }));
+}
 
-  const declared = plugin.credentials || [];
-  if (!declared.length) {
+/**
+ * One collapsed row per tool. A tool description is written for the model and
+ * routinely runs to a paragraph, so the row shows its first sentence and keeps
+ * the rest, plus the parameter schema, behind the disclosure.
+ */
+function buildPluginToolsSection(
+  plugin: GeneratedPlugin,
+  availableExtension?: CatalogExtension
+) {
+  const tools = document.createElement('section');
+  tools.className = 'plugin-detail-section';
+  tools.innerHTML = '<h2>Tools</h2>';
+  const detailTools = plugin.tools.length ? plugin.tools : availableExtension?.tools ?? [];
+  if (!detailTools.length) {
     const empty = document.createElement('p');
     empty.className = 'plugin-detail-empty';
-    empty.textContent = 'This plugin does not require credentials.';
-    section.appendChild(empty);
-    pluginDetailView.appendChild(section);
-    return;
+    empty.textContent = 'This plugin manifest does not declare any tools.';
+    tools.appendChild(empty);
+    return tools;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'plugin-tool-list';
+  for (const tool of detailTools) {
+    const description = tool.description || 'No description provided.';
+    const summaryLine = extensionToolSummary(description);
+
+    const row = document.createElement('details');
+    row.className = 'plugin-tool-row';
+    const summary = document.createElement('summary');
+    const name = document.createElement('code');
+    name.textContent = tool.name;
+    summary.appendChild(name);
+    const lead = document.createElement('span');
+    lead.className = 'plugin-tool-lead';
+    lead.textContent = summaryLine;
+    summary.appendChild(lead);
+    row.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'plugin-tool-body';
+    if (description !== summaryLine) {
+      const full = document.createElement('p');
+      full.textContent = description;
+      body.appendChild(full);
+    }
+
+    if ('parameters' in tool) {
+      const parameters = extensionToolParameters(tool.parameters);
+      const heading = document.createElement('p');
+      heading.className = 'plugin-tool-params-heading';
+      heading.textContent = parameters.length ? 'Parameters' : 'Takes no arguments.';
+      body.appendChild(heading);
+      if (parameters.length) {
+        const params = document.createElement('div');
+        params.className = 'plugin-tool-params';
+        for (const parameter of parameters) {
+          const item = document.createElement('div');
+          item.className = 'plugin-tool-param';
+          const label = document.createElement('span');
+          label.className = 'plugin-tool-param-name';
+          const paramName = document.createElement('code');
+          paramName.textContent = parameter.name;
+          label.appendChild(paramName);
+          const type = document.createElement('span');
+          type.className = 'plugin-tool-param-type';
+          type.textContent = parameter.type;
+          label.appendChild(type);
+          if (parameter.required) {
+            const required = document.createElement('span');
+            required.className = 'plugin-tool-param-required';
+            required.textContent = 'required';
+            label.appendChild(required);
+          }
+          item.appendChild(label);
+          if (parameter.description) {
+            const text = document.createElement('p');
+            text.textContent = parameter.description;
+            item.appendChild(text);
+          }
+          params.appendChild(item);
+        }
+        body.appendChild(params);
+      }
+    } else if (tool.hasCard) {
+      const card = document.createElement('p');
+      card.className = 'plugin-tool-params-heading';
+      card.textContent = 'Renders a result card.';
+      body.appendChild(card);
+    }
+
+    row.appendChild(body);
+    list.appendChild(row);
+  }
+  tools.appendChild(list);
+  return tools;
+}
+
+/**
+ * The manifest, read rather than dumped: what the extension is about and where
+ * its data comes from, with the ids, paths, and raw JSON kept one click away.
+ */
+function buildPluginManifestSection(
+  detail: GeneratedPluginDetail,
+  availableExtension?: CatalogExtension
+) {
+  const { plugin } = detail;
+  const metadata = extensionManifestMetadata(detail.manifestJson);
+  const category = metadata.category || availableExtension?.category || '';
+  const author = metadata.author || availableExtension?.author || '';
+  const homepage = metadata.homepage || availableExtension?.homepage || '';
+
+  const section = document.createElement('section');
+  section.className = 'plugin-detail-section plugin-manifest-section';
+  section.innerHTML = '<h2>Manifest</h2>';
+
+  const facts = document.createElement('dl');
+  facts.className = 'plugin-manifest-facts';
+  const appendFact = (label: string, value: Node | string) => {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    if (typeof value === 'string') dd.textContent = value;
+    else dd.appendChild(value);
+    facts.append(dt, dd);
+  };
+  const externalLink = (href: string, text: string) => {
+    const link = document.createElement('a');
+    link.href = href;
+    link.textContent = text;
+    link.title = href;
+    return link;
+  };
+
+  if (category) appendFact('Category', category);
+  if (author) appendFact('Author', author);
+  if (metadata.license) appendFact('License', metadata.license);
+  appendFact('Version', plugin.version || 'n/a');
+  if (metadata.sdkVersion) appendFact('SDK', `v${metadata.sdkVersion}`);
+  appendFact('Status', availableExtension ? 'Available' : plugin.status || 'n/a');
+  if (homepage) appendFact('Homepage', externalLink(homepage, extensionSourceLabel(homepage)));
+  if (metadata.tags.length) {
+    const tags = document.createElement('span');
+    tags.className = 'plugin-manifest-tags';
+    for (const tag of metadata.tags) {
+      const pill = document.createElement('span');
+      pill.className = 'plugin-manifest-tag';
+      pill.textContent = tag;
+      tags.appendChild(pill);
+    }
+    appendFact('Tags', tags);
+  }
+  if (metadata.sources.length) {
+    const sources = document.createElement('span');
+    sources.className = 'plugin-manifest-sources';
+    for (const source of metadata.sources) {
+      sources.appendChild(externalLink(source, extensionSourceLabel(source)));
+    }
+    appendFact('Documentation', sources);
+  }
+  section.appendChild(facts);
+
+  // Ids and filesystem paths are debugging aids, not what the screen is for.
+  const paths = document.createElement('details');
+  paths.className = 'plugin-detail-facts-block';
+  const pathsSummary = document.createElement('summary');
+  pathsSummary.textContent = 'Files and ids';
+  paths.appendChild(pathsSummary);
+  const meta = document.createElement('dl');
+  meta.className = 'plugin-detail-meta';
+  appendPluginResultRow(meta, 'ID', plugin.id);
+  appendPluginResultRow(meta, 'Created', plugin.createdAt || 'n/a');
+  appendPluginResultRow(meta, 'Directory', plugin.directory);
+  appendPluginResultRow(meta, 'Manifest', plugin.manifestPath);
+  appendPluginResultRow(meta, 'Entrypoint', plugin.entryPath);
+  paths.appendChild(meta);
+  section.appendChild(paths);
+
+  const raw = document.createElement('details');
+  raw.className = 'plugin-detail-facts-block';
+  const rawSummary = document.createElement('summary');
+  rawSummary.textContent = 'Raw plugin.json';
+  raw.appendChild(rawSummary);
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = detail.manifestText || '';
+  pre.appendChild(code);
+  raw.appendChild(pre);
+  section.appendChild(raw);
+
+  return section;
+}
+
+function buildPluginCredentialsSection(
+  plugin: GeneratedPlugin,
+  options: { readOnly?: boolean } = {}
+): HTMLElement | null {
+  const declared = plugin.credentials || [];
+  // An extension with no keys says nothing rather than reserving a section to
+  // announce that there is nothing to do.
+  if (!declared.length) return null;
+
+  const section = document.createElement('section');
+  section.className = 'plugin-detail-section plugin-detail-setup';
+  section.innerHTML = '<h2>API keys</h2>';
+
+  const hint = options.readOnly
+    ? 'This extension asks for a key once it is installed.'
+    : extensionKeyHint(declared);
+  if (hint) {
+    const line = document.createElement('p');
+    line.className = 'plugin-detail-hint';
+    line.textContent = hint;
+    section.appendChild(line);
   }
 
   const list = document.createElement('div');
@@ -3460,11 +3692,12 @@ function renderPluginCredentials(
   }
 
   section.appendChild(list);
-  pluginDetailView.appendChild(section);
+  return section;
 }
 
-function renderPluginCardPreviews(plugin: GeneratedPlugin) {
-  if (!pluginDetailView) return;
+// Preview every plugin tool's result card using synthesized example data. Each
+// preview is a fold: a rendered card is tall, and nine of them are a scroll.
+function buildPluginCardPreviewsSection(plugin: GeneratedPlugin) {
   const cardTools = plugin.tools;
 
   const section = document.createElement('section');
@@ -3476,8 +3709,7 @@ function renderPluginCardPreviews(plugin: GeneratedPlugin) {
     empty.className = 'plugin-detail-empty';
     empty.textContent = 'No valid runtime tools were discovered for this plugin.';
     section.appendChild(empty);
-    pluginDetailView.appendChild(section);
-    return;
+    return section;
   }
 
   const hint = document.createElement('p');
@@ -3485,24 +3717,37 @@ function renderPluginCardPreviews(plugin: GeneratedPlugin) {
   hint.textContent = 'How these tools render their results, shown with example data.';
   section.appendChild(hint);
 
+  const list = document.createElement('div');
+  list.className = 'plugin-card-preview-list';
   for (const tool of cardTools) {
     const template = tool.card as CardTemplate;
-    const block = document.createElement('div');
+    const block = document.createElement('details');
     block.className = 'plugin-card-preview';
+    const summary = document.createElement('summary');
     const label = document.createElement('code');
     label.className = 'plugin-card-preview-tool';
     label.textContent = tool.name;
-    block.appendChild(label);
+    summary.appendChild(label);
+    block.appendChild(summary);
     const mount = document.createElement('div');
+    mount.className = 'plugin-card-preview-body';
     block.appendChild(mount);
-    renderResultCards(
-      mount,
-      [{ toolName: tool.name, template, data: buildExampleData(template) }],
-      { collapsible: false }
-    );
-    section.appendChild(block);
+    // The card is only mounted once its fold is opened; React work for a card
+    // nobody looked at is work the screen does not need to do.
+    let mounted = false;
+    block.addEventListener('toggle', () => {
+      if (!block.open || mounted) return;
+      mounted = true;
+      renderResultCards(
+        mount,
+        [{ toolName: tool.name, template, data: buildExampleData(template) }],
+        { collapsible: false }
+      );
+    });
+    list.appendChild(block);
   }
-  pluginDetailView.appendChild(section);
+  section.appendChild(list);
+  return section;
 }
 
 function stringifyPromptJson(value: unknown) {
@@ -3513,10 +3758,11 @@ function stringifyPromptJson(value: unknown) {
   }
 }
 
+/** A source file, folded shut: it is reference material, not the screen's subject. */
 function createPluginCodeSection(title: string, codeText: string) {
-  const section = document.createElement('section');
+  const section = document.createElement('details');
   section.className = 'plugin-detail-section plugin-code-section';
-  const heading = document.createElement('h2');
+  const heading = document.createElement('summary');
   heading.textContent = title;
   const pre = document.createElement('pre');
   const code = document.createElement('code');
