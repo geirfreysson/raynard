@@ -45,6 +45,33 @@ away does not cancel a run, and coming back reconnects to it live.
 Also: bookmarks, a bundled catalog of pre-approved extensions, token and quota
 reporting, and in-app updates.
 
+## Private and internal APIs
+
+Nothing about this is limited to public APIs. Point Raynard at your company's
+internal service or anything behind a key, give it the documentation — a URL, or
+the spec pasted into the chat — and it writes a client for that instead.
+
+Authentication is handled without the secret ever reaching the code. The
+extension declares which credentials it needs in its manifest and reads them by
+name; the first time a tool runs without one, the app stops and asks you for it
+by name rather than failing. The value goes into your operating system keychain,
+never into the extension's files, so an extension can be read, edited, or shared
+without carrying a key with it.
+
+Each extension runs in its own process and is handed only the credentials it
+declared — one extension cannot read another's. Credential values are stripped
+out of error messages and failed HTTP responses before they reach the
+conversation.
+
+Extensions you build this way stay **on your machine**. They live in your app
+data directory, are never uploaded anywhere, and are not candidates for this
+repository's bundled catalog unless you explicitly decide to propose one.
+
+One thing to be clear about: the *responses* from an API you connect do go to
+your model provider, because reading them is how the agent answers your
+question. The credentials stay local; the data they unlock does not. Connect
+accordingly.
+
 ## Install
 
 Download the latest release for your platform:
