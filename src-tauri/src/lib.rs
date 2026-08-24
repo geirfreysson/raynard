@@ -26,10 +26,11 @@ use std::{
 };
 use tauri::ipc::Channel;
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 
 const KEYRING_SERVICE: &str = "ai.raynard";
 const INLINE_RESULT_DATA_LIMIT_BYTES: usize = 128 * 1024;
-const CHAT_HISTORY_INDEX_VERSION: u32 = 1;
+const CHAT_HISTORY_INDEX_VERSION: u32 = 2;
 static CHAT_HISTORY_INDEX_LOCK: Mutex<()> = Mutex::new(());
 static SCHEDULED_TASK_LOCK: Mutex<()> = Mutex::new(());
 static BUNDLED_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -261,6 +262,9 @@ struct ChatHistoryPayload {
     #[serde(alias = "updated_at")]
     updated_at: String,
     messages: Vec<StoredChatMessage>,
+    /// A scheduled run finished after the user last viewed this chat.
+    #[serde(default)]
+    unread: bool,
     /// The plugin this Build-mode chat is actively editing ({ dir, name }), so
     /// reopening the chat resumes the coding session. Opaque passthrough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +279,8 @@ struct ChatHistoryRow {
     created_at: String,
     updated_at: String,
     message_count: usize,
+    #[serde(default)]
+    unread: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -736,12 +742,14 @@ async fn complete_scheduled_task(
     error: Option<String>,
     destination_chat_id: Option<String>,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let store_app = app.clone();
+    let completion_status = status.clone();
+    let completed = tauri::async_runtime::spawn_blocking(move || {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
             .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
         scheduled_tasks::complete(
-            &scheduled_tasks_path(&app)?,
+            &scheduled_tasks_path(&store_app)?,
             &task_id,
             &execution_id,
             &status,
@@ -750,7 +758,36 @@ async fn complete_scheduled_task(
         )
     })
     .await
-    .map_err(|error| format!("Could not join scheduled-task completion: {error}"))?
+    .map_err(|error| format!("Could not join scheduled-task completion: {error}"))??;
+
+    if let Some(chat_id) = completed.destination_chat_id.clone() {
+        let unread_app = app.clone();
+        let unread_result = tauri::async_runtime::spawn_blocking(move || {
+            set_chat_history_unread_in(&chat_history_dir(&unread_app)?, &chat_id, true)
+        })
+        .await
+        .map_err(|error| format!("Could not join scheduled chat unread update: {error}"))
+        .and_then(|result| result.map(|_| ()));
+        if let Err(error) = unread_result {
+            eprintln!("Could not mark scheduled chat unread: {error}");
+        }
+    }
+    let body = if completion_status == "completed" {
+        "Scheduled task finished. Open Raynard to view the result."
+    } else {
+        "Scheduled task needs attention. Open Raynard for details."
+    };
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .title(&completed.name)
+        .body(body)
+        .show()
+    {
+        eprintln!("Could not show scheduled task notification: {error}");
+    }
+
+    Ok(completed)
 }
 
 #[tauri::command]
@@ -879,8 +916,9 @@ fn read_chat_history_sync(
     chat.chat_id = safe_chat_id;
     chat.name = normalize_chat_name(&chat.name);
     chat.created_at = normalize_iso(&chat.created_at).unwrap_or_else(now_iso);
-    chat.updated_at = normalize_iso(&chat.updated_at).unwrap_or_else(now_iso);
     chat.messages = normalize_stored_messages(chat.messages);
+    let stored_updated_at = normalize_iso(&chat.updated_at).unwrap_or_else(now_iso);
+    chat.updated_at = latest_chat_turn_iso(&chat.messages, &stored_updated_at);
     let artifact_dir = result_artifacts_dir(app)?;
     if externalize_large_card_data_in(&artifact_dir, &chat.chat_id, &mut chat.messages)? {
         write_chat_history_file(&path, &chat)?;
@@ -898,6 +936,18 @@ async fn save_chat_history(
         .map_err(|error| format!("Could not join chat save task: {error}"))?
 }
 
+#[tauri::command]
+async fn mark_chat_history_read(
+    app: tauri::AppHandle,
+    chat_id: String,
+) -> Result<ChatHistoryRow, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_chat_history_unread_in(&chat_history_dir(&app)?, &chat_id, false)
+    })
+    .await
+    .map_err(|error| format!("Could not join chat read-state update: {error}"))?
+}
+
 fn save_chat_history_sync(
     app: &tauri::AppHandle,
     payload: ChatHistoryPayload,
@@ -909,8 +959,9 @@ fn save_chat_history_sync(
     }
 
     let created_at = normalize_iso(&payload.created_at).unwrap_or_else(now_iso);
-    let updated_at = normalize_iso(&payload.updated_at).unwrap_or_else(now_iso);
     let mut messages = normalize_stored_messages(payload.messages);
+    let stored_updated_at = normalize_iso(&payload.updated_at).unwrap_or_else(now_iso);
+    let updated_at = latest_chat_turn_iso(&messages, &stored_updated_at);
     let artifact_dir = result_artifacts_dir(app)?;
     externalize_large_card_data_in(&artifact_dir, &safe_chat_id, &mut messages)?;
     let normalized = ChatHistoryPayload {
@@ -919,6 +970,7 @@ fn save_chat_history_sync(
         created_at,
         updated_at,
         messages,
+        unread: payload.unread,
         active_build_plugin: payload.active_build_plugin,
     };
     write_chat_history_file(&path, &normalized)?;
@@ -929,6 +981,7 @@ fn save_chat_history_sync(
         created_at: normalized.created_at,
         updated_at: normalized.updated_at,
         message_count: normalized.messages.len(),
+        unread: normalized.unread,
     };
     let history_dir = chat_history_dir(app)?;
     upsert_chat_history_index_in(&history_dir, row.clone())?;
@@ -1329,6 +1382,113 @@ fn open_extension_contribution_folder(app: tauri::AppHandle, folder: String) -> 
         .spawn()
         .map_err(|error| format!("Could not open contribution folder: {error}"))?;
     Ok(())
+}
+
+/// Mirrors `EXTENSION_NAME_MAX_LENGTH` in `src/extension-rename.ts`.
+const PLUGIN_DISPLAY_NAME_MAX_LENGTH: usize = 64;
+
+/// Collapses whitespace so two extensions cannot differ only by spacing, and so
+/// a control character cannot smuggle a line break into a sidebar row.
+fn normalize_plugin_display_name(raw: &str) -> String {
+    raw.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Rewrites one extension's display `name` in its manifest, leaving every other
+/// key and its authored order alone. Split out of the command so the rewrite and
+/// its collision rules are testable without a `tauri::AppHandle`.
+fn rename_generated_plugin_in(
+    root: &Path,
+    plugin_dir: &Path,
+    raw_name: &str,
+) -> Result<(), String> {
+    let name = normalize_plugin_display_name(raw_name);
+    if name.is_empty() {
+        return Err("Enter a name for this extension.".to_string());
+    }
+    if name.chars().count() > PLUGIN_DISPLAY_NAME_MAX_LENGTH {
+        return Err(format!(
+            "Keep the name to {PLUGIN_DISPLAY_NAME_MAX_LENGTH} characters or fewer."
+        ));
+    }
+
+    // resolve_generated_plugin_by_id accepts an id, a directory name, or a
+    // case-insensitive display name, so a name colliding with any of those on
+    // another extension makes every later lookup ambiguous rather than ugly.
+    let lowered = name.to_lowercase();
+    let entries =
+        fs::read_dir(root).map_err(|error| format!("Could not read generated plugins: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not read generated plugin entry: {error}"))?;
+        let other_dir = entry.path();
+        if !other_dir.is_dir() {
+            continue;
+        }
+        if other_dir.canonicalize().ok().as_deref() == Some(plugin_dir) {
+            continue;
+        }
+        let Some(other) =
+            read_generated_plugin_manifest(&other_dir, &other_dir.join("plugin.json"))
+        else {
+            continue;
+        };
+        let dir_name = other_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if other.id.trim().to_lowercase() == lowered
+            || other.name.trim().to_lowercase() == lowered
+            || dir_name == lowered
+        {
+            return Err("Another extension already uses that name.".to_string());
+        }
+    }
+
+    let manifest_path = plugin_dir.join("plugin.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("Could not read plugin manifest: {error}"))?;
+    let mut manifest: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse plugin manifest: {error}"))?;
+    let object = manifest
+        .as_object_mut()
+        .ok_or_else(|| "The extension manifest is not a JSON object.".to_string())?;
+    object.insert("name".to_string(), Value::String(name));
+    let serialized = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("Could not serialize plugin manifest: {error}"))?;
+    fs::write(&manifest_path, format!("{serialized}\n"))
+        .map_err(|error| format!("Could not write plugin manifest: {error}"))
+}
+
+/// Renames an extension's display name in its manifest. The directory slug is
+/// deliberately untouched: it is what the agent routes on, what chats persist
+/// as `activeBuildPlugin.dir`, and what plugin data and keychain accounts are
+/// keyed by, so moving it would strand all three.
+#[tauri::command]
+fn rename_generated_plugin(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    name: String,
+) -> Result<GeneratedPluginDetail, String> {
+    let plugin_dir = resolve_generated_plugin_by_id(&app, &plugin_id)?;
+    let root = generated_plugins_dir(&app)?;
+    rename_generated_plugin_in(&root, &plugin_dir, &name)?;
+
+    let mut detail = read_plugin_detail_files(&plugin_dir)?;
+    enrich_generated_plugin_tools_from_runtime(&mut detail.plugin, &plugin_dir);
+    annotate_plugin_credentials(&mut detail.plugin);
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -3709,14 +3869,17 @@ fn rebuild_chat_history_index_in(dir: &Path) -> Result<Vec<ChatHistoryRow>, Stri
             .ok()
             .and_then(|raw| serde_json::from_str::<ChatHistoryPayload>(&raw).ok());
         let row = if let Some(chat) = parsed {
+            let messages = normalize_stored_messages(chat.messages);
+            let stored_updated_at =
+                normalize_iso(&chat.updated_at).unwrap_or_else(|| fallback_time.clone());
             ChatHistoryRow {
                 chat_id,
                 name: normalize_chat_name(&chat.name),
                 created_at: normalize_iso(&chat.created_at)
                     .unwrap_or_else(|| fallback_time.clone()),
-                updated_at: normalize_iso(&chat.updated_at)
-                    .unwrap_or_else(|| fallback_time.clone()),
-                message_count: normalize_stored_messages(chat.messages).len(),
+                updated_at: latest_chat_turn_iso(&messages, &stored_updated_at),
+                message_count: messages.len(),
+                unread: chat.unread,
             }
         } else {
             ChatHistoryRow {
@@ -3725,6 +3888,7 @@ fn rebuild_chat_history_index_in(dir: &Path) -> Result<Vec<ChatHistoryRow>, Stri
                 created_at: fallback_time.clone(),
                 updated_at: fallback_time,
                 message_count: 0,
+                unread: false,
             }
         };
         chats.push(row);
@@ -3760,6 +3924,38 @@ fn upsert_chat_history_index_in(dir: &Path, row: ChatHistoryRow) -> Result<(), S
     }
     sort_chat_history_rows(&mut chats);
     write_chat_history_index_in(dir, &chats)
+}
+
+fn set_chat_history_unread_in(
+    dir: &Path,
+    chat_id: &str,
+    unread: bool,
+) -> Result<ChatHistoryRow, String> {
+    let safe_chat_id = normalize_chat_id(chat_id);
+    let path = dir.join(format!("{safe_chat_id}.json"));
+    if !path.is_file() {
+        return Err(format!("Chat not found: {safe_chat_id}"));
+    }
+    let raw = fs::read_to_string(&path).map_err(|error| format!("Could not read chat: {error}"))?;
+    let mut chat: ChatHistoryPayload =
+        serde_json::from_str(&raw).map_err(|error| format!("Could not parse chat: {error}"))?;
+    chat.chat_id = safe_chat_id;
+    chat.unread = unread;
+    let messages = normalize_stored_messages(chat.messages.clone());
+    let stored_updated_at = normalize_iso(&chat.updated_at).unwrap_or_else(now_iso);
+    chat.updated_at = latest_chat_turn_iso(&messages, &stored_updated_at);
+    write_chat_history_file(&path, &chat)?;
+
+    let row = ChatHistoryRow {
+        chat_id: chat.chat_id,
+        name: normalize_chat_name(&chat.name),
+        created_at: normalize_iso(&chat.created_at).unwrap_or_else(now_iso),
+        updated_at: chat.updated_at,
+        message_count: messages.len(),
+        unread,
+    };
+    upsert_chat_history_index_in(dir, row.clone())?;
+    Ok(row)
 }
 
 fn remove_chat_history_index_row_in(dir: &Path, chat_id: &str) -> Result<(), String> {
@@ -5091,6 +5287,15 @@ fn normalize_iso(value: &str) -> Option<String> {
     }
 }
 
+fn latest_chat_turn_iso(messages: &[StoredChatMessage], fallback: &str) -> String {
+    messages
+        .iter()
+        .filter_map(|message| chrono::DateTime::from_timestamp_millis(message.timestamp))
+        .max()
+        .map(|datetime| datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -6257,20 +6462,21 @@ mod tests {
         format_quota_window, generated_plugin_source_mtime_millis, install_catalog_extension_from,
         load_bookmark_cache_in, load_generated_plugin_runtime_tools_cached,
         load_or_rebuild_chat_history_index_in, merge_turn_usage, next_available_plugin_slug,
-        normalize_plugin_slug, normalize_stored_messages, now_millis, oauth_needs_refresh,
-        packaged_node_path_for, packaged_runtime_scripts_dir_for, parse_chatgpt_usage,
-        parse_moonshot_balance, parse_stored_credential, plugin_credential_account,
-        provider_preset, read_catalog_extension_detail_from, read_catalog_extensions,
-        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
-        remove_chat_history_index_row_in, save_plugin_cache_settings, select_runtime_script_path,
-        share_deep_link_payload, steer_command_type, upsert_bookmark_cache,
-        upsert_chat_history_index_in, write_bookmark_in, AuthMethod, BookmarkCache,
-        BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool, PluginBuilderRequest,
-        PluginCacheSettings, ProviderQuota, RuntimeToolsCache, StoredBookmark, StoredChatMessage,
-        StoredCredential, StreamEvent, UsageTotals, APP_URL_SCHEME, KEYCHAIN_CACHE,
-        OAUTH_REFRESH_MARGIN_MS,
+        normalize_plugin_display_name, normalize_plugin_slug, normalize_stored_messages,
+        now_millis, oauth_needs_refresh, packaged_node_path_for, packaged_runtime_scripts_dir_for,
+        parse_chatgpt_usage, parse_moonshot_balance, parse_stored_credential,
+        plugin_credential_account, provider_preset, read_catalog_extension_detail_from,
+        read_catalog_extensions, read_generated_plugin_manifest, read_keychain_account,
+        read_plugin_cache_settings, rebuild_chat_history_index_in,
+        remove_chat_history_index_row_in, rename_generated_plugin_in, save_plugin_cache_settings,
+        select_runtime_script_path, set_chat_history_unread_in, share_deep_link_payload,
+        steer_command_type, upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in,
+        AuthMethod, BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
+        PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
+        StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
+        APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -6597,6 +6803,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: updated_at.to_string(),
             message_count,
+            unread: false,
         };
 
         upsert_chat_history_index_in(&dir, row("older", "2026-01-02T00:00:00Z", 1)).unwrap();
@@ -6612,6 +6819,52 @@ mod tests {
         let rows = load_or_rebuild_chat_history_index_in(&dir).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].chat_id, "newer");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn unread_state_does_not_change_latest_turn_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "raynard-chat-unread-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for (chat_id, updated_at, timestamp) in [
+            ("older", "2099-01-02T00:00:00Z", 1_767_312_000_000_i64),
+            ("newer", "2099-01-03T00:00:00Z", 1_767_398_400_000_i64),
+        ] {
+            fs::write(
+                dir.join(format!("{chat_id}.json")),
+                json!({
+                    "chatId": chat_id,
+                    "name": chat_id,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": updated_at,
+                    "messages": [{ "role": "assistant", "text": "Result", "timestamp": timestamp }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        rebuild_chat_history_index_in(&dir).unwrap();
+        let unread = set_chat_history_unread_in(&dir, "older", true).unwrap();
+        assert!(unread.unread);
+        assert_eq!(unread.updated_at, "2026-01-02T00:00:00.000Z");
+
+        let rows = load_or_rebuild_chat_history_index_in(&dir).unwrap();
+        assert_eq!(rows[0].chat_id, "newer");
+        assert!(rows[1].unread);
+
+        let read = set_chat_history_unread_in(&dir, "older", false).unwrap();
+        assert!(!read.unread);
+        let stored: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("older.json")).expect("chat should remain stored"),
+        )
+        .unwrap();
+        assert_eq!(stored["unread"], false);
 
         fs::remove_dir_all(dir).ok();
     }
@@ -7034,6 +7287,91 @@ mod tests {
         assert_eq!(plugin.sample_prompts[0], "Who wrote the top story today?");
 
         fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+    }
+
+    #[test]
+    fn plugin_display_names_collapse_whitespace_and_control_characters() {
+        assert_eq!(
+            normalize_plugin_display_name("  Hacker\t\tNews \n"),
+            "Hacker News"
+        );
+        assert_eq!(normalize_plugin_display_name("D&D"), "D&D");
+        assert_eq!(normalize_plugin_display_name("   "), "");
+    }
+
+    fn write_rename_fixture(root: &Path, slug: &str, id: &str, name: &str) -> PathBuf {
+        let plugin_dir = root.join(slug);
+        fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(
+                "{{\n  \"id\": \"{id}\",\n  \"sdkVersion\": 1,\n  \"name\": \"{name}\",\n  \"description\": \"Fixture\",\n  \"version\": \"0.1.0\"\n}}\n"
+            ),
+        )
+        .expect("write manifest");
+        plugin_dir.canonicalize().expect("canonicalize plugin dir")
+    }
+
+    #[test]
+    fn renaming_an_extension_rewrites_only_the_name_and_keeps_the_authored_key_order() {
+        let root = std::env::temp_dir().join(format!("raynard-rename-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create root");
+        let plugin_dir = write_rename_fixture(&root, "dnd-5e-api", "raynard.generated.dnd", "D&D");
+
+        rename_generated_plugin_in(&root, &plugin_dir, "  Dungeons &   Dragons ")
+            .expect("rename plugin");
+
+        let raw = fs::read_to_string(plugin_dir.join("plugin.json")).expect("read manifest");
+        let manifest: Value = serde_json::from_str(&raw).expect("parse manifest");
+        let keys: Vec<_> = manifest
+            .as_object()
+            .expect("manifest object")
+            .keys()
+            .cloned()
+            .collect();
+        // preserve_order is what stops the rewrite alphabetizing an author's file.
+        assert_eq!(
+            keys,
+            vec!["id", "sdkVersion", "name", "description", "version"]
+        );
+        assert_eq!(
+            manifest.get("name").and_then(Value::as_str),
+            Some("Dungeons & Dragons")
+        );
+        assert_eq!(
+            manifest.get("description").and_then(Value::as_str),
+            Some("Fixture")
+        );
+        // The slug the agent routes on must survive a display-name change.
+        assert!(plugin_dir.is_dir());
+        assert_eq!(
+            manifest.get("id").and_then(Value::as_str),
+            Some("raynard.generated.dnd")
+        );
+
+        fs::remove_dir_all(&root).expect("remove root");
+    }
+
+    #[test]
+    fn renaming_an_extension_refuses_a_name_that_another_extension_already_resolves_by() {
+        let root = std::env::temp_dir().join(format!("raynard-rename-clash-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create root");
+        let plugin_dir = write_rename_fixture(&root, "dnd-5e-api", "raynard.generated.dnd", "D&D");
+        write_rename_fixture(&root, "news-reader", "hacker-news", "Hacker News");
+
+        for clash in ["hacker news", "HACKER-NEWS", "News-Reader"] {
+            assert_eq!(
+                rename_generated_plugin_in(&root, &plugin_dir, clash),
+                Err("Another extension already uses that name.".to_string()),
+                "expected {clash} to be refused"
+            );
+        }
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, "   ").is_err());
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, &"x".repeat(65)).is_err());
+        // Its own current name is not a clash with itself.
+        assert!(rename_generated_plugin_in(&root, &plugin_dir, "D&D").is_ok());
+
+        fs::remove_dir_all(&root).expect("remove root");
     }
 
     #[test]
@@ -7699,6 +8037,7 @@ pub fn run() {
         .manage(PendingDeepLinks::default())
         .manage(AppUpdateStore::default())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri_plugin_deep_link::DeepLinkExt;
@@ -7784,9 +8123,11 @@ pub fn run() {
             list_model_providers,
             list_due_scheduled_tasks,
             list_scheduled_tasks,
+            mark_chat_history_read,
             open_extension_contribution_folder,
             read_catalog_extension,
             read_generated_plugin,
+            rename_generated_plugin,
             read_chat_history,
             read_result_artifact,
             read_provider_quota,

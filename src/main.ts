@@ -10,6 +10,7 @@ import {
   PackageMinus,
   PanelLeftClose,
   Pause,
+  Pencil,
   Play,
   Plug,
   Plus,
@@ -28,6 +29,7 @@ import {
 } from './bookmarks';
 import { getErrorMessage } from './errors';
 import { filterChatsByName } from './chat-filter';
+import { latestChatTurnIso } from './chat-history';
 import {
   calendarFieldsFor,
   relativeRunLabel,
@@ -51,6 +53,7 @@ import {
   groupExtensions
 } from './extension-groups';
 import { shouldShowExtensionOnboarding } from './extension-launch';
+import { validateExtensionRename } from './extension-rename';
 import {
   extensionInstallActionLabel,
   shortExtensionDescription,
@@ -287,6 +290,7 @@ type ChatHistoryRow = {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  unread: boolean;
 };
 
 type ChatHistoryPayload = {
@@ -295,6 +299,7 @@ type ChatHistoryPayload = {
   createdAt: string;
   updatedAt: string;
   messages: StoredChatMessage[];
+  unread: boolean;
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
@@ -446,7 +451,10 @@ type SidebarView = 'chats' | 'plugins' | 'bookmarks' | 'scheduled';
 // messages route straight to the coding agent for this plugin.
 type ActiveBuildPlugin = { dir: string; name: string };
 
-type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'updatedAt'> & {
+type ChatMeta = Pick<
+  ChatHistoryPayload,
+  'chatId' | 'name' | 'createdAt' | 'updatedAt' | 'unread'
+> & {
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
@@ -490,6 +498,7 @@ const appIcons: Record<string, IconNode> = {
   plus: Plus,
   'panel-left-close': PanelLeftClose,
   pause: Pause,
+  pencil: Pencil,
   play: Play,
   plug: Plug,
   settings: Settings,
@@ -655,6 +664,24 @@ app.innerHTML = `
         </div>
       </section>
 
+      <section id="extensionRenameModal" class="extension-delete-modal-overlay is-hidden" aria-hidden="true">
+        <form id="extensionRenameForm" class="extension-delete-modal extension-rename-modal" role="dialog" aria-modal="true" aria-labelledby="extensionRenameTitle">
+          <header class="extension-delete-header">
+            <h2 id="extensionRenameTitle">Rename Extension</h2>
+            <p>Changes the name shown in the sidebar. The folder and tool names stay as they are.</p>
+          </header>
+          <label class="extension-rename-field">
+            <span>Name</span>
+            <input id="extensionRenameInput" maxlength="64" autocomplete="off" spellcheck="false" required>
+          </label>
+          <p id="extensionRenameStatus" class="extension-rename-status" aria-live="polite"></p>
+          <div class="extension-delete-actions">
+            <button id="extensionRenameCancel" class="extension-delete-secondary" type="button">Cancel</button>
+            <button id="extensionRenameSave" class="extension-rename-primary" type="submit">Save</button>
+          </div>
+        </form>
+      </section>
+
       <section id="pluginCacheModal" class="plugin-cache-modal-overlay is-hidden" aria-hidden="true">
         <div class="plugin-cache-modal" role="dialog" aria-modal="true" aria-labelledby="pluginCacheTitle">
           <header class="plugin-cache-header">
@@ -769,6 +796,12 @@ const extensionDeleteTitle = document.querySelector<HTMLElement>('#extensionDele
 const extensionDeleteText = document.querySelector<HTMLElement>('#extensionDeleteText');
 const extensionDeleteCancel = document.querySelector<HTMLButtonElement>('#extensionDeleteCancel');
 const extensionDeleteConfirm = document.querySelector<HTMLButtonElement>('#extensionDeleteConfirm');
+const extensionRenameModal = document.querySelector<HTMLElement>('#extensionRenameModal');
+const extensionRenameForm = document.querySelector<HTMLFormElement>('#extensionRenameForm');
+const extensionRenameInput = document.querySelector<HTMLInputElement>('#extensionRenameInput');
+const extensionRenameStatus = document.querySelector<HTMLElement>('#extensionRenameStatus');
+const extensionRenameCancel = document.querySelector<HTMLButtonElement>('#extensionRenameCancel');
+const extensionRenameSave = document.querySelector<HTMLButtonElement>('#extensionRenameSave');
 const pluginCacheModal = document.querySelector<HTMLElement>('#pluginCacheModal');
 const pluginCacheTitle = document.querySelector<HTMLElement>('#pluginCacheTitle');
 const pluginCacheHint = document.querySelector<HTMLElement>('#pluginCacheHint');
@@ -839,6 +872,7 @@ let pendingExtensionDelete:
       resolve: (confirmed: boolean) => void;
     }
   | null = null;
+let activeExtensionRename: GeneratedPlugin | null = null;
 let activePluginCache: { pluginId: string; label: string } | null = null;
 let activeExtensionContribution:
   | { detail: GeneratedPluginDetail; prepared?: PreparedExtensionContribution }
@@ -953,6 +987,15 @@ extensionDeleteModal?.addEventListener('click', (event) => {
     resolveExtensionDelete(false);
   }
 });
+extensionRenameCancel?.addEventListener('click', closeExtensionRenameModal);
+extensionRenameInput?.addEventListener('input', syncExtensionRenameState);
+extensionRenameForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveExtensionRename();
+});
+extensionRenameModal?.addEventListener('click', (event) => {
+  if (event.target === extensionRenameModal) closeExtensionRenameModal();
+});
 pluginCacheCancel?.addEventListener('click', closePluginCacheModal);
 pluginCacheSave?.addEventListener('click', () => void saveActivePluginCacheSettings());
 pluginCacheClear?.addEventListener('click', () => void clearActivePluginCache());
@@ -981,8 +1024,13 @@ document.addEventListener('keydown', (event) => {
   closeExtensionsModal();
   closePluginDetailMenu();
   if (activePluginCache) closePluginCacheModal();
+  if (activeExtensionRename) closeExtensionRenameModal();
   if (activeExtensionContribution) closeExtensionContributionModal();
   if (pendingExtensionDelete) resolveExtensionDelete(false);
+});
+window.addEventListener('focus', () => {
+  const active = chatHistoryRows.find((chat) => chat.chatId === activeSessionId);
+  if (active?.unread) void markChatRead(active.chatId);
 });
 attachExternalLinkHandler(document, async (url) => {
   try {
@@ -2488,7 +2536,8 @@ function createChatMeta(chatId: string, seedPrompt = ''): ChatMeta {
     chatId,
     name: createChatNameFromPrompt(seedPrompt),
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    unread: false
   };
 }
 
@@ -2830,6 +2879,72 @@ function resolveExtensionDelete(confirmed: boolean) {
   pending.resolve(confirmed);
 }
 
+function openExtensionRenameModal(plugin: GeneratedPlugin) {
+  if (!extensionRenameModal || !extensionRenameInput || !extensionRenameSave) return;
+  activeExtensionRename = plugin;
+  extensionRenameInput.value = plugin.name;
+  extensionRenameSave.disabled = true;
+  if (extensionRenameStatus) extensionRenameStatus.textContent = '';
+  extensionRenameModal.classList.remove('is-hidden');
+  extensionRenameModal.setAttribute('aria-hidden', 'false');
+  extensionRenameInput.focus();
+  extensionRenameInput.select();
+}
+
+function closeExtensionRenameModal() {
+  activeExtensionRename = null;
+  extensionRenameModal?.classList.add('is-hidden');
+  extensionRenameModal?.setAttribute('aria-hidden', 'true');
+}
+
+/** Validates as the user types so Save is only live for a name that can land. */
+function syncExtensionRenameState() {
+  if (!activeExtensionRename || !extensionRenameInput || !extensionRenameSave) return;
+  const result = validateExtensionRename(
+    extensionRenameInput.value,
+    activeExtensionRename,
+    generatedPlugins
+  );
+  extensionRenameSave.disabled = !result.ok || !result.changed;
+  if (extensionRenameStatus) {
+    extensionRenameStatus.textContent = result.ok ? '' : result.error;
+  }
+}
+
+async function saveExtensionRename() {
+  const plugin = activeExtensionRename;
+  if (!plugin || !extensionRenameInput || !extensionRenameSave) return;
+  const result = validateExtensionRename(extensionRenameInput.value, plugin, generatedPlugins);
+  if (!result.ok) {
+    if (extensionRenameStatus) extensionRenameStatus.textContent = result.error;
+    return;
+  }
+  if (!result.changed) {
+    closeExtensionRenameModal();
+    return;
+  }
+
+  extensionRenameSave.disabled = true;
+  if (extensionRenameStatus) extensionRenameStatus.textContent = 'Renaming…';
+  try {
+    const detail = await invoke<GeneratedPluginDetail>('rename_generated_plugin', {
+      pluginId: plugin.id,
+      name: result.name
+    });
+    closeExtensionRenameModal();
+    await refreshGeneratedPlugins();
+    if (selectedPluginId === detail.plugin.id) renderPluginDetail(detail);
+  } catch (error) {
+    extensionRenameSave.disabled = false;
+    if (extensionRenameStatus) {
+      extensionRenameStatus.textContent = getErrorMessage(
+        error,
+        `Could not rename ${plugin.name}.`
+      );
+    }
+  }
+}
+
 function closePluginDetailMenu() {
   const menu = pluginDetailView?.querySelector<HTMLElement>('.plugin-detail-menu');
   const toggle = pluginDetailView?.querySelector<HTMLButtonElement>('.plugin-detail-menu-toggle');
@@ -3108,7 +3223,11 @@ function renderPluginDetail(
           </button>
           <div class="plugin-detail-menu is-hidden" role="menu">
             ${removalAction === 'delete'
-              ? `<button type="button" role="menuitem" data-plugin-action="contribute">
+              ? `<button type="button" role="menuitem" data-plugin-action="rename">
+                  ${iconSvg('pencil')}
+                  <span>Rename</span>
+                </button>
+                <button type="button" role="menuitem" data-plugin-action="contribute">
                   ${iconSvg('git-pull-request')}
                   <span>Prepare PR</span>
                 </button>`
@@ -3134,6 +3253,10 @@ function renderPluginDetail(
   header.querySelector<HTMLButtonElement>('[data-plugin-action="cache"]')?.addEventListener('click', () => {
     closePluginDetailMenu();
     void openPluginCacheModal(plugin.id, plugin.name);
+  });
+  header.querySelector<HTMLButtonElement>('[data-plugin-action="rename"]')?.addEventListener('click', () => {
+    closePluginDetailMenu();
+    openExtensionRenameModal(plugin);
   });
   header.querySelector<HTMLButtonElement>('[data-plugin-action="contribute"]')?.addEventListener('click', () => {
     closePluginDetailMenu();
@@ -3740,6 +3863,7 @@ function renderTaskEditor(
   const syncDirty = () => {
     if (variant !== 'page' || !save) return;
     const dirty = baseline() !== saved;
+    form.dataset.dirty = String(dirty);
     save.disabled = !dirty;
     discard?.classList.toggle('is-hidden', !dirty);
     if (status) status.textContent = dirty ? 'Unsaved changes' : '';
@@ -3815,6 +3939,7 @@ function openScheduledTask(task: ScheduledTask) {
 
   const header = document.createElement('header');
   header.className = 'plugin-detail-header task-detail-header';
+  header.dataset.scheduledTaskId = task.id;
   header.innerHTML = `
     <div class="plugin-detail-title">
       <span class="plugin-detail-kicker">Scheduled task</span>
@@ -3972,6 +4097,26 @@ function queueScheduledTask(taskId: string, manual: boolean) {
   void drainScheduledTaskQueue();
 }
 
+function refreshOpenScheduledTask(taskId: string) {
+  if (activeScheduledTaskId !== taskId || !pluginDetailView) return;
+  const header = pluginDetailView.querySelector<HTMLElement>('.task-detail-header');
+  if (header?.dataset.scheduledTaskId !== taskId) return;
+  const task = scheduledTasks.find((entry) => entry.id === taskId);
+  if (!task) return;
+
+  const editor = pluginDetailView.querySelector<HTMLFormElement>('.task-editor--page');
+  if (editor?.dataset.dirty === 'true') {
+    const runNow = header.querySelector<HTMLButtonElement>('.task-run-now');
+    if (!runNow) return;
+    runNow.disabled = Boolean(task.activeExecutionId);
+    const label = runNow.querySelector('span');
+    if (label) label.textContent = task.activeExecutionId ? 'Running now' : 'Run now';
+    return;
+  }
+
+  openScheduledTask(task);
+}
+
 async function drainScheduledTaskQueue() {
   if (scheduledTaskRunnerActive) return;
   const next = scheduledTaskQueue.shift();
@@ -3989,12 +4134,14 @@ async function drainScheduledTaskQueue() {
       manual: next.manual
     });
     await refreshScheduledTasks();
+    refreshOpenScheduledTask(next.taskId);
     await runScheduledExecution(execution);
   } catch (error) {
     console.error('Could not run scheduled task:', getErrorMessage(error));
   } finally {
     scheduledTaskRunnerActive = false;
     await refreshScheduledTasks();
+    refreshOpenScheduledTask(next.taskId);
     void drainScheduledTaskQueue();
   }
 }
@@ -4013,6 +4160,7 @@ async function scheduledChatSnapshot(task: ScheduledTask): Promise<{
         name: chat.name,
         createdAt: chat.createdAt,
         updatedAt: chat.updatedAt,
+        unread: chat.unread,
         activeBuildPlugin: chat.activeBuildPlugin
       },
       stored: recoverInterruptedMessages(chat.messages).messages
@@ -4165,6 +4313,9 @@ async function runScheduledExecution(execution: ScheduledExecution) {
     error: completionError,
     destinationChatId
   });
+  if (destinationChatId === activeSessionId && document.hasFocus()) {
+    await markChatRead(destinationChatId, true);
+  }
 }
 
 async function loadChatBookmarks(chatId: string) {
@@ -4197,14 +4348,23 @@ function renderChatHistory() {
   const filteredChats = filterChatsByName(chatHistoryRows, chatSearchInput?.value ?? '');
   for (const chat of filteredChats) {
     const row = document.createElement('div');
-    row.className = `chat-history-row${chat.chatId === activeSessionId ? ' is-active' : ''}`;
+    row.className = `chat-history-row${chat.chatId === activeSessionId ? ' is-active' : ''}${
+      chat.unread ? ' is-unread' : ''
+    }`;
 
     const openButton = document.createElement('button');
     openButton.type = 'button';
     openButton.className = 'chat-history-open';
+    openButton.setAttribute(
+      'aria-label',
+      `${chat.name}${chat.unread ? ', unread scheduled task result' : ''}`
+    );
     const running = chatRuns.get(chat.chatId);
     openButton.innerHTML = `
-      <span class="chat-history-title">${escapeHtml(chat.name)}</span>
+      <span class="chat-history-title">
+        <span class="chat-history-title-text">${escapeHtml(chat.name)}</span>
+        ${chat.unread ? '<span class="chat-history-unread-dot" title="Unread scheduled task result"></span>' : ''}
+      </span>
       <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : running.kind === 'scheduled' ? 'Scheduled task' : 'Thinking'}` : ''}</span>
     `;
     openButton.addEventListener('click', () => void openSavedChat(chat.chatId));
@@ -4253,8 +4413,30 @@ async function persistActiveChatHistory() {
 // navigating to another chat mid-run cannot redirect the save to the wrong chat.
 async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
   if (!meta || !stored.length) return;
-  meta.updatedAt = new Date().toISOString();
+  meta.updatedAt = latestChatTurnIso(stored, meta.updatedAt);
   await chatSnapshotSaves.enqueue(meta.chatId, { ...meta, messages: stored });
+}
+
+async function markChatRead(chatId: string, force = false) {
+  const existing = chatHistoryRows.find((chat) => chat.chatId === chatId);
+  if (!force && !existing?.unread) return;
+
+  const wasUnread = existing?.unread ?? false;
+  if (existing) existing.unread = false;
+  if (activeChatMeta?.chatId === chatId) activeChatMeta.unread = false;
+  renderChatHistory();
+
+  try {
+    const updated = await invoke<ChatHistoryRow>('mark_chat_history_read', { chatId });
+    const index = chatHistoryRows.findIndex((chat) => chat.chatId === chatId);
+    if (index >= 0) chatHistoryRows[index] = updated;
+    renderChatHistory();
+  } catch (error) {
+    if (existing) existing.unread = wasUnread;
+    if (activeChatMeta?.chatId === chatId) activeChatMeta.unread = wasUnread;
+    renderChatHistory();
+    console.error('Could not mark chat as read:', getErrorMessage(error));
+  }
 }
 
 function persistChatSnapshotQuietly(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
@@ -4330,6 +4512,7 @@ async function openSavedChat(chatId: string) {
     isRunning: chatRuns.has(activeSessionId)
   });
   if (decision === 'show-active') {
+    void markChatRead(chatId);
     showConversation();
     renderChatHistory();
     chatInput?.focus();
@@ -4346,6 +4529,7 @@ async function openSavedChat(chatId: string) {
     activeBookmarks = await loadChatBookmarks(chatId).catch(() => new Map());
     if (viewRevision !== mainViewRevision) return;
     bindChatState(liveRun.meta, liveRun.messages);
+    void markChatRead(chatId);
     renderStoredTranscript();
     showConversation();
     renderChatHistory();
@@ -4361,13 +4545,16 @@ async function openSavedChat(chatId: string) {
   if (viewRevision !== mainViewRevision) return;
   activeBookmarks = chatBookmarks;
   const recovered = recoverInterruptedMessages(chat.messages);
+  const wasUnread = chat.unread;
   bindChatState({
     chatId: chat.chatId,
     name: chat.name,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
+    unread: false,
     activeBuildPlugin: chat.activeBuildPlugin
   }, recovered.messages);
+  if (wasUnread) void markChatRead(chatId, true);
   if (recovered.recovered) {
     await persistChatSnapshot(activeChatMeta, storedMessages);
     await refreshChatHistory();

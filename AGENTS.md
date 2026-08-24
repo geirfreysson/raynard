@@ -22,6 +22,7 @@ generated API plugins.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
+- `src/extension-rename.ts`: display-name normalization and collision rules for renaming a locally authored extension.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
 - `src/result-card/template-fields.ts`: the single walker over the `CardBlock` union; drives both example data and share-link projection.
 - `src/share/`: share-link payload, codec, degradation ladder, share sheet, and deep-link import.
@@ -46,7 +47,10 @@ generated API plugins.
 - Startup briefly shows the centered Northfox mark, then opens with the sidebar
   folded. A persistent 54 px rail provides Chats, Generated Plugins, and New
   Chat actions; opening Chats or Plugins expands the secondary sidebar. The
-  Chats sidebar has a local, case-insensitive title filter.
+  Chats sidebar has a local, case-insensitive title filter. Chats are ordered by
+  their most recent transcript turn, not by when their file was opened or
+  rewritten. A scheduled execution marks its destination chat unread and shows
+  a dot beside that chat until the chat is opened.
 - Utility icons come from Lucide. The Northfox fox is a local brand SVG, not a
   Lucide icon.
 - A finished assistant answer carries a hover action row (`.message-actions`)
@@ -75,7 +79,16 @@ generated API plugins.
   the assistant output typography while retaining the existing card color.
 - The plugin sidebar lists generated plugins and opens a detail screen with
   metadata, runtime tools, card previews, README content, and selected source
-  files. Splash prompts are intentionally not displayed on this screen.
+  files. Splash prompts are intentionally not displayed on this screen. Its `⋯`
+  menu offers Rename for a locally authored extension. Rename changes only the
+  manifest's display `name`: the directory slug is what the agent routes on,
+  what chats persist as `activeBuildPlugin.dir`, and what plugin data and
+  keychain accounts are keyed by, so it stays put. An installed catalog
+  extension is not renameable, because reinstalling it would silently restore
+  the bundled name. `resolve_generated_plugin_by_id` accepts an id, a directory
+  name, or a case-insensitive display name, so both `src/extension-rename.ts`
+  and `rename_generated_plugin` reject a name that collides with any of those
+  on another extension.
 - `/extensions` opens a catalog with the user's installed extensions and the
   pre-approved extensions bundled with the app. It separates locally coded
   extensions (`Your extensions`), installed catalog entries (`Installed`), and
@@ -87,7 +100,10 @@ generated API plugins.
   quarterly, or yearly Explore task in the selected time zone. A task targets
   either a dedicated task chat or an existing chat and can be edited, paused,
   resumed, run immediately, or deleted from its detail screen. Run now does not
-  move the recurring schedule.
+  move the recurring schedule. Every execution, including Run now, sends an
+  OS-native completion or error notification on macOS, Windows, and Linux.
+  Notification text names the task but keeps answer and error details out of
+  the lock-screen-visible body.
 - A task detail screen leads with the task's status pill, plain-English
   schedule sentence, and time zone, followed by Next run / Last run /
   Destination tiles. Run now is the only header button; pause, resume, open
