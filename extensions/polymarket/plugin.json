@@ -1,0 +1,62 @@
+{
+  "author": "Raynard",
+  "category": "Finance",
+  "contributes": {
+    "tools": [
+      {
+        "name": "polymarket_trending_events",
+        "description": "List current active Polymarket events ranked by descending 24-hour trading volume using the non-deprecated Gamma /events/keyset endpoint. This is the plugin definition of “trending”: trading activity, not editorial popularity. Each event includes a preview of its highest-24h-volume market and that market’s Yes price when available (otherwise its highest-priced outcome). Prices are market-implied probabilities, can change, and are not factual forecasts. Defaults to 10 events, returns an opaque next_cursor for stable paging, and needs no credential. Use polymarket_get_event with an event slug to inspect every market and resolution wording.",
+        "hasCard": true
+      },
+      {
+        "name": "polymarket_search",
+        "description": "Search active Polymarket events and their nested markets with Gamma /public-search. Returns event and market slugs for polymarket_get_event and polymarket_get_market plus a current probability preview. Closed markets, tag-only hits, and profiles are excluded. Defaults to 5 results per type on page 1; page is one-based and the response reports whether more results exist. Search ranking comes from Polymarket rather than 24-hour volume.",
+        "hasCard": true
+      },
+      {
+        "name": "polymarket_get_event",
+        "description": "Retrieve one Polymarket event by exact event slug using Gamma /events/slug/:slug. Returns the event description, dates, tags, volume/liquidity, and every nested market with aligned outcomePrices interpreted as market-implied probabilities. Text summarizes at most 20 markets, while the result card retains the complete fetched market list. Use an event slug from polymarket_search or polymarket_trending_events; use polymarket_get_market with a market slug for bid/ask, last trade, CLOB token IDs, and full market resolution wording.",
+        "hasCard": true
+      },
+      {
+        "name": "polymarket_get_market",
+        "description": "Retrieve one Polymarket market by exact market slug using Gamma /markets/slug/:slug. Returns every outcome aligned with its current outcomePrice and CLOB token ID, plus bid, ask, spread, last trade, one-day price change, volume, liquidity, status, deadline, description, and raw payload. A contract price of 0.185 is shown as an 18.5% market-implied probability; it is not a factual probability or guarantee. Use a market slug returned inside polymarket_get_event or polymarket_search. For an uncached public order-book midpoint, pass the desired outcome’s token_id to polymarket_get_live_midpoint.",
+        "hasCard": true
+      },
+      {
+        "name": "polymarket_get_live_midpoint",
+        "description": "Fetch the current public CLOB order-book midpoint for one Polymarket outcome token using GET /midpoint. The midpoint is the average of the current best bid and ask and is returned as a 0-1 contract price plus percentage. Use polymarket_get_market first to obtain the CLOB token ID for the exact outcome. The endpoint needs no credential; invalid tokens or markets without an order book return an API error. This plugin disables host response caching so this call reaches the public API each time.",
+        "hasCard": true
+      }
+    ]
+  },
+  "description": "Explore public Polymarket prediction events and markets, including volume-ranked trending topics, full-text search, resolution details, current market-implied outcome probabilities, and live CLOB midpoints.",
+  "homepage": "https://docs.polymarket.com/api-reference/predictions/overview",
+  "icon": "database",
+  "id": "raynard.catalog.polymarket",
+  "name": "Polymarket",
+  "samplePrompts": [
+    "What prediction topics are trending on Polymarket right now?",
+    "What probability does Polymarket currently give the Clarity Act becoming law in 2026?",
+    "Search Polymarket for active Bitcoin predictions and summarize the leading probabilities."
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://docs.polymarket.com/api-reference/predictions/overview",
+    "https://docs.polymarket.com/api-reference/events/list-events-keyset-pagination",
+    "https://docs.polymarket.com/api-reference/search/search-markets-events-and-profiles",
+    "https://docs.polymarket.com/api-reference/events/get-event-by-slug",
+    "https://docs.polymarket.com/api-reference/markets/get-market-by-slug",
+    "https://docs.polymarket.com/api-reference/data/get-midpoint-price"
+  ],
+  "status": "bundled",
+  "tags": [
+    "polymarket",
+    "prediction-markets",
+    "market-probabilities",
+    "trending-events",
+    "finance",
+    "api"
+  ],
+  "version": "0.1.0"
+}

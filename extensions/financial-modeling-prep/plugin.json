@@ -1,0 +1,74 @@
+{
+  "author": "Raynard",
+  "category": "Finance",
+  "contributes": {
+    "tools": [
+      {
+        "name": "fmp_market_activity",
+        "description": "Get FMP’s current most-active U.S. stocks with symbol, company, exchange, price, and session percentage move. This zero-argument tool is the extension health check and a quick market-activity starting point; FMP currently returns 50 rows and the card/text show the first 15 in API order. Use company-specific tools next for fundamentals—high trading activity is not an investment recommendation.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_company_overview",
+        "description": "Get a compact current company and valuation snapshot from FMP for one exact ticker. It combines profile, quote, TTM key metrics, TTM ratios, and financial scores to answer price, market cap, trailing P/E, EV/EBITDA, P/S, P/FCF, P/B, margins, ROE, ROIC, leverage, liquidity, Altman Z, and Piotroski questions. TTM ratios update with filings while price-based fields may move with the market. For forward P/E and analyst expectations use fmp_analyst_outlook; for trends use fmp_company_financials.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_company_financials",
+        "description": "Get aligned multi-period FMP income statement, balance sheet, and cash-flow fundamentals for one ticker. Returns revenue, operating income, net income, diluted EPS, operating cash flow, capex/free cash flow, cash, debt, and current ratio. period defaults to annual; quarter returns sequential reported quarters. limit defaults to 5 and is capped at 10 to keep model context bounded. Use this for growth, margins, cash generation, debt, liquidity, and trend questions; use filings only for disclosure-level detail.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_analyst_outlook",
+        "description": "Get forward-looking FMP analyst context for one ticker: annual or quarterly revenue/EPS estimate ranges and analyst counts, implied forward P/E using the current quote, FMP ratings snapshot, consensus price-target range/upside, and recent price-target trend. Estimates are fetched with FMP limit=10, historical dates are removed when upcoming rows exist, upcoming dates are sorted nearest-first, and 1–8 are shown. Set include_recent_grades=true only for upgrade/downgrade questions; FMP’s grades endpoint returns a large history and this tool trims it after download.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_company_segments",
+        "description": "Get FMP revenue mix by product/business and geography for one ticker. period defaults to annual; quarter requests quarterly segmentation where the company reports it. period_limit defaults to 2 and caps at 5; within each period, segments are sorted largest first and include revenue plus share of that endpoint’s reported total. Use this for concentration, mix shift, regional exposure, and business-segment questions.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_stock_peers",
+        "description": "Get FMP’s peer-company list for one exact ticker, including peer symbols, names, current prices, and market caps when supplied. FMP chooses peers using sector, market-cap, and exchange similarity; this is a discovery list, not a valuation comparison. limit defaults to 8 and caps at 15. Follow with fmp_company_overview or fmp_company_financials on selected symbols for evidence-based comparison.",
+        "hasCard": true
+      }
+    ]
+  },
+  "description": "Research public companies with Financial Modeling Prep market activity, valuation ratios, financial statements, analyst estimates and price targets, revenue segments, and peer discovery.",
+  "homepage": "https://site.financialmodelingprep.com/developer/docs",
+  "icon": "database",
+  "id": "raynard.catalog.financial-modeling-prep",
+  "name": "Financial Modeling Prep",
+  "samplePrompts": [
+    "How expensive is Apple on P/E, EV/EBITDA, and free-cash-flow yield?",
+    "Show Nvidia's analyst revenue and EPS estimates with implied forward P/E.",
+    "How has Microsoft's revenue, free cash flow, cash, and debt changed over five years?"
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://site.financialmodelingprep.com/developer/docs",
+    "https://site.financialmodelingprep.com/developer/docs/formula",
+    "https://site.financialmodelingprep.com/developer/docs/cycle-times-stable"
+  ],
+  "status": "bundled",
+  "tags": [
+    "financial-modeling-prep",
+    "equities",
+    "fundamental-analysis",
+    "analyst-estimates",
+    "valuation",
+    "api"
+  ],
+  "version": "0.1.0",
+  "auth": {
+    "credentials": [
+      {
+        "key": "FMP_API_KEY",
+        "label": "Financial Modeling Prep API key",
+        "description": "API key from the FMP developer dashboard; endpoint availability and history depend on the selected FMP plan.",
+        "signupUrl": "https://site.financialmodelingprep.com/developer/docs/dashboard"
+      }
+    ]
+  }
+}
