@@ -15,6 +15,7 @@ import {
   Plus,
   Settings,
   Share2,
+  Search,
   Timer,
   Trash2,
   type IconNode
@@ -26,6 +27,7 @@ import {
   promptForAssistant
 } from './bookmarks';
 import { getErrorMessage } from './errors';
+import { filterChatsByName } from './chat-filter';
 import {
   calendarFieldsFor,
   relativeRunLabel,
@@ -492,6 +494,7 @@ const appIcons: Record<string, IconNode> = {
   plug: Plug,
   settings: Settings,
   'share-2': Share2,
+  search: Search,
   'trash-2': Trash2
 };
 
@@ -547,11 +550,15 @@ app.innerHTML = `
         ${iconSvg('plus')}
         <span>New chat</span>
       </button>
+      <label id="chatSearchField" class="chat-search-field">
+        ${iconSvg('search')}
+        <input id="chatSearchInput" type="search" aria-label="Search chats" placeholder="Search chats" autocomplete="off" maxlength="100">
+      </label>
       <nav id="chatHistoryList" class="chat-history-list" aria-label="Chat history"></nav>
       <nav id="pluginList" class="chat-history-list is-hidden" aria-label="Generated plugins"></nav>
       <nav id="bookmarkList" class="chat-history-list bookmark-list is-hidden" aria-label="Bookmarks"></nav>
       <nav id="scheduledTaskList" class="chat-history-list scheduled-task-list is-hidden" aria-label="Scheduled tasks"></nav>
-      <p id="chatHistoryStatus" class="chat-history-status"></p>
+      <p id="chatHistoryStatus" class="chat-history-status" aria-live="polite"></p>
     </aside>
 
     <section class="chat-shell">
@@ -714,6 +721,8 @@ const newChatRail = document.querySelector<HTMLButtonElement>('#newChatRail');
 const chatSidebar = document.querySelector<HTMLElement>('#chatSidebar');
 const sidebarClose = document.querySelector<HTMLButtonElement>('#sidebarClose');
 const newChatButton = document.querySelector<HTMLButtonElement>('#newChatButton');
+const chatSearchField = document.querySelector<HTMLElement>('#chatSearchField');
+const chatSearchInput = document.querySelector<HTMLInputElement>('#chatSearchInput');
 const chatHistoryList = document.querySelector<HTMLElement>('#chatHistoryList');
 const pluginList = document.querySelector<HTMLElement>('#pluginList');
 const bookmarkList = document.querySelector<HTMLElement>('#bookmarkList');
@@ -1023,6 +1032,9 @@ scheduledToggle?.addEventListener('click', () => {
 });
 
 sidebarClose?.addEventListener('click', () => setSidebarOpen(false));
+chatSearchInput?.addEventListener('input', () => {
+  renderChatHistory();
+});
 newChatButton?.addEventListener('click', () => {
   setSidebarView('chats');
   void startNewConversation({ showPreChat: true });
@@ -2543,6 +2555,7 @@ function setSidebarView(view: SidebarView) {
             : 'Chats';
   }
   newChatButton?.classList.toggle('is-hidden', view !== 'chats');
+  chatSearchField?.classList.toggle('is-hidden', view !== 'chats');
   if (chatHistoryStatus) {
     chatHistoryStatus.textContent = sidebarStatusText(view);
   }
@@ -2555,7 +2568,11 @@ function sidebarStatusText(view: SidebarView) {
     return bookmarkTotal ? '' : 'No bookmarks yet.';
   }
   if (view === 'scheduled') return scheduledTasks.length ? '' : 'No scheduled tasks yet.';
-  return chatHistoryRows.length ? '' : 'No saved chats yet.';
+  if (!chatHistoryRows.length) return 'No saved chats yet.';
+  const query = chatSearchInput?.value.trim() ?? '';
+  return query && !filterChatsByName(chatHistoryRows, query).length
+    ? `No chats match “${query}”.`
+    : '';
 }
 
 async function refreshGeneratedPlugins() {
@@ -3393,7 +3410,7 @@ async function refreshChatHistory() {
     chatHistoryRows = result.chats;
     renderChatHistory();
     if (chatHistoryStatus && sidebarView === 'chats') {
-      chatHistoryStatus.textContent = chatHistoryRows.length ? '' : 'No saved chats yet.';
+      chatHistoryStatus.textContent = sidebarStatusText('chats');
     }
   } catch (error) {
     if (chatHistoryStatus && sidebarView === 'chats') {
@@ -4177,7 +4194,8 @@ function renderChatHistory() {
   if (!chatHistoryList) return;
   chatHistoryList.innerHTML = '';
 
-  for (const chat of chatHistoryRows) {
+  const filteredChats = filterChatsByName(chatHistoryRows, chatSearchInput?.value ?? '');
+  for (const chat of filteredChats) {
     const row = document.createElement('div');
     row.className = `chat-history-row${chat.chatId === activeSessionId ? ' is-active' : ''}`;
 
@@ -4206,6 +4224,10 @@ function renderChatHistory() {
     row.appendChild(deleteButton);
 
     chatHistoryList.appendChild(row);
+  }
+
+  if (chatHistoryStatus && sidebarView === 'chats') {
+    chatHistoryStatus.textContent = sidebarStatusText('chats');
   }
 }
 
