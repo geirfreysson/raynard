@@ -315,8 +315,30 @@ textarea {
 
 .chat-history-title {
   color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 500;
+}
+
+.chat-history-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-history-row.is-unread .chat-history-title {
+  font-weight: 650;
+}
+
+.chat-history-unread-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: var(--accent);
 }
 
 .chat-history-meta,

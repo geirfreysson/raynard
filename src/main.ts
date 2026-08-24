@@ -28,6 +28,7 @@ import {
 } from './bookmarks';
 import { getErrorMessage } from './errors';
 import { filterChatsByName } from './chat-filter';
+import { latestChatTurnIso } from './chat-history';
 import {
   calendarFieldsFor,
   relativeRunLabel,
@@ -287,6 +288,7 @@ type ChatHistoryRow = {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  unread: boolean;
 };
 
 type ChatHistoryPayload = {
@@ -295,6 +297,7 @@ type ChatHistoryPayload = {
   createdAt: string;
   updatedAt: string;
   messages: StoredChatMessage[];
+  unread: boolean;
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
@@ -446,7 +449,10 @@ type SidebarView = 'chats' | 'plugins' | 'bookmarks' | 'scheduled';
 // messages route straight to the coding agent for this plugin.
 type ActiveBuildPlugin = { dir: string; name: string };
 
-type ChatMeta = Pick<ChatHistoryPayload, 'chatId' | 'name' | 'createdAt' | 'updatedAt'> & {
+type ChatMeta = Pick<
+  ChatHistoryPayload,
+  'chatId' | 'name' | 'createdAt' | 'updatedAt' | 'unread'
+> & {
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
@@ -983,6 +989,10 @@ document.addEventListener('keydown', (event) => {
   if (activePluginCache) closePluginCacheModal();
   if (activeExtensionContribution) closeExtensionContributionModal();
   if (pendingExtensionDelete) resolveExtensionDelete(false);
+});
+window.addEventListener('focus', () => {
+  const active = chatHistoryRows.find((chat) => chat.chatId === activeSessionId);
+  if (active?.unread) void markChatRead(active.chatId);
 });
 attachExternalLinkHandler(document, async (url) => {
   try {
@@ -2488,7 +2498,8 @@ function createChatMeta(chatId: string, seedPrompt = ''): ChatMeta {
     chatId,
     name: createChatNameFromPrompt(seedPrompt),
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    unread: false
   };
 }
 
@@ -3740,6 +3751,7 @@ function renderTaskEditor(
   const syncDirty = () => {
     if (variant !== 'page' || !save) return;
     const dirty = baseline() !== saved;
+    form.dataset.dirty = String(dirty);
     save.disabled = !dirty;
     discard?.classList.toggle('is-hidden', !dirty);
     if (status) status.textContent = dirty ? 'Unsaved changes' : '';
@@ -3815,6 +3827,7 @@ function openScheduledTask(task: ScheduledTask) {
 
   const header = document.createElement('header');
   header.className = 'plugin-detail-header task-detail-header';
+  header.dataset.scheduledTaskId = task.id;
   header.innerHTML = `
     <div class="plugin-detail-title">
       <span class="plugin-detail-kicker">Scheduled task</span>
@@ -3972,6 +3985,26 @@ function queueScheduledTask(taskId: string, manual: boolean) {
   void drainScheduledTaskQueue();
 }
 
+function refreshOpenScheduledTask(taskId: string) {
+  if (activeScheduledTaskId !== taskId || !pluginDetailView) return;
+  const header = pluginDetailView.querySelector<HTMLElement>('.task-detail-header');
+  if (header?.dataset.scheduledTaskId !== taskId) return;
+  const task = scheduledTasks.find((entry) => entry.id === taskId);
+  if (!task) return;
+
+  const editor = pluginDetailView.querySelector<HTMLFormElement>('.task-editor--page');
+  if (editor?.dataset.dirty === 'true') {
+    const runNow = header.querySelector<HTMLButtonElement>('.task-run-now');
+    if (!runNow) return;
+    runNow.disabled = Boolean(task.activeExecutionId);
+    const label = runNow.querySelector('span');
+    if (label) label.textContent = task.activeExecutionId ? 'Running now' : 'Run now';
+    return;
+  }
+
+  openScheduledTask(task);
+}
+
 async function drainScheduledTaskQueue() {
   if (scheduledTaskRunnerActive) return;
   const next = scheduledTaskQueue.shift();
@@ -3989,12 +4022,14 @@ async function drainScheduledTaskQueue() {
       manual: next.manual
     });
     await refreshScheduledTasks();
+    refreshOpenScheduledTask(next.taskId);
     await runScheduledExecution(execution);
   } catch (error) {
     console.error('Could not run scheduled task:', getErrorMessage(error));
   } finally {
     scheduledTaskRunnerActive = false;
     await refreshScheduledTasks();
+    refreshOpenScheduledTask(next.taskId);
     void drainScheduledTaskQueue();
   }
 }
@@ -4013,6 +4048,7 @@ async function scheduledChatSnapshot(task: ScheduledTask): Promise<{
         name: chat.name,
         createdAt: chat.createdAt,
         updatedAt: chat.updatedAt,
+        unread: chat.unread,
         activeBuildPlugin: chat.activeBuildPlugin
       },
       stored: recoverInterruptedMessages(chat.messages).messages
@@ -4165,6 +4201,9 @@ async function runScheduledExecution(execution: ScheduledExecution) {
     error: completionError,
     destinationChatId
   });
+  if (destinationChatId === activeSessionId && document.hasFocus()) {
+    await markChatRead(destinationChatId, true);
+  }
 }
 
 async function loadChatBookmarks(chatId: string) {
@@ -4197,14 +4236,23 @@ function renderChatHistory() {
   const filteredChats = filterChatsByName(chatHistoryRows, chatSearchInput?.value ?? '');
   for (const chat of filteredChats) {
     const row = document.createElement('div');
-    row.className = `chat-history-row${chat.chatId === activeSessionId ? ' is-active' : ''}`;
+    row.className = `chat-history-row${chat.chatId === activeSessionId ? ' is-active' : ''}${
+      chat.unread ? ' is-unread' : ''
+    }`;
 
     const openButton = document.createElement('button');
     openButton.type = 'button';
     openButton.className = 'chat-history-open';
+    openButton.setAttribute(
+      'aria-label',
+      `${chat.name}${chat.unread ? ', unread scheduled task result' : ''}`
+    );
     const running = chatRuns.get(chat.chatId);
     openButton.innerHTML = `
-      <span class="chat-history-title">${escapeHtml(chat.name)}</span>
+      <span class="chat-history-title">
+        <span class="chat-history-title-text">${escapeHtml(chat.name)}</span>
+        ${chat.unread ? '<span class="chat-history-unread-dot" title="Unread scheduled task result"></span>' : ''}
+      </span>
       <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : running.kind === 'scheduled' ? 'Scheduled task' : 'Thinking'}` : ''}</span>
     `;
     openButton.addEventListener('click', () => void openSavedChat(chat.chatId));
@@ -4253,8 +4301,30 @@ async function persistActiveChatHistory() {
 // navigating to another chat mid-run cannot redirect the save to the wrong chat.
 async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
   if (!meta || !stored.length) return;
-  meta.updatedAt = new Date().toISOString();
+  meta.updatedAt = latestChatTurnIso(stored, meta.updatedAt);
   await chatSnapshotSaves.enqueue(meta.chatId, { ...meta, messages: stored });
+}
+
+async function markChatRead(chatId: string, force = false) {
+  const existing = chatHistoryRows.find((chat) => chat.chatId === chatId);
+  if (!force && !existing?.unread) return;
+
+  const wasUnread = existing?.unread ?? false;
+  if (existing) existing.unread = false;
+  if (activeChatMeta?.chatId === chatId) activeChatMeta.unread = false;
+  renderChatHistory();
+
+  try {
+    const updated = await invoke<ChatHistoryRow>('mark_chat_history_read', { chatId });
+    const index = chatHistoryRows.findIndex((chat) => chat.chatId === chatId);
+    if (index >= 0) chatHistoryRows[index] = updated;
+    renderChatHistory();
+  } catch (error) {
+    if (existing) existing.unread = wasUnread;
+    if (activeChatMeta?.chatId === chatId) activeChatMeta.unread = wasUnread;
+    renderChatHistory();
+    console.error('Could not mark chat as read:', getErrorMessage(error));
+  }
 }
 
 function persistChatSnapshotQuietly(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
@@ -4330,6 +4400,7 @@ async function openSavedChat(chatId: string) {
     isRunning: chatRuns.has(activeSessionId)
   });
   if (decision === 'show-active') {
+    void markChatRead(chatId);
     showConversation();
     renderChatHistory();
     chatInput?.focus();
@@ -4346,6 +4417,7 @@ async function openSavedChat(chatId: string) {
     activeBookmarks = await loadChatBookmarks(chatId).catch(() => new Map());
     if (viewRevision !== mainViewRevision) return;
     bindChatState(liveRun.meta, liveRun.messages);
+    void markChatRead(chatId);
     renderStoredTranscript();
     showConversation();
     renderChatHistory();
@@ -4361,13 +4433,16 @@ async function openSavedChat(chatId: string) {
   if (viewRevision !== mainViewRevision) return;
   activeBookmarks = chatBookmarks;
   const recovered = recoverInterruptedMessages(chat.messages);
+  const wasUnread = chat.unread;
   bindChatState({
     chatId: chat.chatId,
     name: chat.name,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
+    unread: false,
     activeBuildPlugin: chat.activeBuildPlugin
   }, recovered.messages);
+  if (wasUnread) void markChatRead(chatId, true);
   if (recovered.recovered) {
     await persistChatSnapshot(activeChatMeta, storedMessages);
     await refreshChatHistory();
