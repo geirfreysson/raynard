@@ -74,11 +74,39 @@ The Apple Silicon workflow reuses the same secret material as
 - `APPLE_API_KEY_ID`: App Store Connect key ID
 - `APPLE_API_ISSUER`: App Store Connect issuer ID
 
+The updater needs two more, which are not Apple's and are not
+interchangeable with them:
+
+- `TAURI_SIGNING_PRIVATE_KEY`: contents of the minisign private key
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password, empty if the key has none
+
 Repository secrets can be copied to this repository, or the existing values
 can be exposed as organization secrets. A pushed `v*` tag builds a signed,
-notarized DMG, verifies it, uploads it as a workflow artifact, and attaches it
-to a draft GitHub release. A manual workflow run builds and uploads the
-artifact without creating a release.
+notarized DMG for macOS plus the Linux and Windows packages, verifies each one,
+merges the per-platform updater fragments into `latest.json`, and publishes a
+non-draft GitHub release marked `--latest` with versioned assets, stable
+aliases, and SHA-256 checksums. A manual workflow run builds and uploads the
+artifacts without creating a release.
+
+## Updater signing key
+
+Update packages are signed with a minisign keypair that is entirely separate
+from Apple code signing. Apple's signature says the app is not tampered with;
+this one says the update came from us.
+
+```bash
+npx tauri signer generate -w ~/.tauri/raynard.key
+```
+
+The public half lives in `src-tauri/tauri.conf.json` under
+`plugins.updater.pubkey` and is not a secret. The private half is
+`~/.tauri/raynard.key`.
+
+**Keep the private key somewhere durable before the first release that uses
+it.** An installed copy only accepts an update signed by the public key it was
+built with, so losing the private key permanently strands every copy already in
+the wild: they can never be updated again, only reinstalled by hand. It is not
+recoverable from the public key or from a published release.
 
 ## Release verification
 

@@ -4302,3 +4302,153 @@ button.models-advanced-link:focus-visible {
   line-height: 1.45;
   color: var(--text-secondary);
 }
+
+/* Settings ------------------------------------------------------------- */
+
+/* Pinned to the foot of the rail, apart from the navigation above it. */
+.sidebar-rail-settings {
+  margin-top: auto;
+  position: relative;
+}
+
+/* The app has no toast surface, so a background check that found something
+   announces itself here and nowhere else. */
+.sidebar-rail-settings.has-update::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--background-muted);
+}
+
+.settings-view {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+}
+
+.settings-header {
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 14px;
+}
+
+.settings-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.settings-body {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 16px 18px;
+  background: var(--background-muted);
+}
+
+.settings-section-title {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-row-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.settings-row-value {
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 13px;
+}
+
+.settings-status-line {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-status-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+}
+
+/* Release notes arrive as the manifest wrote them, newlines included. */
+.settings-release-notes {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-top: 2px;
+}
+
+.settings-update-action {
+  border: 1px solid rgba(160, 55, 43, 0.26);
+  border-radius: 8px;
+  padding: 7px 14px;
+  background: var(--accent-solid);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.settings-update-action:hover:not(:disabled),
+.settings-update-action:focus-visible:not(:disabled) {
+  background: var(--accent-solid-hover);
+  outline: none;
+}
+
+.settings-update-action:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.settings-update-action:disabled {
+  border-color: var(--border-soft);
+  background: var(--surface-strong);
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.settings-secondary-link {
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.settings-secondary-link:hover,
+.settings-secondary-link:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}

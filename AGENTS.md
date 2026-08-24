@@ -120,6 +120,11 @@ generated API plugins.
   is not editable in the UI. The key-based `api.openai.com` account is not a
   fourth row — it sits behind a secondary link, and is promoted to a row only
   while it is the active provider. API keys are stored through the OS keychain.
+- A gear pinned to the foot of the sidebar rail (or `/settings`) opens Settings
+  in the shared detail section, beside plugin and scheduled-task screens. It
+  holds the installed version and App updates. When a background check finds a
+  release, the gear carries a dot — the app has no toast surface, so that dot is
+  the only ambient signal.
 
 ## Agent Architecture
 
@@ -310,6 +315,75 @@ Rust deflate dependency.
 Deep links cannot be registered at runtime on macOS, so `npm run tauri dev`
 never receives one. Load `http://127.0.0.1:1420/#share=<encoded>` instead — the
 dev backdoor in `src/share/deep-link.ts` runs the identical import path.
+
+## App Updates
+
+Raynard updates itself from its own GitHub Releases. There is no update server:
+`tauri-plugin-updater` reads
+`https://github.com/geirfreysson/raynard/releases/latest/download/latest.json`,
+which the release workflow builds and attaches to each tagged release.
+
+The updater is driven **entirely from Rust**, in `src-tauri/src/app_updates.rs`.
+The JavaScript updater API would require `src-tauri/capabilities/default.json`,
+which this app deliberately does not have; invoking our own commands needs no
+capability. Progress reaches the renderer over a `Channel`, exactly as share
+deep links do.
+
+1. `AppUpdateStore` holds one `AppUpdateState` — status, versions, notes,
+   percent, message — plus the pending `Update` and, once downloaded, its
+   verified bytes. Every status change goes through `AppUpdateStore::update`,
+   which stores and pushes in one step, so a background check and a user-driven
+   download cannot disagree about what the page shows.
+2. Five commands: `get_app_update_state`, `subscribe_app_updates`,
+   `check_for_app_update`, `download_app_update`, `install_app_update`.
+   Download and install are separate calls, not `download_and_install`, because
+   the user approves each one.
+3. A thread started in `.setup()` checks five seconds after launch and every six
+   hours thereafter — the same cadence as the sibling Electron app. It never
+   downloads on its own; it only ever moves the status to `available`.
+4. `src/settings-view.ts` is a pure renderer over `AppUpdateState` with its
+   Tauri calls injected as thunks, following `status-modal.ts`. It lives inside
+   `#pluginDetailView`, so another screen taking that section over detaches it;
+   `applyAppUpdateState` notices via `isConnected` and stops painting rather
+   than tracking a teardown call.
+5. Two builds cannot update themselves and say so instead of failing oddly:
+   `tauri dev` (unsigned, unpackaged) and a `.deb` install. Tauri picks the
+   installer from the update file's extension, so handing a Debian install the
+   AppImage from the manifest would install the wrong thing. Both report
+   `manualDownload` with a `share.config.json` download key; Rust chooses the
+   key because only it can tell a `.deb` install from an AppImage one, and the
+   frontend resolves it to a URL so the addresses stay in one file.
+
+### Producing `latest.json`
+
+`createUpdaterArtifacts: true` makes each platform emit a `.sig` beside its
+bundle. The macOS updater payload is a **new** artifact, `Raynard.app.tar.gz`,
+which Tauri only writes when the `app` bundle is a build target — hence
+`--bundles app,dmg`. On Linux and Windows the AppImage and the NSIS installer
+are themselves the payload, so only a signature is added.
+
+Because the three platforms build on separate runners, each job writes an
+`updater-<target>.json` fragment naming its signature and the **tagged** asset
+URL, and `publish-release` merges them with
+`scripts/build-updater-manifest.mjs`. The merge is a gate, not a formatter: a
+missing platform, an empty signature, an asset from another release, or a
+`/releases/latest/download/` alias — which would outlive the signature recorded
+beside it — all fail the release. Signatures are inlined in the manifest, so the
+`.sig` files and fragments are deleted rather than shipped.
+
+Fragments are staged **after** each job's checksum loop; otherwise the fragment
+gets a `.sha256` that survives its own deletion.
+
+Signing needs `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as repository secrets, with the public half
+in `tauri.conf.json` under `plugins.updater.pubkey`. **Losing the private key
+permanently strands every installed copy** — no later release can be accepted.
+
+Two things to know about rollout:
+
+- **Auto-update begins with the release after the one that ships it.** A copy
+  built without the updater cannot receive one, so those users reinstall once.
+- The repository must be public, or the manifest and assets 404 for everyone.
 
 ## Generated Plugin Contract
 

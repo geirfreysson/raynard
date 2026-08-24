@@ -31,10 +31,17 @@
           "raynard"
         ]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERENDlFNTFBOTlGMTQ5OTYKUldTV1NmR1pHdVZKM2V2ckpTRWdydjdnUXVnWE1pdmZ4R3JYSkl4a1Z1OUtxVzN1dktVdEVSdTgK",
+      "endpoints": [
+        "https://github.com/geirfreysson/raynard/releases/latest/download/latest.json"
+      ]
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "externalBin": [
       "binaries/node"

@@ -1,6 +1,11 @@
+mod app_updates;
 mod extension_contribution;
 mod scheduled_tasks;
 
+use app_updates::{
+    check_for_app_update, download_app_update, get_app_update_state, install_app_update,
+    subscribe_app_updates, AppUpdateStore,
+};
 use extension_contribution::{
     contribution_test_files, prepare_extension_contribution_in, ContributionMetadata,
     ContributionTool, PreparedExtensionContribution,
@@ -7692,7 +7697,9 @@ pub fn run() {
         .manage(BookmarkStoreState::default())
         .manage(ScheduledTaskWakeState::default())
         .manage(PendingDeepLinks::default())
+        .manage(AppUpdateStore::default())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri_plugin_deep_link::DeepLinkExt;
 
@@ -7720,6 +7727,8 @@ pub fn run() {
                 }
             });
 
+            app_updates::spawn_background_checks(app.handle());
+
             // A cold launch has already consumed its URL by the time the plugin
             // is up, so it is read back explicitly; everything after arrives
             // through `on_open_url`. Both land in the same buffer.
@@ -7746,22 +7755,26 @@ pub fn run() {
             append_agent_turn_log,
             assign_scheduled_task_chat,
             cancel_model_chat_stream,
+            check_for_app_update,
             claim_scheduled_task,
             complete_scheduled_task,
             create_scheduled_task,
             steer_main_agent_stream,
             clear_generated_plugin_cache,
             delete_bookmark,
+            download_app_update,
             delete_chat_history,
             delete_generated_plugin,
             delete_scheduled_task,
             save_plugin_credential,
             delete_plugin_credential,
             execute_generated_plugin_tool,
+            get_app_update_state,
             get_generated_plugin_cache_settings,
             get_plugin_scaffold_status,
             load_llm_env_status,
             open_external_url,
+            install_app_update,
             install_catalog_extension,
             list_catalog_extensions,
             list_bookmarks,
@@ -7794,6 +7807,7 @@ pub fn run() {
             set_scheduled_task_enabled,
             sign_out_provider,
             submit_provider_oauth_code,
+            subscribe_app_updates,
             subscribe_deep_links,
             subscribe_scheduled_tasks,
             update_scheduled_task
