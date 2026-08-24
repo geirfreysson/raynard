@@ -1333,9 +1333,47 @@ textarea:focus {
   line-height: 1.35;
 }
 
+/* Section lead-in: the sentence under a heading, above its rows. */
+.plugin-detail-hint {
+  margin: -2px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* A stored key is a resolved state, not an outstanding one. */
+.extension-requires-key-pill.is-configured {
+  background: rgba(52, 143, 80, 0.14);
+  color: #2f6b41;
+}
+
+/* Version, category, author, tool count: one quiet line under the description. */
+.plugin-detail-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.plugin-detail-facts > span + span::before {
+  content: '·';
+  margin-right: 10px;
+}
+
 .plugin-detail-actions {
   position: relative;
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The key is what blocks use, so its action sits beside the name, not below. */
+.plugin-detail-key {
+  width: auto;
+  padding: 0 14px;
 }
 
 .plugin-detail-install-actions {
@@ -1429,6 +1467,27 @@ textarea:focus {
   color: var(--accent);
 }
 
+.plugin-detail-facts-block {
+  min-width: 0;
+}
+
+.plugin-detail-facts-block > summary {
+  width: fit-content;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.plugin-detail-facts-block > summary:focus-visible {
+  outline: none;
+  color: var(--accent);
+}
+
+.plugin-detail-facts-block[open] > summary {
+  margin-bottom: 10px;
+}
+
 .plugin-detail-meta {
   min-width: 0;
   display: grid;
@@ -1474,16 +1533,110 @@ textarea:focus {
   gap: 6px;
 }
 
+/* One tool per row, closed: the name and a single line of what it does. */
 .plugin-tool-row {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(180px, 0.32fr) minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  padding: 9px 10px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: #fbfbfb;
+}
+
+.plugin-tool-row > summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr) max-content;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* The only sign a closed row has more to show. */
+.plugin-tool-row > summary::after {
+  content: '›';
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+
+.plugin-tool-row[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.plugin-tool-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.plugin-tool-row > summary::marker {
+  content: '';
+}
+
+.plugin-tool-row > summary:hover,
+.plugin-tool-row > summary:focus-visible {
+  background: rgba(60, 60, 67, 0.05);
+  outline: none;
+}
+
+.plugin-tool-lead {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-tool-body {
+  display: grid;
+  gap: 8px;
+  padding: 2px 10px 10px 10px;
+}
+
+.plugin-tool-body p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.plugin-tool-params-heading {
+  color: var(--text-primary) !important;
+  font-weight: 650;
+}
+
+.plugin-tool-params {
+  display: grid;
+  gap: 6px;
+}
+
+.plugin-tool-param {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.plugin-tool-param-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.plugin-tool-param-type {
+  color: var(--text-muted);
+  font-family: var(--font-family-mono);
+  font-size: 11px;
+}
+
+.plugin-tool-param-required {
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: rgba(160, 55, 43, 0.1);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .plugin-tool-row code {
@@ -1493,9 +1646,68 @@ textarea:focus {
   color: var(--accent);
 }
 
-.plugin-tool-row span,
+.plugin-tool-row > summary > span,
 .plugin-detail-empty {
   color: var(--text-muted);
+}
+
+/* The manifest as facts, not as a JSON dump. */
+.plugin-manifest-facts {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 14px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.plugin-manifest-facts dt {
+  color: var(--text-muted);
+  font-weight: 650;
+}
+
+.plugin-manifest-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.plugin-manifest-facts a {
+  color: var(--accent);
+}
+
+.plugin-manifest-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.plugin-manifest-tag {
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(60, 60, 67, 0.07);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.plugin-manifest-sources {
+  display: grid;
+  gap: 3px;
+}
+
+.plugin-manifest-section .plugin-detail-facts-block > summary {
+  font-size: 12px;
+}
+
+.plugin-manifest-section .plugin-detail-facts-block pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #fbfbfb;
+  font-size: 11px;
 }
 
 .plugin-tool-row small {
@@ -1513,6 +1725,72 @@ textarea:focus {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: #fbfbfb;
+}
+
+/* A folded section keeps its heading's weight, and gains a chevron. */
+.plugin-code-section > summary,
+.plugin-card-preview > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: var(--text-primary);
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.plugin-code-section > summary {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.plugin-card-preview > summary {
+  font-size: 13px;
+}
+
+.plugin-code-section > summary::-webkit-details-marker,
+.plugin-card-preview > summary::-webkit-details-marker {
+  display: none;
+}
+
+.plugin-code-section > summary::marker,
+.plugin-card-preview > summary::marker {
+  content: '';
+}
+
+.plugin-code-section > summary::after,
+.plugin-card-preview > summary::after {
+  content: '›';
+  color: var(--text-muted);
+  font-weight: 400;
+  transition: transform 120ms ease;
+}
+
+.plugin-code-section[open] > summary::after,
+.plugin-card-preview[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.plugin-card-preview-list {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-card-preview {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #fbfbfb;
+}
+
+.plugin-card-preview-tool {
+  font-family: var(--font-family-mono);
+  color: var(--accent);
+}
+
+.plugin-card-preview-body:not(:empty) {
+  margin-top: 10px;
 }
 
 .plugin-code-section pre {
