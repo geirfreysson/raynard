@@ -78,7 +78,14 @@ The updater needs two more, which are not Apple's and are not
 interchangeable with them:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: contents of the minisign private key
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password, empty if the key has none
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password that key was generated with
+
+The key deliberately has a password. GitHub will not accept an empty secret
+value, and a build whose `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is undefined does
+not fall back to signing without one — the CLI tries to prompt, finds no
+terminal, and fails the release with `incorrect updater private key password:
+Device not configured`. A real password keeps both secrets ordinary, and
+encrypts the key at rest on disk and inside the secret.
 
 Repository secrets can be copied to this repository, or the existing values
 can be exposed as organization secrets. A pushed `v*` tag builds a signed,
@@ -95,18 +102,24 @@ from Apple code signing. Apple's signature says the app is not tampered with;
 this one says the update came from us.
 
 ```bash
-npx tauri signer generate -w ~/.tauri/raynard.key
+npx tauri signer generate -w ~/.tauri/raynard.key -p "<password>"
 ```
 
 The public half lives in `src-tauri/tauri.conf.json` under
 `plugins.updater.pubkey` and is not a secret. The private half is
 `~/.tauri/raynard.key`.
 
-**Keep the private key somewhere durable before the first release that uses
-it.** An installed copy only accepts an update signed by the public key it was
-built with, so losing the private key permanently strands every copy already in
-the wild: they can never be updated again, only reinstalled by hand. It is not
-recoverable from the public key or from a published release.
+**Keep the private key and its password somewhere durable before the first
+release that uses them.** An installed copy only accepts an update signed by the
+public key it was built with. Losing either half means no later release can be
+signed for the copies already in the wild: they keep working, but can never
+update again — recovering means shipping a build with a new public key that
+every user installs by hand. Neither half is recoverable from the public key,
+from a published release, or from the GitHub secret, which is write-only.
+
+Rotating the key is free only while nothing has been published under it. Once a
+release ships, the public key in `tauri.conf.json` is a commitment to everyone
+who installs it.
 
 ## Release verification
 
