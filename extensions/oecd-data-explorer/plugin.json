@@ -1,0 +1,60 @@
+{
+  "author": "Raynard",
+  "category": "Economics",
+  "contributes": {
+    "tools": [
+      {
+        "name": "oecd_search_dataflows",
+        "description": "Search OECD SDMX dataflows/endpoints by text in id, agency, name, or description. Fetches the public /dataflow registry with detail=allstubs and filters client-side because the SDMX endpoint has no general full-text search parameter; omitted limit defaults to 20 and max useful limit is 100. Returned ids are complete SDMX dataflow ids such as DSD_NAMAIN10@DF_TABLE4 and must be used whole, including the part before @. Pass agencyID and the returned id to oecd_inspect_dataflow_structure, and use agencyID,id as the flowRef for oecd_fetch_observations.",
+        "hasCard": true
+      },
+      {
+        "name": "oecd_parse_data_explorer_url",
+        "description": "Parse an OECD Data Explorer visualisation URL into reusable SDMX inputs. Extracts df[ag] as agencyID and df[id] as the complete dataflowID (DSD_NAMAIN10@DF_TABLE4 stays whole; structureID is the DSD_NAMAIN10 part before @ for datastructure lookups), dq as the SDMX dimension key with + preserved as OECD OR-within-dimension syntax, and lom=LASTNPERIODS with lo as lastNObservations. The returned flowRef and key can be passed straight to oecd_fetch_observations, which validates and expands the key against the real structure.",
+        "hasCard": true
+      },
+      {
+        "name": "oecd_inspect_dataflow_structure",
+        "description": "Inspect an OECD SDMX datastructure and return its dimensions in key order with the agency, id, and version of each dimension codelist. Uses /datastructure/{agencyID}/{structureID}/{version}; version defaults to all. A dataflow id such as DSD_NAMAIN10@DF_TABLE4 is accepted and reduced to its DSD_NAMAIN10 structure id. The dimension order returned here is the order of the dot-separated observation key.",
+        "hasCard": true
+      },
+      {
+        "name": "oecd_get_codelist_values",
+        "description": "Fetch allowed values for one OECD SDMX codelist and optionally search them locally by id/name/description. Uses /codelist/{agencyID}/{codelistID}/{version}; version defaults to all, limit defaults to 100 and is capped at 500. Use the codelistAgencyID, codelistID, and codelistVersion reported by oecd_inspect_dataflow_structure, since a dimension codelist is often owned by a different agency (SDMX or OECD) than the datastructure.",
+        "hasCard": true
+      },
+      {
+        "name": "oecd_fetch_observations",
+        "description": "Fetch OECD SDMX observations for a dataflow. flowRef is agencyID,dataflowID using the complete dataflow id, for example OECD.SDD.NAD,DSD_NAMAIN10@DF_TABLE4. Give either a dot-separated key in structure order or a dimensions object mapping dimension ids to codes, which is safer because the key is then assembled from the live structure. A short key is expanded by matching each segment to the dimension whose codelist contains those codes, and an unresolvable key fails with the dataflow's real dimension order. startPeriod, endPeriod, updatedAfter, firstNObservations, and lastNObservations are sent with these exact SDMX names. Results decode REF_AREA and TIME_PERIOD into country/time/value rows sorted for over-time country comparisons such as PPP for Iceland and Sweden since 2015.",
+        "hasCard": true
+      }
+    ]
+  },
+  "description": "Explore OECD Data Explorer / SDMX endpoints, structures, codelists, parsed Data Explorer URLs, and observations including purchasing power parities.",
+  "homepage": "https://www.oecd.org/en/data/insights/data-explainers/2024/09/api.html",
+  "icon": "database",
+  "id": "raynard.catalog.oecd-data-explorer",
+  "name": "OECD",
+  "samplePrompts": [
+    "Which OECD datasets cover consumer prices and inflation?",
+    "Compare purchasing power parities for Iceland and Sweden since 2015.",
+    "Pull the numbers behind a chart I'm looking at on the OECD Data Explorer."
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://www.oecd.org/en/data/insights/data-explainers/2024/09/api.html",
+    "https://data-explorer.oecd.org/",
+    "https://gitlab.algobank.oecd.org/public-documentation/dotstat-migration/-/raw/main/OECD_Data_API_documentation.pdf",
+    "https://sdmx.oecd.org/public/rest/"
+  ],
+  "status": "bundled",
+  "tags": [
+    "oecd",
+    "sdmx",
+    "macroeconomics",
+    "official-statistics",
+    "ppp",
+    "api"
+  ],
+  "version": "0.1.0"
+}
