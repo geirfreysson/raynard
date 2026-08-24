@@ -103,36 +103,61 @@
     "placeholderText": "Screenshot",
     "items": [
       {
-        "title": "Create your own extension with one prompt",
-        "prompt": "Please add World Bank data for me to chat with, it's at data360.worldbank.org/en/api",
-        "body": "",
+        "title": "Ask about the thing that changed this morning",
+        "prompt": "Is Nvidia down three days in a row? And what usually happens next?",
+        "body": "Raynard checks today’s actual closes and works it out. A chatbot that half-remembers the web gives you a confident number and no way to check it.",
         "bullets": [
-          "Builds and tests an API connector with just a prompt",
-          "Raynard can use this data source in future chats",
-          "Share your connector with the community or keep it private on your own machine"
+          "Reads the live prices as they stand right now, not a summary of a page about them",
+          "Shows the closes it checked, so you can see the working",
+          "Ask a follow-up and it fetches again instead of guessing"
         ],
-        "mediaLabel": "Placeholder for Stripe refund analysis screenshot"
+        "mediaLabel": "Placeholder for a live share-price answer screenshot"
       },
       {
-        "title": "Get data-backed analysis with references",
-        "prompt": "How does Britain's productivity compare with the EU and why?",
-        "body": "Raynard can check multiple sources and cite the results directly, so you can verify its conclusions.",
+        "title": "Ask about data no chatbot can reach",
+        "prompt": "Does a glass of wine actually wreck my sleep? Check the last six months.",
+        "body": "Your sleep, your training, your customers, your company’s own orders system. It sits behind a login, so no search engine has ever seen it.",
         "bullets": [
-          "Returns the matching records with source links",
-          "Keeps the supporting source data with the result"
+          "Works the same on your business — “which customers cancelled last month, and what were they paying?”",
+          "Or on the internal API nobody ever built a dashboard for: paste the docs, approve the connection, ask the question",
+          "API keys live in your operating system’s keychain, and your chats stay on your own machine — there’s no Raynard server"
         ],
-        "mediaLabel": "Placeholder for research result",
+        "mediaLabel": "Placeholder for a private-account analysis screenshot",
         "reverse": true
       },
       {
-        "title": "Surface inventory below target",
-        "prompt": "Show me warehouse inventory turns below target this month.",
-        "body": "An inventory extension can compare current records with your target thresholds.",
+        "title": "For when being wrong is expensive",
+        "prompt": "Which of these can I put in the board deck? Show me where each number came from.",
+        "body": "Every figure keeps the record it came from, so you can check it now, check it again next month, or hand someone else the whole thing.",
         "bullets": [
-          "Returns the affected SKUs with supporting references",
-          "Reruns against current data when thresholds change"
+          "Each number links back to the exact record behind it",
+          "The supporting data is saved alongside the answer, so it still checks out later",
+          "Send an answer as a link — no account needed to read it"
         ],
-        "mediaLabel": "Placeholder for warehouse inventory analysis screenshot"
+        "mediaLabel": "Placeholder for a cited answer with source links screenshot"
+      },
+      {
+        "title": "The question that asks itself",
+        "prompt": "Every Monday at 8, tell me whether last week’s sales were up or down on the same week last month — and which products moved.",
+        "body": "Set it once and the answer is waiting when you open the app. Daily, weekly, monthly, quarterly or yearly, in your own time zone.",
+        "bullets": [
+          "The comparison is worked out against live data every time, not carried over from last week’s answer",
+          "Lands in a chat of its own, or one you already have",
+          "Pause it, run it early, or change the question whenever you like"
+        ],
+        "mediaLabel": "Placeholder for a scheduled task and its result screenshot",
+        "reverse": true
+      },
+      {
+        "title": "And if it’s not on the list, just say so",
+        "prompt": "Add World Bank data for me to chat with — it’s at data360.worldbank.org/en/api",
+        "body": "Point Raynard at an API’s documentation and it writes the connection, tests it against the real thing, and keeps it for next time.",
+        "bullets": [
+          "Builds and tests the connector from a prompt, after you approve it",
+          "Available in every chat from then on",
+          "Keep it on your own machine or share it"
+        ],
+        "mediaLabel": "Placeholder for the extension build flow screenshot"
       }
     ]
   },
