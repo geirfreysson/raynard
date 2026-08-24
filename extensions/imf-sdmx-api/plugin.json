@@ -1,0 +1,57 @@
+{
+  "author": "Raynard",
+  "category": "Economics",
+  "contributes": {
+    "tools": [
+      {
+        "name": "imf_list_dataflows",
+        "description": "Search the IMF SDMX registry for dataflows (datasets) such as Balance of Payments (BOP), International Financial Statistics (IFS), or Government Finance Statistics. Returns each dataflow ID, its owning agency (IMF.STA, IMF.RES, IMF.FAD, ISORA, …), and version. Always start here: the agency and exact ID are required by every other IMF tool.",
+        "hasCard": true
+      },
+      {
+        "name": "imf_get_dataflow",
+        "description": "Describe one IMF dataflow: its data structure definition, the ordered dimensions that identify a series (for example COUNTRY, INDICATOR, UNIT, FREQUENCY), and the codelist that supplies valid values for each dimension. Call this before imf_get_data so the dimension names used as filters are correct, then call imf_get_codelist for the codes.",
+        "hasCard": true
+      },
+      {
+        "name": "imf_get_codelist",
+        "description": "List the valid codes for one IMF codelist, such as CL_BOP_COUNTRY (ISO-3 country codes like USA, DEU), CL_BOP_INDICATOR, or CL_FREQ (A, Q, M). Take the codelist ID and its agency from imf_get_dataflow. Use the query argument to search a large codelist instead of listing all of it.",
+        "hasCard": true
+      },
+      {
+        "name": "imf_get_data",
+        "description": "Fetch IMF observation values (time series) for a dataflow. Filters are given as dimension/value pairs taken from imf_get_dataflow and imf_get_codelist, for example dimension COUNTRY with values \"USA,DEU\" and dimension FREQUENCY with value \"A\". Always supply enough filters to select a specific indicator: an unfiltered request covers hundreds of thousands of series. start_period and end_period accept a year, YYYY-MM, or YYYY-Qn.",
+        "hasCard": true
+      },
+      {
+        "name": "imf_get_availability",
+        "description": "Report the data coverage of an IMF dataflow before querying it: how many series it holds, the earliest and latest period observed, and which dimensions constrain it. Use this to confirm a dataflow actually covers the years asked about. It reports coverage, not the list of valid codes — use imf_get_codelist for codes.",
+        "hasCard": true
+      }
+    ]
+  },
+  "description": "Query IMF statistical data through the IMF SDMX 3.0 API (iData). Browse the dataflow registry, inspect a dataflow's data structure and dimension codelists, check coverage, and fetch observation time series for macroeconomic indicators such as balance of payments, financial statistics, and government finance across countries and periods.",
+  "homepage": "https://portal.api.imf.org/api-details#api=idata-sdmx-api-3-0",
+  "icon": "database",
+  "id": "raynard.catalog.imf-sdmx-api",
+  "name": "IMF",
+  "samplePrompts": [
+    "What balance of payments data does the IMF publish?",
+    "Compare the US and German current account balances over the last five years.",
+    "What years and countries does the IMF's Government Finance Statistics cover?"
+  ],
+  "sdkVersion": 1,
+  "sourceUrls": [
+    "https://portal.api.imf.org/api-details#api=idata-sdmx-api-3-0"
+  ],
+  "status": "bundled",
+  "tags": [
+    "imf",
+    "sdmx",
+    "macroeconomics",
+    "official-statistics",
+    "balance-of-payments",
+    "api"
+  ],
+  "version": "0.2.0"
+}
