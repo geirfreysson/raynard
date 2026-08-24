@@ -45,7 +45,8 @@ generated API plugins.
 
 - Startup briefly shows the centered Northfox mark, then opens with the sidebar
   folded. A persistent 54 px rail provides Chats, Generated Plugins, and New
-  Chat actions; opening Chats or Plugins expands the secondary sidebar.
+  Chat actions; opening Chats or Plugins expands the secondary sidebar. The
+  Chats sidebar has a local, case-insensitive title filter.
 - Utility icons come from Lucide. The Northfox fox is a local brand SVG, not a
   Lucide icon.
 - A finished assistant answer carries a hover action row (`.message-actions`)

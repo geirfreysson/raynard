@@ -133,7 +133,7 @@ textarea {
   height: 100%;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   border-right: 0;
   background: #f8f8f8;
   color: var(--text-primary);
@@ -213,6 +213,45 @@ textarea {
 .new-chat-button:focus-visible {
   background: #ececec;
   outline: none;
+}
+
+.chat-search-field {
+  position: relative;
+  min-width: 0;
+  margin: 0 10px 8px;
+  color: #858585;
+}
+
+.chat-search-field svg {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.chat-search-field input {
+  width: 100%;
+  height: 34px;
+  padding: 6px 9px 6px 31px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--background-base);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.chat-search-field input::placeholder {
+  color: #858585;
+}
+
+.chat-search-field input:focus {
+  border-color: #a8a8a8;
+  outline: 1px solid #a8a8a8;
+  outline-offset: -1px;
 }
 
 .chat-history-list {
