@@ -1,62 +1,49 @@
-# Raynard v0.4.0
+# Raynard v0.5.0
 
-Released: 2026-08-23
+Raynard can now update itself, and the project is open source under the MIT
+License.
 
-Raynard can now do work on a schedule, and generated plugins have to prove
-themselves against the real API before a build is reported as done.
+## Updating from 0.4.0 is manual, once
+
+This is the first release that contains an updater, so 0.4.0 cannot receive it —
+a copy built without the updater has no way to check for one. **Download 0.5.0
+by hand this time.** From 0.5.0 onwards, Raynard offers new versions inside the
+app and you will not have to do this again.
+
+## In-app updates
+
+Raynard checks its own GitHub releases five seconds after launch and every six
+hours after that. It never downloads anything on its own: when a release is
+available a dot appears on the new Settings gear, and downloading and installing
+are each a separate press.
+
+Update packages are signed, and each copy verifies that signature against a key
+compiled into it before replacing itself — so an update has to come from us, not
+merely from a server claiming to be us.
+
+Debian installs and development builds cannot replace themselves in place. They
+say so and link the right download instead of failing in a confusing way.
+
+## Settings
+
+A gear at the foot of the sidebar rail, or `/settings`, opens a new Settings
+page showing the installed version and everything about updating it.
 
 ## Scheduled tasks
 
-- Ask for recurring work — "check the top stories on Hacker News every morning
-  and tell me the top one" — and Raynard saves it as a task instead of
-  answering once. It runs daily, weekly, monthly, quarterly, or yearly at a
-  local time in your own time zone.
-- Nothing is created without you. The request first renders as an editable
-  confirmation showing the name, the prompt that will run, the destination, and
-  the recurrence; Dismiss creates nothing.
-- Results land either in a dedicated chat, created on the first run and reused
-  after, or appended to an existing chat you pick. Messages from a task are
-  labelled with its name.
-- The timer icon on the sidebar rail lists your tasks. A detail screen edits,
-  pauses, resumes, deletes, or runs one immediately — running now does not move
-  the recurring schedule.
-- A scheduled run is an ordinary Explore turn with your selected model and
-  installed extensions. It cannot enter Build on its own and cannot create
-  another task: a missing extension or a needed credential is recorded as a
-  note asking you to open the chat and handle it yourself.
-- The scheduler runs only while Raynard is open. A task that came due while the
-  app was closed runs once after the next launch; missed occurrences are not
-  replayed one by one.
+The scheduled task screen has been redesigned, with clearer schedule summaries,
+run status, and pause, resume, run-now, and delete actions on the detail view.
 
-## Generated plugins are checked against the live API
+## Open source
 
-A generated plugin could pass every mocked test with all of its live endpoints
-broken — mocks that match on a path fragment survive a total rewrite of the API
-host. Building one now ends with a real call:
+Raynard is now MIT licensed. The README has been rewritten to describe what the
+app actually does — including connecting to private and internal APIs, where
+credentials live in your OS keychain and are scoped per extension — and
+`CONTRIBUTING.md` now sets out the contribution terms. Documentation is
+published to GitHub Pages.
 
-- A fresh build executes the plugin's first zero-argument tool against the real
-  API and requires text, at least one source reference, and a non-empty list.
-  A failure gets one repair pass.
-- Edit turns run the same live call. Previously an edit bypassed validation, so
-  "test and fix the API" could be answered with a confident green. A still
-  failing check is now reported instead of success.
-- A test suite that never pins the API host as a literal absolute URL is
-  rejected. Three of the five bundled extensions had this and now pin theirs.
-- Plugin SDK 1.3.0: a 204, an empty body, or a non-JSON body now raises a
-  message naming the URL that failed, rather than a bare parse error.
+## Downloads
 
-## Charts
-
-- Clicking a legend entry now switches that series off and removes it from the
-  plot, the tooltip, and the axis scale, rather than dimming it. The entry
-  stays in the legend, struck through, so the series can be brought back.
-- Axis number formatting follows the visible series, so switching off a large
-  series no longer rounds a smaller one away to zero. Hiding the last visible
-  series is refused, and a copied chart image matches what is on screen.
-
-## Extensions
-
-- Promoting a plugin to the bundled catalog now starts from the builder's own
-  category, tags, and icon suggestions instead of fixed defaults, when those
-  survive validation. Author and homepage are never taken from the model.
-- Bundled extension splash prompts read as real questions.
+macOS builds are signed and notarized and require macOS 13 or later. Windows
+installers are not yet signed, so SmartScreen will warn on first run. Every
+asset ships with a SHA-256 checksum.
