@@ -1,6 +1,6 @@
 [package]
 name = "raynard"
-version = "0.7.0"
+version = "0.8.0"
 description = "Barebones Raynard-inspired Tauri desktop chat app"
 authors = ["Raynard"]
 license = "MIT"
