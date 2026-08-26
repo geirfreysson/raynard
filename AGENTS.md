@@ -503,6 +503,69 @@ API-derived results must also return useful text and source references.
 References should retain the source URL and enough structured/raw API payload
 for the main agent to support and cite its claims.
 
+## Documentation Screenshots
+
+The docs front page has two screenshot shapes: the hero/demo is 16:9 and the
+four showcase slots are 16:10. Screenshot capture is deliberately manual so
+the operator can navigate Raynard to a useful, reviewed state; the repository
+scripts only make the running app window a repeatable size.
+
+The proven macOS workflow uses only system tools: `osascript` (through the npm
+resize command), Core Graphics (through `swift`) to resolve the real on-screen
+window id, `screencapture` to capture that exact window, and `sips` plus visual
+inspection to verify the result.
+
+With Raynard already running:
+
+- `npm run screenshot:size:showcase` resizes its front window to 960x600
+  logical points (16:10).
+- `npm run screenshot:size:hero` resizes it to 960x540 logical points (16:9).
+- `npm run screenshot:size -- 1200x750` accepts any custom `WIDTHxHEIGHT`.
+- Add `--process "Raynard Dev"` after the size when the running process has a
+  non-default name.
+
+The first run may require enabling the terminal under **System Settings >
+Privacy & Security > Accessibility**. After resizing and navigating to the
+desired state, enumerate visible Raynard windows with Core Graphics; do not
+assume the first process or window is the right one:
+
+```bash
+swift -e 'import CoreGraphics
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)! as! [[String: Any]]
+for window in windows {
+  let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+  if owner.lowercased() == "raynard" {
+    print("id=\(window[kCGWindowNumber as String] ?? "?") pid=\(window[kCGWindowOwnerPID as String] ?? "?") bounds=\(window[kCGWindowBounds as String] ?? [:])")
+  }
+}'
+```
+
+Choose the on-screen window whose bounds match the preset, then capture it to a
+temporary file using its current id (never reuse an id from an earlier run):
+
+```bash
+screencapture -x -o -l <window-id> /tmp/raynard-shot.png
+sips -g pixelWidth -g pixelHeight /tmp/raynard-shot.png
+```
+
+`-l` targets only that window, `-o` removes the macOS drop shadow, and `-x`
+suppresses the shutter sound. A 2x Retina display should produce 1920x1200 for
+the showcase preset or 1920x1080 for the hero preset. Visually inspect the
+temporary PNG before replacing a docs asset; confirm both the dimensions and
+the actual screen content. Only then move it under
+`docs/static/img/screenshots/` using the filename referenced by
+`docs/src/content/homepage-copy.json`.
+
+Multiple installed/dev processes can all be named `Raynard` or `raynard`. If
+more than one matching window is listed, close the irrelevant one or identify
+the intended one by its PID and bounds before capture. Do not use a keyboard
+window screenshot for final assets because it normally includes shadow
+padding. `scripts/shot-app.sh` is acceptable for quick debugging, but not for
+documentation assets: its `GetWindowID` lookup takes the first match, and its
+fallback captures the whole screen. Never capture credentials, private chat
+content, API keys, or other machine-local data. The resize command does not
+launch, navigate, or capture the app and does not modify Tauri capabilities.
+
 ## Build, Test, and Development Commands
 
 - `npm run dev`: start the Vite renderer on `127.0.0.1:1420`.
@@ -513,6 +576,8 @@ for the main agent to support and cite its claims.
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib`: run Rust unit tests.
 - `cargo fmt --manifest-path src-tauri/Cargo.toml`: format Rust code.
 - `node --check scripts/main-agent-sidecar.mjs`: syntax-check a sidecar without starting the app.
+- `npm run screenshot:size:showcase` / `npm run screenshot:size:hero`: resize
+  the running macOS app for a manual docs screenshot.
 
 Do not start `npm run dev` or `npm run tauri dev` when the user asks for
 documentation-only work or explicitly wants the current application process

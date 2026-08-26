@@ -102,7 +102,8 @@
           "The agent picks which tools to call",
           "Cards render each source’s own data"
         ],
-        "mediaLabel": "Placeholder for a combined Fed-rate-cut answer citing Polymarket, X, and FMP screenshot"
+        "video": "/img/screenshots/raynard-multi-source-fed.mp4",
+        "mediaLabel": "A Raynard answer combining Fed-rate-cut evidence from Polymarket, X, and Financial Modeling Prep"
       },
       {
         "title": "No invented numbers",
@@ -112,18 +113,20 @@
           "The source data stays with the answer",
           "Send the whole thing as a link"
         ],
-        "mediaLabel": "Placeholder for a cited Nvidia valuation screenshot",
+        "image": "/img/screenshots/raynard-nvidia-valuation.png",
+        "mediaLabel": "A cited Nvidia valuation answer in Raynard",
         "reverse": true
       },
       {
-        "title": "The question that asks itself",
-        "prompt": "Every weekday at 7am: what’s trending on X in London and New York.",
-        "body": "Daily to yearly, in your time zone, waiting when you open the app.",
+        "title": "Answers on your schedule",
+        "prompt": "Check Polymarket for the market “Will Salesforce (CRM) beat quarterly earnings?” and report whether its implied probability is below 90% or above 95%.",
+        "body": "Set the schedule once. Raynard runs the check automatically and leaves the result waiting in your chat.",
         "bullets": [
-          "Lands in its own chat, or one you have",
+          "Runs daily to yearly in your time zone",
           "Pause it, edit it, or run it early"
         ],
-        "mediaLabel": "Placeholder for a scheduled X trends task screenshot"
+        "image": "/img/screenshots/raynard-scheduled-x-trends.png",
+        "mediaLabel": "A scheduled Polymarket probability check in Raynard"
       },
       {
         "title": "And if it’s not on the list",
