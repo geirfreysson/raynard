@@ -2693,13 +2693,25 @@ button.models-advanced-link:focus-visible {
   }
 }
 
-.builder-tool {
-  border: 1px solid var(--border-soft);
+/* A finished, successful call is a quiet line, same weight as the reasoning
+   and status entries around it. Only what's actively running or has actually
+   failed earns the bordered card — that's the one thing worth the extra
+   visual weight while the rest of the run is a scannable checklist. */
+.builder-tool,
+.builder-tool-summary {
   border-radius: 7px;
-  background: #ffffff;
-  overflow: hidden;
   font-family: var(--font-family-mono);
   font-size: 12px;
+}
+
+.builder-tool.is-pending,
+.builder-tool.is-streaming,
+.builder-tool.is-error,
+.builder-tool[open],
+.builder-tool-summary[open] {
+  border: 1px solid var(--border-soft);
+  background: #ffffff;
+  overflow: hidden;
 }
 
 .builder-tool.is-error {
@@ -2751,17 +2763,73 @@ button.models-advanced-link:focus-visible {
   overflow-x: auto;
 }
 
-.builder-tool > summary {
-  min-height: 38px;
+.builder-tool > summary,
+.builder-tool-summary > summary {
+  min-height: 22px;
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 2px 2px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.builder-tool.is-pending > summary,
+.builder-tool.is-streaming > summary,
+.builder-tool.is-error > summary,
+.builder-tool[open] > summary {
+  min-height: 38px;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
 }
 
-.builder-tool > summary::marker {
+.builder-tool-summary[open] > summary {
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.builder-tool > summary::marker,
+.builder-tool-summary > summary::marker {
   color: var(--text-muted);
+}
+
+.builder-tool-icon {
+  flex: 0 0 auto;
+  width: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  position: relative;
+}
+
+.builder-tool.is-complete .builder-tool-icon,
+.builder-tool-summary .builder-tool-icon {
+  color: #28724a;
+}
+
+.builder-tool.is-error .builder-tool-icon {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.builder-tool.is-pending .builder-tool-icon::before,
+.builder-tool.is-streaming .builder-tool-icon::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent, #4f8cff);
+  animation: builder-pulse 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .builder-tool.is-pending .builder-tool-icon::before,
+  .builder-tool.is-streaming .builder-tool-icon::before {
+    animation: none;
+  }
 }
 
 .builder-tool-identity {
@@ -2774,6 +2842,11 @@ button.models-advanced-link:focus-visible {
 .builder-tool-identity strong {
   flex: 0 0 auto;
   font-size: 12px;
+}
+
+.builder-tool-summary-label {
+  min-width: 0;
+  color: #28724a;
 }
 
 .builder-tool-preview {
@@ -2806,25 +2879,34 @@ button.models-advanced-link:focus-visible {
 
 .builder-tool-body {
   display: grid;
-  gap: 6px;
-  padding: 8px 10px 10px;
+  gap: 10px;
+  padding: 10px 10px 2px;
   border-top: 1px solid var(--border-soft);
-  background: #f8f8f8;
+}
+
+.builder-tool-summary-body {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0 2px 4px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .builder-tool-label {
   color: var(--text-muted);
+  font-size: 10px;
   font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .builder-tool-body pre {
   max-height: 320px;
-  margin: 0;
+  margin: 4px 0 0;
   overflow: auto;
-  padding: 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: 5px;
-  background: #ffffff;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
