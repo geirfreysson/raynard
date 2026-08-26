@@ -12,8 +12,8 @@ const config = {
     v4: true,
   },
 
-  url: 'https://geirfreysson.github.io',
-  baseUrl: '/raynard/',
+  url: 'https://raynard.ai',
+  baseUrl: '/',
   organizationName: 'geirfreysson',
   projectName: 'raynard',
   onBrokenLinks: 'throw',
