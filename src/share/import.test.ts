@@ -40,14 +40,24 @@ describe('messagesFromSharedPayload', () => {
 
   it('carries cards and sources onto the assistant message', () => {
     const sources = [{ plugin: 'D&D 5e API', label: 'Orc', cardIndex: 0 }];
-    const { assistant } = messagesFromSharedPayload(payload({ cards: [card], sources }), 1000);
+    const charts = [
+      {
+        type: 'bar' as const,
+        x: 'monster',
+        series: [{ key: 'hp', label: 'HP' }],
+        rows: [{ monster: 'Orc', hp: 15 }]
+      }
+    ];
+    const { assistant } = messagesFromSharedPayload(payload({ cards: [card], charts, sources }), 1000);
     expect(assistant.cards).toEqual([card]);
+    expect(assistant.charts).toEqual(charts);
     expect(assistant.sources).toEqual(sources);
   });
 
   it('omits empty collections', () => {
     const { assistant } = messagesFromSharedPayload(payload(), 1000);
     expect(assistant.cards).toBeUndefined();
+    expect(assistant.charts).toBeUndefined();
     expect(assistant.sources).toBeUndefined();
   });
 });

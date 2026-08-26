@@ -73,9 +73,10 @@ import {
 } from './extension-onboarding';
 import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
-import { parseChartSpec } from './chart-spec';
+import { parseChartSpec, type ChartSpec } from './chart-spec';
 import { normalizeChartFenceBoundaries } from './chart-markdown';
 import { renderChart, unmountChart } from './chart-mount';
+import { extractPresentedChart, normalizeStoredCharts } from './presented-chart';
 import { wrapCopyable } from './copy-affordance';
 import { writeClipboard } from './clipboard';
 import { chartRootToPngBlob, chartSpecToMarkdown, tableToPngBlob } from './copy-export';
@@ -258,6 +259,8 @@ type StoredChatMessage = {
   /** Tool calls and reasoning in the order they happened. */
   builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
+  /** Native present_chart results, rendered beneath the answer text. */
+  charts?: ChartSpec[];
   /**
    * The API calls that fed this turn, one entry per citing tool call. Persisted
    * so a chart copied out of a reloaded chat still names its data sources.
@@ -4496,6 +4499,8 @@ async function runScheduledExecution(execution: ScheduledExecution) {
             assistantRecord.thinking = thinking.trim() || undefined;
           },
           onToolResult: (toolCall) => {
+            const chart = extractPresentedChart(toolCall.result);
+            if (chart) (assistantRecord.charts ??= []).push(chart);
             const pluginName = pluginNameForTool(toolCall.toolName);
             const card = extractResultCard(toolCall, pluginName);
             let cardIndex: number | undefined;
@@ -4830,6 +4835,7 @@ function renderStoredTranscript() {
   chatMessages = storedMessages
     .filter((message) => !message.modeStatus)
     .map((message) => ({ role: message.role, content: message.text }));
+  messages.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
   messages.innerHTML = '';
   for (const message of storedMessages) {
     renderStoredMessage(message);
@@ -5012,6 +5018,9 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && message.modelFailure) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderModelFailure(body, message.modelFailure);
+  }
+  if (message.role === 'assistant' && message.status !== 'running' && message.charts?.length) {
+    renderMessageCharts(article, message.charts, messageContext(message));
   }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
@@ -5198,6 +5207,7 @@ function shareMessage(message: StoredChatMessage) {
     message: {
       text: message.text,
       cards: message.cards && withPluginNames(message.cards),
+      charts: message.charts,
       sources: message.sources
     },
     extensions: shareExtensionsForCards(message.cards ?? []),
@@ -5623,6 +5633,10 @@ async function startAgentTurn(content: string) {
         assistantRecord.status = 'running';
         activeToolName = undefined;
         refreshActivity();
+        const chart = extractPresentedChart(toolCall.result);
+        if (chart) {
+          (assistantRecord.charts ??= []).push(chart);
+        }
         const pluginName = pluginNameForTool(toolCall.toolName);
         const resultCard = extractResultCard(toolCall, pluginName);
         let cardIndex: number | undefined;
@@ -5713,6 +5727,7 @@ async function startAgentTurn(content: string) {
               messageContext(assistantRecord)
             );
           }
+          renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
           pending.classList.remove('pending');
           syncMessageActions(pending, assistantRecord);
         }
@@ -5823,6 +5838,7 @@ async function startAgentTurn(content: string) {
       if (pendingBody) {
         renderMessageText(pendingBody, finalContent, true, messageContext(assistantRecord));
       }
+      renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
       pending.classList.remove('pending');
       if (recommendedExtension) {
         renderExtensionRecommendation(pending, recommendedExtension);
@@ -5973,6 +5989,7 @@ function syncRemountedRun(
       renderModelFailure(body, record.modelFailure);
     } else if (body) {
       renderMessageText(body, record.text, record.role === 'assistant', messageContext(record));
+      renderMessageCharts(article, record.charts, messageContext(record));
       if (record.cards?.length) renderMessageCards(article, record.cards);
       if (record.extensionRecommendation) {
         renderExtensionRecommendation(article, record.extensionRecommendation);
@@ -7236,6 +7253,57 @@ function appendCitationLine(
   if (line) container.appendChild(line);
 }
 
+/** Mount one already-validated chart and its source line into a message block. */
+function appendRenderedChart(
+  container: HTMLElement,
+  spec: ChartSpec,
+  context: MessageContext,
+  suppressFallbackCitation = false,
+  fallbackSourceEntries?: string[]
+) {
+  const plotted = spec.sources ?? [];
+  const chartEntries = plotted.length
+    ? chartSourceEntries(context.sources, plotted)
+    : fallbackSourceEntries ?? chartSourceEntries(context.sources, []);
+  const chart = document.createElement('div');
+  chart.dataset.chartRoot = 'true';
+  const wrapper = wrapCopyable(chart, 'Copy chart', () => ({
+    text: chartSpecToMarkdown(spec),
+    image: () => chartRootToPngBlob(chart, spec, chartEntries)
+  }));
+  wrapper.classList.add('copyable-chart');
+  container.appendChild(wrapper);
+  const chartLine = plotted.length
+    ? createChartCitationLine(plotted, context.sources, context.cards)
+    : null;
+  if (chartLine) container.appendChild(chartLine);
+  else appendCitationLine(container, context, suppressFallbackCitation);
+  renderChart(chart, spec);
+}
+
+/**
+ * Structured present_chart results live outside the Markdown string. Rebuild
+ * their blocks after every streamed/final re-render and after chat reload.
+ */
+function renderMessageCharts(
+  article: HTMLElement,
+  charts: ChartSpec[] | undefined,
+  context: MessageContext
+) {
+  const body = article.querySelector<HTMLElement>(':scope > .message-text');
+  if (!body) return;
+  body.querySelectorAll<HTMLElement>(':scope > [data-presented-chart]').forEach((block) => {
+    block.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
+    block.remove();
+  });
+  for (const spec of normalizeStoredCharts(charts)) {
+    const block = document.createElement('div');
+    block.dataset.presentedChart = 'true';
+    appendRenderedChart(block, spec, context);
+    body.appendChild(block);
+  }
+}
+
 function renderMarkdownLightweight(
   container: HTMLElement,
   sourceText: string,
@@ -7284,26 +7352,9 @@ function renderMarkdownLightweight(
       if (language === 'chart') {
         const spec = parseChartSpec(block.join('\n'));
         if (spec) {
-          // A chart cites what it plotted, which only the spec knows: the turn's
-          // other calls found the data rather than supplying it.
-          const plotted = spec.sources ?? [];
-          const chartEntries = plotted.length
-            ? chartSourceEntries(context.sources, plotted)
-            : sourceEntries;
-          const chart = document.createElement('div');
-          chart.dataset.chartRoot = 'true';
-          const wrapper = wrapCopyable(chart, 'Copy chart', () => ({
-            text: chartSpecToMarkdown(spec),
-            image: () => chartRootToPngBlob(chart, spec, chartEntries)
-          }));
-          wrapper.classList.add('copyable-chart');
-          container.appendChild(wrapper);
-          const chartLine = plotted.length
-            ? createChartCitationLine(plotted, context.sources, context.cards)
-            : null;
-          if (chartLine) container.appendChild(chartLine);
-          else appendCitationLine(container, context, citedInline);
-          renderChart(chart, spec);
+          // Legacy saved answers may still contain chart fences. New answers
+          // arrive through present_chart and render outside the Markdown text.
+          appendRenderedChart(container, spec, context, citedInline, sourceEntries);
           continue;
         }
       }

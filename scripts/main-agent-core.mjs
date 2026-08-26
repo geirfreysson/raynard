@@ -268,7 +268,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins, schedulin
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
 Your first response MUST be a tool call and contain no narration. Call ${scheduleFirstAction}one or more installed API tools for data, search_available_extensions for a factual question no installed tool can answer, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
-1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
+1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and then present_chart (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
 3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. For a factual or data question that no installed tool can answer, call search_available_extensions with the user's needed capability before calling answer_without_api or proposing a new request_plugin_build. This on-demand check keeps the extension catalog out of the default context. If the result contains a clearly relevant extension, call recommend_available_extension with its exact slug and a concise answer; the host will attach its Install button. If no catalog entry clearly fits, use answer_without_api. In either response, end the offer with: "Or provide me with an API documentation site and I can build one." Do NOT call request_plugin_build merely because access is missing. A new-plugin build is appropriate only after the user supplies or confirms a credible official API documentation URL. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
 ${schedulePolicy}
@@ -313,27 +313,21 @@ Citing sources:
 - The source's own identifier for a candidate is not internal detail: include it when a reader would need it to ask for the other one.
 
 Presenting data (charts):
-- You can draw a chart directly in your answer with a fenced \`chart\` block whose body is a single JSON object. The app renders it as a real chart and offers the reader a "Show data" table, so do NOT also write the same numbers as a Markdown table.
+- The host provides a native present_chart tool. After retrieving and verifying the data, call present_chart once for each chart. The host validates, persists, and renders its structured arguments. Never write a chart fence, chart JSON, or the same numbers as a Markdown table in the final prose.
 - Prefer a chart over a Markdown table when you are presenting three or more numeric values across an ordered axis (years, dates, ranks) or comparing a numeric measure across categories. Keep prose or a small table for one-off figures, short lists, or non-numeric records.
 - Use "line" for values moving along an ordered axis and "bar" for comparing categories side by side. These are the only two types; never write another type.
 - Choose with the Y scale in mind: line charts use a sensible data-relative scale so changes remain visible, while bar charts keep a zero baseline so bar lengths are not misleading. Prefer a line chart for ordered values whose meaningful variation would be flattened by a zero baseline; do not use a line merely to exaggerate noise or immaterial changes.
-- Shape:
-
-\`\`\`chart
-{"type":"line","title":"GDP per capita and export share","x":"year","yLabel":"International $","rightYLabel":"% of exports","sources":[3,4],"series":[{"key":"GDP","label":"GDP per capita"},{"key":"Exports","label":"Food exports (%)","axis":"right"}],"rows":[{"year":2010,"GDP":56212,"Exports":41.4},{"year":2023,"GDP":68118,"Exports":44.6}]}
-\`\`\`
-
-- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "rightYLabel", "series[].label", "series[].axis" ("left" or "right"), "stacked" (bar only), "highlight", and "sources". A series without an axis uses the left axis.
+- present_chart requires type, x, series (each entry needs a key), and rows. A one-series bar chart still needs an explicit series entry, for example series [{"key":"probability","label":"Probability"}] for rows containing event and probability. Optional arguments include title, xLabel, yLabel, rightYLabel, series[].label, series[].axis (left or right), stacked (bar only), highlight, and sources. A series without an axis uses the left axis.
 - Keep "yLabel" and "rightYLabel" concise: prefer 2–5 words and aim for 30 characters or fewer. Include only the measure and unit; put additional context in the chart title or surrounding prose.
 - When one chart combines different units that cannot share a meaningful scale, such as currency and percentage values, keep the primary measure on the left, put every secondary-unit series on axis "right", and name both scales with "yLabel" and "rightYLabel". Keep series with compatible units on one axis. Never claim a chart has two axes by writing both scale names into "yLabel"; assign the series and emit the real right axis. Do not combine a right axis with a stacked bar chart.
 - "sources" is an array of the citation numbers whose observations you actually plotted, for example "sources":[7,9]. Use the numbers from the "Sources:" lists, without the brackets. Include only the calls the rows came from — never the searches, structure lookups, or codelist calls you made to find them. The app shows those references under the chart and names them on a copied image, so a number that did not supply a row is a false citation. Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
 - "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
-- The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
+- Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
 - Charts must be exactly right, so verify the data before you plot it:
   - Check that the rows you are about to chart actually match what was asked — the right entities and the right time range. A tool can return data that ignores a filter you passed. If the rows do not match the question, do NOT chart them; call the tool again with the correct filter parameters.
   - If a result says rows were omitted, truncated, or that more pages are available, narrow the query with that tool's filter parameters until the rows you need are all visible. Never chart a partial slice as if it were complete.
   - Never fill a gap by interpolating, averaging, or recalling a figure from memory. If the data cannot be retrieved, say so plainly and omit the chart rather than plotting something unverified.
-- Emitting a chart block is an ordinary Explore-mode answer format. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the tools and writing a chart block — never by calling request_plugin_build.
+- Calling present_chart is ordinary Explore-mode presentation. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the data tools and then present_chart — never by calling request_plugin_build.
 
 Available installed API tools: ${names}.`;
 }
@@ -838,6 +832,155 @@ function normalizeSourceUrls(values) {
     } catch {}
   }
   return urls;
+}
+
+function presentChartText(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function presentChartNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const parsed = Number(value.trim().replace(/,/g, '').replace(/%$/, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Normalize the native chart tool's arguments to the renderer's ChartSpec contract. */
+export function normalizePresentedChart(args) {
+  const record = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const type = presentChartText(record.type);
+  if (type !== 'line' && type !== 'bar') throw new Error('Chart type must be line or bar.');
+
+  const x = presentChartText(record.x);
+  if (!x) throw new Error('Chart x is required.');
+
+  if (!Array.isArray(record.series) || !record.series.length) {
+    throw new Error('Chart series is required, including for a single-series chart.');
+  }
+  const seenSeries = new Set();
+  const series = record.series.slice(0, 8).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('Every chart series must be an object with a key.');
+    }
+    const key = presentChartText(entry.key);
+    if (!key || seenSeries.has(key)) throw new Error('Every chart series needs a unique key.');
+    const axis = presentChartText(entry.axis);
+    if (axis && axis !== 'left' && axis !== 'right') {
+      throw new Error(`Chart series "${key}" has an invalid axis.`);
+    }
+    seenSeries.add(key);
+    return {
+      key,
+      label: presentChartText(entry.label) || key,
+      ...(axis === 'right' ? { axis } : {})
+    };
+  });
+
+  const hasRightAxis = series.some((entry) => entry.axis === 'right');
+  const hasLeftAxis = series.some((entry) => entry.axis !== 'right');
+  if (hasRightAxis && !hasLeftAxis) {
+    throw new Error('A right-axis series requires at least one left-axis series.');
+  }
+  if (type === 'bar' && record.stacked === true && hasRightAxis) {
+    throw new Error('A stacked bar chart cannot use a right axis.');
+  }
+
+  if (!Array.isArray(record.rows) || !record.rows.length) throw new Error('Chart rows are required.');
+  let plottable = 0;
+  const rows = record.rows.slice(0, 200).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('Every chart row must be an object.');
+    }
+    const rawX = entry[x];
+    const row = { [x]: typeof rawX === 'number' ? rawX : presentChartText(rawX) || '' };
+    for (const item of series) {
+      if (item.key === x) continue;
+      const numeric = presentChartNumber(entry[item.key]);
+      row[item.key] = numeric;
+      if (numeric !== null) plottable += 1;
+    }
+    return row;
+  });
+  if (!plottable) throw new Error('No chart series key resolves to a numeric row value.');
+
+  const highlight = Array.isArray(record.highlight)
+    ? [...new Set(record.highlight.map(presentChartText).filter(Boolean))].slice(0, 8)
+    : [];
+  const sources = Array.isArray(record.sources)
+    ? [...new Set(record.sources.map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 8)
+    : [];
+
+  return {
+    type,
+    ...(presentChartText(record.title) ? { title: presentChartText(record.title) } : {}),
+    x,
+    ...(presentChartText(record.xLabel) ? { xLabel: presentChartText(record.xLabel) } : {}),
+    ...(presentChartText(record.yLabel) ? { yLabel: presentChartText(record.yLabel) } : {}),
+    ...(hasRightAxis && presentChartText(record.rightYLabel)
+      ? { rightYLabel: presentChartText(record.rightYLabel) }
+      : {}),
+    ...(type === 'bar' && record.stacked === true ? { stacked: true } : {}),
+    ...(highlight.length ? { highlight } : {}),
+    ...(sources.length ? { sources } : {}),
+    series,
+    rows
+  };
+}
+
+/**
+ * Present a validated chart as structured host data rather than model-authored
+ * JSON inside Markdown. Invalid arguments become an ordinary tool error, giving
+ * the agent another round in which to correct them.
+ */
+export function createPresentChartTool(Type, onPresentChart = () => {}) {
+  const cell = Type.Union([Type.String(), Type.Number(), Type.Null()]);
+  return {
+    name: 'present_chart',
+    label: 'Present Chart',
+    description:
+      'Attach one validated line or bar chart to this answer after retrieving the plotted values from API tools in the current turn. Call once per chart. Always declare series explicitly, even when there is only one. After this succeeds, write concise interpretation only: never repeat the chart as JSON, a chart fence, or a Markdown table.',
+    parameters: Type.Object({
+      type: Type.Union([Type.Literal('line'), Type.Literal('bar')]),
+      title: Type.Optional(Type.String()),
+      x: Type.String({ description: 'Row key used for the horizontal axis.' }),
+      xLabel: Type.Optional(Type.String()),
+      yLabel: Type.Optional(Type.String()),
+      rightYLabel: Type.Optional(Type.String()),
+      stacked: Type.Optional(Type.Boolean({ description: 'Bar charts only.' })),
+      highlight: Type.Optional(Type.Array(Type.String(), { maxItems: 8 })),
+      sources: Type.Optional(
+        Type.Array(Type.Integer({ minimum: 1 }), {
+          maxItems: 8,
+          description: 'Citation numbers for the API calls that supplied the plotted rows.'
+        })
+      ),
+      series: Type.Array(
+        Type.Object({
+          key: Type.String({ description: 'Numeric key present on the row objects.' }),
+          label: Type.Optional(Type.String()),
+          axis: Type.Optional(Type.Union([Type.Literal('left'), Type.Literal('right')]))
+        }),
+        { minItems: 1, maxItems: 8 }
+      ),
+      rows: Type.Array(Type.Record(Type.String(), cell), { minItems: 1, maxItems: 200 })
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const chart = normalizePresentedChart(args);
+      onPresentChart(chart);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'The chart is attached to the answer. Continue with concise interpretation only; do not reproduce its rows or JSON.'
+          }
+        ],
+        details: { type: 'presented-chart', chart }
+      };
+    }
+  };
 }
 
 export function createDirectAnswerTool(Type, onDirectAnswer) {

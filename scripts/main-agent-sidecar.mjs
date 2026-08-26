@@ -11,6 +11,7 @@ import {
   createScheduledTaskTool,
   createDirectAnswerTool,
   createExtensionRecommendationTool,
+  createPresentChartTool,
   createGeneratedPluginTools,
   createModel,
   createUsageTotal,
@@ -229,6 +230,7 @@ const extensionRecommendationTool = createExtensionRecommendationTool(
     emit({ type: 'extension_recommendation', result: recommendation });
   }
 );
+const presentChartTool = createPresentChartTool(Type);
 const scheduledTaskTool = request.scheduledExecution
   ? null
   : createScheduledTaskTool(
@@ -247,6 +249,7 @@ const scheduledTaskTool = request.scheduledExecution
     );
 const tools = [
   ...generatedTools,
+  presentChartTool,
   availableExtensionSearchTool,
   extensionRecommendationTool,
   buildRequestTool,

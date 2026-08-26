@@ -22,9 +22,17 @@ describe('buildSharePayload', () => {
   it('carries the question, answer, cards and sources', () => {
     const cards = [card('monster', 'monsters')];
     const sources = [{ plugin: 'D&D 5e', label: 'Orc' }];
+    const charts = [
+      {
+        type: 'bar' as const,
+        x: 'monster',
+        series: [{ key: 'hp', label: 'HP' }],
+        rows: [{ monster: 'Orc', hp: 15 }]
+      }
+    ];
     const payload = buildSharePayload({
       question: '  How tough is an orc?  ',
-      message: { text: 'Not very.[^1]', cards, sources },
+      message: { text: 'Not very.[^1]', cards, charts, sources },
       extensions: [{ slug: 'dnd-5e-api', name: 'D&D 5e API' }],
       now: at
     });
@@ -34,6 +42,7 @@ describe('buildSharePayload', () => {
     expect(payload.q).toBe('How tough is an orc?');
     expect(payload.a).toBe('Not very.[^1]');
     expect(payload.cards).toEqual(cards);
+    expect(payload.charts).toEqual(charts);
     expect(payload.sources).toEqual(sources);
     expect(payload.ext).toEqual([{ slug: 'dnd-5e-api', name: 'D&D 5e API' }]);
   });
@@ -75,6 +84,7 @@ describe('buildSharePayload', () => {
       now: at
     });
     expect(payload.cards).toBeUndefined();
+    expect(payload.charts).toBeUndefined();
     expect(payload.sources).toBeUndefined();
     expect(payload.ext).toBeUndefined();
     expect(payload.teaser).toEqual({ cards: '', ext: '' });

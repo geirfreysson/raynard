@@ -10,6 +10,7 @@ import {
   createGeneratedPluginTools,
   createExtensionRecommendationTool,
   createModel,
+  createPresentChartTool,
   createScheduledTaskTool,
   createUsageTotal,
   addUsage,
@@ -21,12 +22,13 @@ import {
   formatToolResult,
   isTransientModelError,
   MODEL_RESULT_BYTE_LIMIT,
+  normalizePresentedChart,
   retryAfterMs,
   runWithTransientResume,
   toAgentMessages,
   transientReason
 } from './main-agent-core.mjs';
-import { Type } from '@mariozechner/pi-ai';
+import { Type, validateToolArguments } from '@mariozechner/pi-ai';
 
 describe('main agent core', () => {
   it('keeps Markdown block boundaries between separate assistant text blocks', () => {
@@ -256,28 +258,29 @@ describe('main agent core', () => {
     expect(build).toContain('adding result cards to specific tools');
   });
 
-  it('teaches the chart fence and keeps charting an answer out of the build flow', () => {
+  it('teaches the native chart tool and keeps charting an answer out of the build flow', () => {
     const explore = buildMainAgentSystemPrompt({ mode: 'explore', toolNames: ['data360_get_data'] });
 
-    // The syntax and its required keys are documented.
-    expect(explore).toContain('```chart');
-    expect(explore).toMatch(/"type"\s*,?.*"x".*"series".*"rows"/s);
-    expect(explore).toContain('"stacked" (bar only)');
-    expect(explore).toContain('"rightYLabel"');
+    expect(explore).toContain('present_chart');
+    expect(explore).toMatch(/requires type, x, series.*and rows/i);
+    expect(explore).toMatch(/one-series bar chart still needs an explicit series/i);
+    expect(explore).toMatch(/stacked \(bar only\)/i);
+    expect(explore).toContain('rightYLabel');
     expect(explore).toContain('series[].axis');
     expect(explore).toMatch(/different units.*currency.*percentage/is);
     expect(explore).toMatch(/never claim.*two axes.*yLabel/is);
     expect(explore).toMatch(/yLabel.*rightYLabel.*2.?5 words.*30 characters/is);
     expect(explore).toMatch(/line charts.*data-relative.*bar charts.*zero baseline/is);
     // The highlight option and when to reach for it.
-    expect(explore).toContain('"highlight"');
+    expect(explore).toContain('highlight');
     expect(explore).toMatch(/everything else is drawn muted/i);
     expect(explore).toMatch(/series label, a series key, or an x-axis value/i);
     // Only the two types the renderer implements.
     expect(explore).toMatch(/only two types/i);
     expect(explore).not.toMatch(/"type"\s*:\s*"(pie|scatter|area)"/);
     // A chart replaces the table rather than duplicating it.
-    expect(explore).toMatch(/do NOT also write the same numbers as a Markdown table/i);
+    expect(explore).toMatch(/never write.*same numbers as a Markdown table/i);
+    expect(explore).toMatch(/never write a chart fence/i);
     expect(explore).toMatch(/never invent, extrapolate, or round data points/i);
     // Chart accuracy: verify the rows match the question before plotting.
     expect(explore).toMatch(/A tool can return data that ignores a filter you passed/i);
@@ -287,6 +290,54 @@ describe('main agent core', () => {
     // Charting an answer must not be mistaken for a plugin/card change.
     expect(explore).toMatch(/is not a plugin change/i);
     expect(explore).toMatch(/Only a request to change how a PLUGIN or its result card renders is a build request/);
+  });
+
+  it('validates and normalizes native chart tool results', async () => {
+    const captured = [];
+    const tool = createPresentChartTool(Type, (chart) => captured.push(chart));
+    expect(tool.parameters.required).toEqual(['type', 'x', 'series', 'rows']);
+
+    const result = await tool.execute('chart-1', {
+      type: 'bar',
+      title: 'Iceland odds',
+      x: 'event',
+      yLabel: 'Probability (%)',
+      sources: [1, 2, 2],
+      series: [{ key: 'probability' }],
+      rows: [
+        { event: 'Referendum', probability: '54%' },
+        { event: 'Match', probability: 96.5 }
+      ]
+    });
+
+    expect(result.details.type).toBe('presented-chart');
+    expect(result.details.chart.series).toEqual([{ key: 'probability', label: 'probability' }]);
+    expect(result.details.chart.rows[0].probability).toBe(54);
+    expect(result.details.chart.sources).toEqual([1, 2]);
+    expect(captured).toEqual([result.details.chart]);
+
+    expect(() =>
+      validateToolArguments(tool, {
+        type: 'toolCall',
+        id: 'missing-series',
+        name: 'present_chart',
+        arguments: { type: 'bar', x: 'event', rows: [{ event: 'A', probability: 54 }] }
+      })
+    ).toThrow(/validation failed/i);
+  });
+
+  it('rejects native charts without series or plottable values', () => {
+    expect(() =>
+      normalizePresentedChart({ type: 'bar', x: 'event', rows: [{ event: 'A', value: 1 }] })
+    ).toThrow(/series is required/i);
+    expect(() =>
+      normalizePresentedChart({
+        type: 'bar',
+        x: 'event',
+        series: [{ key: 'value' }],
+        rows: [{ event: 'A', value: 'unknown' }]
+      })
+    ).toThrow(/numeric row value/i);
   });
 
   it('requires a tool call in the current turn before making API claims or claiming cards appeared', () => {

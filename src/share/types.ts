@@ -1,4 +1,5 @@
 import type { ChartSource } from '../chart-sources';
+import type { ChartSpec } from '../chart-spec';
 import type { StoredResultCard } from '../result-card/types';
 
 // The wire format for a shared answer.
@@ -52,11 +53,13 @@ export type SharedAnswerPayload = {
   at: string;
   /** The question that produced the answer. */
   q: string;
-  /** The answer, verbatim markdown. Chart fences carry their own rows inline. */
+  /** The answer prose, verbatim markdown. Legacy answers may contain chart fences. */
   a: string;
   teaser: ShareTeaser;
   ext?: ShareExtension[];
   cards?: StoredResultCard[];
+  /** Native present_chart results, kept separate from the answer prose. */
+  charts?: ChartSpec[];
   sources?: ChartSource[];
   degraded?: ShareDegradation;
 };
