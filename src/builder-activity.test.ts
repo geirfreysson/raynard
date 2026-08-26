@@ -10,7 +10,9 @@ import {
   isOutputActivity,
   isReasoningActivity,
   isStatusActivity,
+  isToolSummaryActivity,
   planBuilderTimeline,
+  projectBuilderTimeline,
   type BuilderActivity,
   type BuilderToolActivity
 } from './builder-activity';
@@ -345,5 +347,88 @@ describe('builderStatusLabel', () => {
 
   it('passes an already-readable label through', () => {
     expect(builderStatusLabel('Retrying in 4s')).toBe('Retrying in 4s');
+  });
+});
+
+describe('projectBuilderTimeline', () => {
+  const start = (id: string, toolName: string) =>
+    ({ type: 'start', toolCallId: id, toolName, args: {} }) as const;
+  const end = (id: string, toolName: string, isError = false) =>
+    ({ type: 'end', toolCallId: id, toolName, result: 'ok', isError }) as const;
+
+  it('leaves a single tool call alone', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, end('call-1', 'read'));
+
+    const slots = projectBuilderTimeline(activities);
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({ kind: 'tool', toolCallId: 'call-1' });
+  });
+
+  it('folds consecutive finished calls into one counter, not a growing list', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, end('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, start('call-2', 'write'));
+    activities = applyBuilderToolEvent(activities, end('call-2', 'write'));
+    activities = applyBuilderToolEvent(activities, start('call-3', 'bash'));
+    activities = applyBuilderToolEvent(activities, end('call-3', 'bash'));
+
+    const slots = projectBuilderTimeline(activities);
+    expect(slots).toHaveLength(1);
+    expect(isToolSummaryActivity(slots[0])).toBe(true);
+    expect(slots[0]).toMatchObject({ kind: 'tool-summary', toolCallId: 'tool-summary', count: 3 });
+    if (isToolSummaryActivity(slots[0])) {
+      expect(slots[0].entries.map((entry) => entry.toolCallId)).toEqual([
+        'call-1',
+        'call-2',
+        'call-3'
+      ]);
+    }
+  });
+
+  it('keeps the counter at its original position while later calls stay live inline', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, end('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, start('call-2', 'write'));
+    activities = applyBuilderToolEvent(activities, end('call-2', 'write'));
+    activities = applyBuilderThinkingDelta(activities, 'Now running the tests.');
+    activities = applyBuilderToolEvent(activities, start('call-3', 'bash'));
+
+    const slots = projectBuilderTimeline(activities);
+    expect(slots.map((slot) => (isToolSummaryActivity(slot) ? 'summary' : slot.kind || 'tool'))).toEqual(
+      ['summary', 'reasoning', 'tool']
+    );
+    expect(slots[2]).toMatchObject({ toolCallId: 'call-3', status: 'pending' });
+  });
+
+  it('leaves a lone finished call alone even next to a failed one', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, end('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, start('call-2', 'bash'));
+    activities = applyBuilderToolEvent(activities, end('call-2', 'bash', true));
+
+    const slots = projectBuilderTimeline(activities);
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toMatchObject({ kind: 'tool', toolCallId: 'call-1' });
+    expect(slots[1]).toMatchObject({ toolCallId: 'call-2', status: 'error', isError: true });
+  });
+
+  it('never folds a failed call into the counter', () => {
+    let activities: BuilderActivity[] = [];
+    activities = applyBuilderToolEvent(activities, start('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, end('call-1', 'read'));
+    activities = applyBuilderToolEvent(activities, start('call-2', 'write'));
+    activities = applyBuilderToolEvent(activities, end('call-2', 'write'));
+    activities = applyBuilderToolEvent(activities, start('call-3', 'bash'));
+    activities = applyBuilderToolEvent(activities, end('call-3', 'bash', true));
+
+    const slots = projectBuilderTimeline(activities);
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toMatchObject({ kind: 'tool-summary', count: 2 });
+    expect(slots[1]).toMatchObject({ toolCallId: 'call-3', status: 'error', isError: true });
   });
 });

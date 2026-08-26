@@ -512,7 +512,15 @@ const unsubscribe = agent.subscribe((event) => {
     finalText = extractAssistantText(event.message) || finalText;
     lastAssistantStopReason = String(event.message.stopReason || '');
     lastAssistantError = String(event.message.errorMessage || '');
-    if (lastAssistantError || (lastAssistantStopReason && lastAssistantStopReason !== 'stop')) {
+    // "stop" and "toolUse" are the two ordinary ways a round ends — the model
+    // finished talking, or it called a tool. Only "length", "error", and
+    // "aborted" are worth a status line; surfacing the ordinary ones as
+    // "Stream ended" made every single tool call look like an anomaly.
+    const isAnomalous =
+      lastAssistantStopReason &&
+      lastAssistantStopReason !== 'stop' &&
+      lastAssistantStopReason !== 'toolUse';
+    if (lastAssistantError || isAnomalous) {
       emit({
         type: 'status',
         status: `stream_ended:${lastAssistantStopReason || 'unknown'}${

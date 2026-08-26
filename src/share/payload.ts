@@ -1,4 +1,5 @@
 import type { ChartSource } from '../chart-sources';
+import type { ChartSpec } from '../chart-spec';
 import { cardSummaryLabel } from '../result-card/ResultCardStack';
 import type { StoredResultCard } from '../result-card/types';
 import { SHARE_PAYLOAD_VERSION, ShareLinkError } from './types';
@@ -7,6 +8,7 @@ import type { ShareExtension, SharedAnswerPayload } from './types';
 export type ShareSourceMessage = {
   text: string;
   cards?: StoredResultCard[];
+  charts?: ChartSpec[];
   sources?: ChartSource[];
 };
 
@@ -44,6 +46,7 @@ function shareableCard(card: StoredResultCard, index: number): StoredResultCard 
  */
 export function buildSharePayload(source: ShareSource): SharedAnswerPayload {
   const cards = (source.message.cards ?? []).map(shareableCard);
+  const charts = source.message.charts ?? [];
   const sources = source.message.sources ?? [];
   const extensions = source.extensions ?? [];
 
@@ -63,6 +66,7 @@ export function buildSharePayload(source: ShareSource): SharedAnswerPayload {
 
   if (extensions.length) payload.ext = extensions;
   if (cards.length) payload.cards = cards;
+  if (charts.length) payload.charts = charts;
   if (sources.length) payload.sources = sources;
   return payload;
 }

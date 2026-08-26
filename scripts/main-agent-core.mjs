@@ -255,7 +255,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins, schedulin
       ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For an existing-plugin change, call request_plugin_build. For a new capability, call it only when a concrete API and official documentation URL are established; otherwise clarify the intended source with answer_without_api. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
       : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Offer Build mode only when a concrete, credible API source has been identified. Otherwise use answer_without_api to clarify where the information should come from, suggest plausible public APIs, or ask whether the user meant a relevant installed plugin. When the user asks to modify an existing plugin, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
   const schedulePolicy = scheduling?.enabled !== false
-    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling language removed. Generate a concise name. Default the destination to a dedicated new chat unless the user explicitly identifies an existing chat. For an existing chat, use an exact ID from the saved-chat list. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving.`
+    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling language removed. Generate a concise name. A Raynard schedule is daily, weekly, monthly, quarterly, or yearly at one local clock time — there is no hourly, minute-level, or Monday-to-Friday schedule, so choose the closest and let the user adjust it. Only name and prompt are required: make ONE call with your best guess, omit any schedule field you are unsure of rather than inventing a value, and never call the tool again to discover which values it accepts. Default the destination to a dedicated new chat unless the user explicitly identifies an existing chat. For an existing chat, use an exact ID from the saved-chat list. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving, so an approximate draft is useful and a retry is not.`
     : `4. SCHEDULE: This is already a scheduled execution. Perform the supplied prompt normally and never create another scheduled task.`;
   const scheduleFirstAction = scheduling?.enabled !== false
     ? 'request_scheduled_task for recurring work, '
@@ -268,7 +268,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins, schedulin
 
 FIRST-ACTION ROUTING (mandatory — make this decision before answering or describing work):
 Your first response MUST be a tool call and contain no narration. Call ${scheduleFirstAction}one or more installed API tools for data, search_available_extensions for a factual question no installed tool can answer, request_plugin_build for a source-backed missing capability or an existing-plugin change, or answer_without_api for greetings, stable explanations, and data-source clarification.
-1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and write a chart block (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
+1. BUILD REQUEST: Requests to create, edit, fix, or otherwise change a plugin belong here, subject to this source gate. If the user wants to change an EXISTING plugin, tool behavior, result card, card layout, rendering, image placement, size, styling, or visualization, call request_plugin_build immediately. If the user wants a NEW plugin or capability, call request_plugin_build only after identifying a concrete, credible API and at least one real official documentation URL from the conversation or reliable knowledge. EXCEPTION: asking to chart, graph, plot, or visualize data in the ANSWER ITSELF is not a plugin change — call the data tools and then present_chart (see "Presenting data"). Only a request to change how a PLUGIN or its result card renders is a build request. Existing-plugin changes include follow-ups that refer to a plugin/card indirectly ("try again", "make it bigger", "put it on the right"). Preserve the requested change in the tool arguments and use the exact installed plugin name. Do not inspect files, narrate edits, run tests, claim completion, or emit a mode-status sentence; only the coding agent can do that after confirmation.
 2. EXPLORE: For questions about data, facts, records, or anything the installed API tools can answer, stay in Explore mode, call those tools as needed, and answer from their results. General conversation and explanations that do not request a plugin mutation also stay in Explore.
 3. MISSING CAPABILITY: First inspect the installed tools and decide whether any is plausibly relevant. If one is, use it when the request is clear; when the user's intended source is ambiguous, use answer_without_api to name the relevant installed plugin in user-facing language and ask whether that is where the information should come from. For a factual or data question that no installed tool can answer, call search_available_extensions with the user's needed capability before calling answer_without_api or proposing a new request_plugin_build. This on-demand check keeps the extension catalog out of the default context. If the result contains a clearly relevant extension, call recommend_available_extension with its exact slug and a concise answer; the host will attach its Install button. If no catalog entry clearly fits, use answer_without_api. In either response, end the offer with: "Or provide me with an API documentation site and I can build one." Do NOT call request_plugin_build merely because access is missing. A new-plugin build is appropriate only after the user supplies or confirms a credible official API documentation URL. Never treat a request to change an existing plugin/card as a data query merely because an installed tool can return its current output.
 ${schedulePolicy}
@@ -313,105 +313,333 @@ Citing sources:
 - The source's own identifier for a candidate is not internal detail: include it when a reader would need it to ask for the other one.
 
 Presenting data (charts):
-- You can draw a chart directly in your answer with a fenced \`chart\` block whose body is a single JSON object. The app renders it as a real chart and offers the reader a "Show data" table, so do NOT also write the same numbers as a Markdown table.
+- The host provides a native present_chart tool. After retrieving and verifying the data, call present_chart once for each chart. The host validates, persists, and renders its structured arguments. Never write a chart fence, chart JSON, or the same numbers as a Markdown table in the final prose.
 - Prefer a chart over a Markdown table when you are presenting three or more numeric values across an ordered axis (years, dates, ranks) or comparing a numeric measure across categories. Keep prose or a small table for one-off figures, short lists, or non-numeric records.
 - Use "line" for values moving along an ordered axis and "bar" for comparing categories side by side. These are the only two types; never write another type.
 - Choose with the Y scale in mind: line charts use a sensible data-relative scale so changes remain visible, while bar charts keep a zero baseline so bar lengths are not misleading. Prefer a line chart for ordered values whose meaningful variation would be flattened by a zero baseline; do not use a line merely to exaggerate noise or immaterial changes.
-- Shape:
-
-\`\`\`chart
-{"type":"line","title":"GDP per capita and export share","x":"year","yLabel":"International $","rightYLabel":"% of exports","sources":[3,4],"series":[{"key":"GDP","label":"GDP per capita"},{"key":"Exports","label":"Food exports (%)","axis":"right"}],"rows":[{"year":2010,"GDP":56212,"Exports":41.4},{"year":2023,"GDP":68118,"Exports":44.6}]}
-\`\`\`
-
-- Required: "type", "x", "series" (each entry needs "key"), and "rows". Optional: "title", "xLabel", "yLabel", "rightYLabel", "series[].label", "series[].axis" ("left" or "right"), "stacked" (bar only), "highlight", and "sources". A series without an axis uses the left axis.
+- present_chart requires type, x, series (each entry needs a key), and rows. A one-series bar chart still needs an explicit series entry, for example series [{"key":"probability","label":"Probability"}] for rows containing event and probability. Optional arguments include title, xLabel, yLabel, rightYLabel, series[].label, series[].axis (left or right), stacked (bar only), highlight, and sources. A series without an axis uses the left axis.
 - Keep "yLabel" and "rightYLabel" concise: prefer 2–5 words and aim for 30 characters or fewer. Include only the measure and unit; put additional context in the chart title or surrounding prose.
 - When one chart combines different units that cannot share a meaningful scale, such as currency and percentage values, keep the primary measure on the left, put every secondary-unit series on axis "right", and name both scales with "yLabel" and "rightYLabel". Keep series with compatible units on one axis. Never claim a chart has two axes by writing both scale names into "yLabel"; assign the series and emit the real right axis. Do not combine a right axis with a stacked bar chart.
 - "sources" is an array of the citation numbers whose observations you actually plotted, for example "sources":[7,9]. Use the numbers from the "Sources:" lists, without the brackets. Include only the calls the rows came from — never the searches, structure lookups, or codelist calls you made to find them. The app shows those references under the chart and names them on a copied image, so a number that did not supply a row is a false citation. Every "series" key must be a real key on the row objects, and "x" names the row key holding the axis value.
 - "highlight" is an array naming what the answer is actually about; everything else is drawn muted so the subject stands out. When the question compares one subject against others ("how does Britain compare with the EU"), put that subject in "highlight". Entries may be a series label, a series key, or an x-axis value, and are matched case-insensitively. Omit it when the answer treats every series equally.
-- The body must be valid JSON and one chart per fence. Write the JSON on a single line exactly as shown above; do not pretty-print or indent it. Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
+- Plot only numbers returned by tools in this turn; never invent, extrapolate, or round data points into a chart.
 - Charts must be exactly right, so verify the data before you plot it:
   - Check that the rows you are about to chart actually match what was asked — the right entities and the right time range. A tool can return data that ignores a filter you passed. If the rows do not match the question, do NOT chart them; call the tool again with the correct filter parameters.
   - If a result says rows were omitted, truncated, or that more pages are available, narrow the query with that tool's filter parameters until the rows you need are all visible. Never chart a partial slice as if it were complete.
   - Never fill a gap by interpolating, averaging, or recalling a figure from memory. If the data cannot be retrieved, say so plainly and omit the chart rather than plotting something unverified.
-- Emitting a chart block is an ordinary Explore-mode answer format. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the tools and writing a chart block — never by calling request_plugin_build.
+- Calling present_chart is ordinary Explore-mode presentation. It is NOT a plugin change, a result card, or a code edit. A request to chart, graph, or plot data you can already retrieve is answered by calling the data tools and then present_chart — never by calling request_plugin_build.
 
 Available installed API tools: ${names}.`;
+}
+
+// The five schedules the Rust validator and the confirmation editor accept.
+// Anything the user asks for is mapped onto one of these; there is no hourly,
+// minute-level, or Monday-to-Friday schedule.
+export const SCHEDULE_FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+
+// A model that guesses a value wrong gets this back verbatim. The previous
+// rejection said only "must be equal to constant", which named no legal value
+// and sent Kimi through thirteen rounds of guessing, so the help has to be the
+// literal argument object rather than a description of it.
+export const SCHEDULED_TASK_ARGUMENT_HELP = [
+  'request_scheduled_task takes exactly these arguments:',
+  '',
+  '{',
+  '  "name": "Weekday X trends",              // required — short label',
+  '  "prompt": "Report what is trending ...", // required — the work to do on each run',
+  '  "frequency": "daily",                    // optional — daily | weekly | monthly | quarterly | yearly',
+  '  "time": "07:00",                         // optional — local 24-hour HH:MM',
+  '  "dayOfWeek": 1,                          // optional — weekly only, Monday=1 ... Sunday=7',
+  '  "dayOfMonth": 15,                        // optional — monthly/quarterly/yearly only, 1-31',
+  '  "monthOfYear": 8,                        // optional — quarterly/yearly only, 1-12',
+  '  "destinationType": "newChat",            // optional — newChat | existingChat',
+  '  "destinationChatId": "chat-abc123"       // optional — only for existingChat',
+  '}',
+  '',
+  'Only name and prompt are required. Every other argument is optional, is repaired',
+  'when it is close, and is defaulted when it is missing or unusable — so send one',
+  'best-guess call and never retry this tool to search for accepted values.'
+].join('\n');
+
+// How many unusable calls the tool answers with help before it stops answering
+// at all. Without a cap the model can retry until it exhausts the turn.
+export const MAX_SCHEDULED_TASK_REJECTIONS = 2;
+
+const NOTE_UNRECOGNIZED =
+  'The requested repeat was not recognised, so this defaults to every day. Pick the schedule you want.';
+const NOTE_WEEKDAYS =
+  'Raynard cannot schedule Monday to Friday only. This runs every day instead — switch it to Weekly for a single weekday.';
+const NOTE_SUB_DAILY = 'Raynard’s shortest schedule is daily, so this runs once a day at the time below.';
+const NOTE_EVERY_OTHER_WEEK = 'Raynard cannot skip weeks, so this runs every week.';
+const NOTE_UNKNOWN_CHAT =
+  'That destination chat could not be found, so results go to a dedicated task chat. Choose another destination if you meant an existing one.';
+
+// Ordered: the first match wins, so "weekdays" is caught before "week" and
+// "every 3 months" before "month".
+const FREQUENCY_PATTERNS = [
+  [/week ?day|work ?day|business day|mon(day)?\s*(-|–|to|through|thru)\s*fri(day)?/, 'daily', NOTE_WEEKDAYS],
+  [/minute|hourly|hour|\d+\s*h\b/, 'daily', NOTE_SUB_DAILY],
+  [/fortnight|bi[- ]?weekly|every other week|every 2 weeks|every two weeks/, 'weekly', NOTE_EVERY_OTHER_WEEK],
+  [/quarter|every 3 months|every three months/, 'quarterly', ''],
+  [/annual|year/, 'yearly', ''],
+  [/month/, 'monthly', ''],
+  [/week/, 'weekly', ''],
+  [/dai?ly|every day|each day|nightly|day/, 'daily', '']
+];
+
+const WEEKDAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+const MONTH_NAMES = [
+  'january',
+  'february',
+  'march',
+  'april',
+  'may',
+  'june',
+  'july',
+  'august',
+  'september',
+  'october',
+  'november',
+  'december'
+];
+
+function pad(value) {
+  return String(value).padStart(2, '0');
+}
+
+// Returns a usable frequency for every input, plus the sentence the user needs
+// when the answer is an approximation rather than what they asked for.
+export function normalizeScheduleFrequency(raw) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ');
+  if (!text) return { frequency: 'daily', note: NOTE_UNRECOGNIZED };
+  if (SCHEDULE_FREQUENCIES.includes(text)) return { frequency: text, note: '' };
+  for (const [pattern, frequency, note] of FREQUENCY_PATTERNS) {
+    if (pattern.test(text)) return { frequency, note };
+  }
+  return { frequency: 'daily', note: NOTE_UNRECOGNIZED };
+}
+
+// Accepts "07:00", "7:00", "7am", "7 PM", and falls back rather than failing.
+export function normalizeScheduleTime(raw, fallback) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\./g, '');
+  if (!text) return fallback;
+  const match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) return fallback;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  if (match[3] === 'am') hour = hour === 12 ? 0 : hour;
+  else if (match[3] === 'pm') hour = hour === 12 ? 12 : hour + 12;
+  if (hour > 23 || minute > 59) return fallback;
+  return `${pad(hour)}:${pad(minute)}`;
+}
+
+// Monday=1 through Sunday=7, also accepting cron's Sunday=0 and day names.
+export function normalizeDayOfWeek(raw, fallback) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (/^\d+$/.test(text)) {
+    const value = Number(text);
+    if (value === 0) return 7;
+    return value >= 1 && value <= 7 ? value : fallback;
+  }
+  const index = WEEKDAY_NAMES.findIndex((name) => name.startsWith(text.slice(0, 3)));
+  return index >= 0 ? index + 1 : fallback;
+}
+
+export function normalizeMonthOfYear(raw, fallback) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (/^\d+$/.test(text)) {
+    const value = Number(text);
+    return value >= 1 && value <= 12 ? value : fallback;
+  }
+  const index = MONTH_NAMES.findIndex((name) => name.startsWith(text.slice(0, 3)));
+  return index >= 0 ? index + 1 : fallback;
+}
+
+export function normalizeDayOfMonth(raw, fallback) {
+  const text = String(raw ?? '').trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const value = Number(text);
+  return value >= 1 && value <= 31 ? value : fallback;
+}
+
+export function normalizeDestinationType(raw) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, '');
+  if (!text) return 'newChat';
+  if (/^(existingchat|existing|current|thischat|this|samechat|same)$/.test(text)) return 'existingChat';
+  return 'newChat';
+}
+
+// A short label derived from the work itself, so a call that supplied only a
+// prompt still produces a nameable task instead of being rejected.
+function nameFromPrompt(prompt) {
+  const sentence = prompt.split(/(?<=[.!?])\s|\n/)[0].trim();
+  const source = sentence || prompt;
+  if (source.length <= 60) return source;
+  const clipped = source.slice(0, 60);
+  const boundary = clipped.lastIndexOf(' ');
+  return `${(boundary > 20 ? clipped.slice(0, boundary) : clipped).trim()}…`;
 }
 
 export function createScheduledTaskTool(Type, onRequest, options = {}) {
   const context = options.context || {};
   const now = new Date(context.localDateTime || Date.now());
   const validNow = Number.isNaN(now.getTime()) ? new Date() : now;
-  const defaultTime = `${String(validNow.getHours()).padStart(2, '0')}:${String(validNow.getMinutes()).padStart(2, '0')}`;
+  const defaultTime = `${pad(validNow.getHours())}:${pad(validNow.getMinutes())}`;
   const knownChats = new Set(
     (Array.isArray(context.chats) ? context.chats : []).map((chat) => String(chat.id || ''))
   );
   if (context.currentChatId) knownChats.add(String(context.currentChatId));
+  let rejections = 0;
+  // Deliberately plain strings and integers rather than Type.Union/Type.Literal.
+  // TypeBox renders a union of literals as anyOf/const, which some providers do
+  // not surface to the model at all: Kimi K2.5 invented five frequency values
+  // that matched the real anyOf only in count. A described string reads
+  // correctly everywhere, and execute below repairs whatever arrives.
+  const numberOrString = (description) => Type.Union([Type.Integer(), Type.String()], { description });
   return {
     name: 'request_scheduled_task',
     label: 'Request Scheduled Task',
-    description:
-      'Prepare recurring work for host-rendered user confirmation. This does not create the task until the user confirms it.',
+    description: `Prepare recurring work for the user to confirm. Nothing is created until the user confirms it in an editable form, so one best-guess call is always better than a retry.
+
+Raynard runs a task daily, weekly, monthly, quarterly, or yearly at a single local clock time. There is no hourly, minute-level, or Monday-to-Friday schedule; pick the closest one and the user adjusts it.
+
+Only name and prompt are required. Omit any part of the schedule you are unsure of and the user selects it. This tool never fails because of a schedule it did not understand.
+
+${SCHEDULED_TASK_ARGUMENT_HELP}`,
     parameters: Type.Object({
-      name: Type.String({ description: 'Concise task name.' }),
-      prompt: Type.String({ description: 'The work to perform each run, without scheduling language.' }),
-      destinationType: Type.Optional(Type.Union([Type.Literal('newChat'), Type.Literal('existingChat')])),
-      destinationChatId: Type.Optional(Type.String({ description: 'Exact saved chat ID for an existing-chat destination.' })),
-      frequency: Type.Union([
-        Type.Literal('daily'),
-        Type.Literal('weekly'),
-        Type.Literal('monthly'),
-        Type.Literal('quarterly'),
-        Type.Literal('yearly')
-      ]),
-      time: Type.Optional(Type.String({ description: 'Local 24-hour clock time in HH:MM.' })),
-      dayOfWeek: Type.Optional(Type.Integer({ description: 'Monday=1 through Sunday=7.' })),
-      dayOfMonth: Type.Optional(Type.Integer({ description: 'Calendar day from 1 through 31.' })),
-      monthOfYear: Type.Optional(Type.Integer({ description: 'Anchor month from 1 through 12.' }))
+      // Optional in the schema even though both are required in practice: a
+      // schema-level rejection is raised by pi before execute runs, so its
+      // message cannot carry SCHEDULED_TASK_ARGUMENT_HELP. Letting every call
+      // reach execute is what makes the failure message teach.
+      name: Type.Optional(
+        Type.String({ description: 'Required. Concise task name, for example "Weekday X trends".' })
+      ),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            'Required. The work to perform on each run, with scheduling language removed.'
+        })
+      ),
+      frequency: Type.Optional(
+        Type.String({
+          description:
+            'One of daily, weekly, monthly, quarterly, yearly. Omit it when the request does not map cleanly and the user will choose.'
+        })
+      ),
+      time: Type.Optional(
+        Type.String({ description: 'Local 24-hour clock time as HH:MM, for example "07:00".' })
+      ),
+      dayOfWeek: Type.Optional(numberOrString('Weekly schedules only. Monday=1 through Sunday=7.')),
+      dayOfMonth: Type.Optional(
+        numberOrString('Monthly, quarterly, and yearly schedules only. Calendar day 1 through 31.')
+      ),
+      monthOfYear: Type.Optional(
+        numberOrString('Quarterly and yearly schedules only. Anchor month 1 through 12.')
+      ),
+      destinationType: Type.Optional(
+        Type.String({
+          description: 'Either "newChat" for a dedicated task chat (the default) or "existingChat".'
+        })
+      ),
+      destinationChatId: Type.Optional(
+        Type.String({
+          description: 'Exact saved chat ID. Required only when destinationType is "existingChat".'
+        })
+      )
     }),
     executionMode: 'sequential',
     execute: async (_toolCallId, args) => {
-      const frequency = String(args?.frequency || '');
-      const destinationType = args?.destinationType === 'existingChat' ? 'existingChat' : 'newChat';
-      const destinationChatId = String(args?.destinationChatId || '').trim();
-      if (destinationType === 'existingChat' && !knownChats.has(destinationChatId)) {
-        return {
-          content: [{ type: 'text', text: 'That destination chat is not available. Clarify which saved chat to use.' }],
-          details: { type: 'scheduled-task-request-rejected', reason: 'unknown-chat' },
-          terminate: false
-        };
-      }
-      const request = {
-        name: String(args?.name || '').trim().slice(0, 120),
-        prompt: String(args?.prompt || '').trim(),
-        destinationType,
-        destinationChatId: destinationType === 'existingChat' ? destinationChatId : undefined,
-        schedule: {
-          frequency,
-          time: /^\d{2}:\d{2}$/.test(String(args?.time || '')) ? String(args.time) : defaultTime,
-          timeZone: String(context.timeZone || 'UTC'),
-          dayOfWeek:
-            frequency === 'weekly'
-              ? Number(args?.dayOfWeek) || ((validNow.getDay() + 6) % 7) + 1
-              : undefined,
-          dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
-            ? Number(args?.dayOfMonth) || validNow.getDate()
-            : undefined,
-          monthOfYear: ['quarterly', 'yearly'].includes(frequency)
-            ? Number(args?.monthOfYear) || validNow.getMonth() + 1
-            : undefined
+      const suppliedName = String(args?.name || '').trim().slice(0, 120);
+      const suppliedPrompt = String(args?.prompt || '').trim();
+      // The work itself is the only thing that cannot be defaulted. Either
+      // field alone is enough to build a task the user can finish editing.
+      if (!suppliedName && !suppliedPrompt) {
+        rejections += 1;
+        if (rejections > MAX_SCHEDULED_TASK_REJECTIONS) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Scheduling was abandoned after ${rejections} calls with no name and no prompt. Do not call request_scheduled_task again in this turn. Tell the user no task was created and ask what the recurring prompt should be.`
+              }
+            ],
+            details: { type: 'scheduled-task-request-rejected', reason: 'retry-cap' },
+            terminate: true
+          };
         }
-      };
-      if (!request.name || !request.prompt) {
         return {
-          content: [{ type: 'text', text: 'A scheduled task needs both a name and an execution prompt.' }],
+          content: [
+            {
+              type: 'text',
+              text: `A scheduled task needs a prompt describing the work, a name, or both. Everything else is optional.\n\n${SCHEDULED_TASK_ARGUMENT_HELP}`
+            }
+          ],
           details: { type: 'scheduled-task-request-rejected', reason: 'missing-content' },
           terminate: false
         };
       }
+      const prompt = suppliedPrompt || suppliedName;
+      const name = suppliedName || nameFromPrompt(prompt).slice(0, 120);
+
+      const { frequency, note: frequencyNote } = normalizeScheduleFrequency(args?.frequency);
+      const destinationChatId = String(args?.destinationChatId || '').trim();
+      let destinationType = normalizeDestinationType(args?.destinationType);
+      // A chat ID the host does not know is corrected to a dedicated chat
+      // rather than rejected: the destination is a dropdown in the very next
+      // thing the user sees, so a wrong guess costs them one click.
+      let destinationNote = '';
+      if (destinationType === 'existingChat' && !knownChats.has(destinationChatId)) {
+        destinationType = 'newChat';
+        destinationNote = NOTE_UNKNOWN_CHAT;
+      }
+      const scheduleNote = [frequencyNote, destinationNote].filter(Boolean).join(' ');
+
+      const request = {
+        name,
+        prompt,
+        destinationType,
+        destinationChatId: destinationType === 'existingChat' ? destinationChatId : undefined,
+        schedule: {
+          frequency,
+          time: normalizeScheduleTime(args?.time, defaultTime),
+          timeZone: String(context.timeZone || 'UTC'),
+          dayOfWeek:
+            frequency === 'weekly'
+              ? normalizeDayOfWeek(args?.dayOfWeek, ((validNow.getDay() + 6) % 7) + 1)
+              : undefined,
+          dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
+            ? normalizeDayOfMonth(args?.dayOfMonth, validNow.getDate())
+            : undefined,
+          monthOfYear: ['quarterly', 'yearly'].includes(frequency)
+            ? normalizeMonthOfYear(args?.monthOfYear, validNow.getMonth() + 1)
+            : undefined
+        },
+        // Shown above the confirmation form. This is the only way the user
+        // learns that their wording was approximated rather than honoured.
+        scheduleNote: scheduleNote || undefined
+      };
       onRequest(request);
       return {
-        content: [{ type: 'text', text: 'The scheduled task is ready for user confirmation.' }],
+        content: [
+          {
+            type: 'text',
+            text: scheduleNote
+              ? `The scheduled task is ready for user confirmation. The schedule was adjusted: ${scheduleNote} The user is being shown that note and can change the schedule before saving, so do not call this tool again.`
+              : 'The scheduled task is ready for user confirmation.'
+          }
+        ],
         details: { type: 'scheduled-task-request', ...request },
         terminate: true
       };
@@ -425,8 +653,20 @@ export function buildPiTypeFromSchema(Type, schemaNode) {
   }
 
   const options = schemaNode.description ? { description: String(schemaNode.description) } : {};
+  // Kept as a JSON Schema `enum`. Type.Union([Type.Literal(...)]) renders as
+  // anyOf/const, which some providers never surface to the model — it then
+  // guesses values and every call fails validation. Ajv enforces `enum` just as
+  // strictly, so this only changes what the model can read.
   if (Array.isArray(schemaNode.enum) && schemaNode.enum.length) {
-    return Type.Union(schemaNode.enum.map((value) => Type.Literal(value)), options);
+    const kinds = new Set(schemaNode.enum.map((value) => typeof value));
+    const kind = kinds.size === 1 ? [...kinds][0] : '';
+    return Type.Unsafe({
+      ...(kind === 'string' || kind === 'number' || kind === 'boolean'
+        ? { type: kind === 'number' ? 'number' : kind }
+        : {}),
+      enum: [...schemaNode.enum],
+      ...options
+    });
   }
   if (Array.isArray(schemaNode.anyOf) && schemaNode.anyOf.length) {
     return Type.Union(
@@ -838,6 +1078,155 @@ function normalizeSourceUrls(values) {
     } catch {}
   }
   return urls;
+}
+
+function presentChartText(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function presentChartNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const parsed = Number(value.trim().replace(/,/g, '').replace(/%$/, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Normalize the native chart tool's arguments to the renderer's ChartSpec contract. */
+export function normalizePresentedChart(args) {
+  const record = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const type = presentChartText(record.type);
+  if (type !== 'line' && type !== 'bar') throw new Error('Chart type must be line or bar.');
+
+  const x = presentChartText(record.x);
+  if (!x) throw new Error('Chart x is required.');
+
+  if (!Array.isArray(record.series) || !record.series.length) {
+    throw new Error('Chart series is required, including for a single-series chart.');
+  }
+  const seenSeries = new Set();
+  const series = record.series.slice(0, 8).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('Every chart series must be an object with a key.');
+    }
+    const key = presentChartText(entry.key);
+    if (!key || seenSeries.has(key)) throw new Error('Every chart series needs a unique key.');
+    const axis = presentChartText(entry.axis);
+    if (axis && axis !== 'left' && axis !== 'right') {
+      throw new Error(`Chart series "${key}" has an invalid axis.`);
+    }
+    seenSeries.add(key);
+    return {
+      key,
+      label: presentChartText(entry.label) || key,
+      ...(axis === 'right' ? { axis } : {})
+    };
+  });
+
+  const hasRightAxis = series.some((entry) => entry.axis === 'right');
+  const hasLeftAxis = series.some((entry) => entry.axis !== 'right');
+  if (hasRightAxis && !hasLeftAxis) {
+    throw new Error('A right-axis series requires at least one left-axis series.');
+  }
+  if (type === 'bar' && record.stacked === true && hasRightAxis) {
+    throw new Error('A stacked bar chart cannot use a right axis.');
+  }
+
+  if (!Array.isArray(record.rows) || !record.rows.length) throw new Error('Chart rows are required.');
+  let plottable = 0;
+  const rows = record.rows.slice(0, 200).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('Every chart row must be an object.');
+    }
+    const rawX = entry[x];
+    const row = { [x]: typeof rawX === 'number' ? rawX : presentChartText(rawX) || '' };
+    for (const item of series) {
+      if (item.key === x) continue;
+      const numeric = presentChartNumber(entry[item.key]);
+      row[item.key] = numeric;
+      if (numeric !== null) plottable += 1;
+    }
+    return row;
+  });
+  if (!plottable) throw new Error('No chart series key resolves to a numeric row value.');
+
+  const highlight = Array.isArray(record.highlight)
+    ? [...new Set(record.highlight.map(presentChartText).filter(Boolean))].slice(0, 8)
+    : [];
+  const sources = Array.isArray(record.sources)
+    ? [...new Set(record.sources.map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 8)
+    : [];
+
+  return {
+    type,
+    ...(presentChartText(record.title) ? { title: presentChartText(record.title) } : {}),
+    x,
+    ...(presentChartText(record.xLabel) ? { xLabel: presentChartText(record.xLabel) } : {}),
+    ...(presentChartText(record.yLabel) ? { yLabel: presentChartText(record.yLabel) } : {}),
+    ...(hasRightAxis && presentChartText(record.rightYLabel)
+      ? { rightYLabel: presentChartText(record.rightYLabel) }
+      : {}),
+    ...(type === 'bar' && record.stacked === true ? { stacked: true } : {}),
+    ...(highlight.length ? { highlight } : {}),
+    ...(sources.length ? { sources } : {}),
+    series,
+    rows
+  };
+}
+
+/**
+ * Present a validated chart as structured host data rather than model-authored
+ * JSON inside Markdown. Invalid arguments become an ordinary tool error, giving
+ * the agent another round in which to correct them.
+ */
+export function createPresentChartTool(Type, onPresentChart = () => {}) {
+  const cell = Type.Union([Type.String(), Type.Number(), Type.Null()]);
+  return {
+    name: 'present_chart',
+    label: 'Present Chart',
+    description:
+      'Attach one validated line or bar chart to this answer after retrieving the plotted values from API tools in the current turn. Call once per chart. Always declare series explicitly, even when there is only one. After this succeeds, write concise interpretation only: never repeat the chart as JSON, a chart fence, or a Markdown table.',
+    parameters: Type.Object({
+      type: Type.Union([Type.Literal('line'), Type.Literal('bar')]),
+      title: Type.Optional(Type.String()),
+      x: Type.String({ description: 'Row key used for the horizontal axis.' }),
+      xLabel: Type.Optional(Type.String()),
+      yLabel: Type.Optional(Type.String()),
+      rightYLabel: Type.Optional(Type.String()),
+      stacked: Type.Optional(Type.Boolean({ description: 'Bar charts only.' })),
+      highlight: Type.Optional(Type.Array(Type.String(), { maxItems: 8 })),
+      sources: Type.Optional(
+        Type.Array(Type.Integer({ minimum: 1 }), {
+          maxItems: 8,
+          description: 'Citation numbers for the API calls that supplied the plotted rows.'
+        })
+      ),
+      series: Type.Array(
+        Type.Object({
+          key: Type.String({ description: 'Numeric key present on the row objects.' }),
+          label: Type.Optional(Type.String()),
+          axis: Type.Optional(Type.Union([Type.Literal('left'), Type.Literal('right')]))
+        }),
+        { minItems: 1, maxItems: 8 }
+      ),
+      rows: Type.Array(Type.Record(Type.String(), cell), { minItems: 1, maxItems: 200 })
+    }),
+    executionMode: 'sequential',
+    execute: async (_toolCallId, args) => {
+      const chart = normalizePresentedChart(args);
+      onPresentChart(chart);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'The chart is attached to the answer. Continue with concise interpretation only; do not reproduce its rows or JSON.'
+          }
+        ],
+        details: { type: 'presented-chart', chart }
+      };
+    }
+  };
 }
 
 export function createDirectAnswerTool(Type, onDirectAnswer) {

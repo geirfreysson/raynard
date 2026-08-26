@@ -1,4 +1,5 @@
 import type { ChartSource } from '../chart-sources';
+import type { ChartSpec } from '../chart-spec';
 import type { ExtensionRecommendation } from '../extension-recommendation';
 import type { StoredResultCard } from '../result-card/types';
 import type { SharedAnswerPayload } from './types';
@@ -15,6 +16,7 @@ export type ImportedShareMessage = {
   timestamp: number;
   status?: 'completed';
   cards?: StoredResultCard[];
+  charts?: ChartSpec[];
   sources?: ChartSource[];
 };
 
@@ -35,6 +37,7 @@ export function messagesFromSharedPayload(
     status: 'completed'
   };
   if (payload.cards?.length) assistant.cards = payload.cards;
+  if (payload.charts?.length) assistant.charts = payload.charts;
   if (payload.sources?.length) assistant.sources = payload.sources;
 
   return {

@@ -159,13 +159,33 @@ function PromptShowcases() {
               {showcase.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}
             </ul>
           </div>
-          <div
-            className={styles.screenshotPlaceholder}
-            role="img"
-            aria-label={showcase.mediaLabel}
-          >
-            <span>{showcases.placeholderText}</span>
-          </div>
+          {showcase.video ? (
+            <video
+              className={styles.showcaseMedia}
+              aria-label={showcase.mediaLabel}
+              autoPlay
+              muted
+              loop
+              playsInline
+              controls
+              preload="metadata"
+            >
+              <source src={showcase.video} type="video/mp4" />
+            </video>
+          ) : showcase.image ? (
+            <img
+              className={styles.showcaseMedia}
+              src={showcase.image}
+              alt={showcase.mediaLabel}
+              width="1920"
+              height="1200"
+              loading="lazy"
+            />
+          ) : (
+            <div className={styles.screenshotPlaceholder} role="img" aria-label={showcase.mediaLabel}>
+              <span>{showcases.placeholderText}</span>
+            </div>
+          )}
         </article>
       ))}
     </section>

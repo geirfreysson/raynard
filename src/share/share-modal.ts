@@ -13,6 +13,7 @@
 
 import { bookmarkPreview } from '../bookmarks';
 import type { ChartSource } from '../chart-sources';
+import type { ChartSpec } from '../chart-spec';
 import { hydrateResultCards, type ResultArtifactLoader } from '../result-card/artifacts';
 import type { StoredResultCard } from '../result-card/types';
 import { shareLinkFor } from './codec';
@@ -22,7 +23,12 @@ import type { ShareExtension, SharedAnswerPayload } from './types';
 
 export type ShareModalInput = {
   question: string;
-  message: { text: string; cards?: StoredResultCard[]; sources?: ChartSource[] };
+  message: {
+    text: string;
+    cards?: StoredResultCard[];
+    charts?: ChartSpec[];
+    sources?: ChartSource[];
+  };
   extensions: ShareExtension[];
   loadArtifact: ResultArtifactLoader;
   baseUrl: string;

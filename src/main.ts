@@ -73,9 +73,10 @@ import {
 } from './extension-onboarding';
 import { attachExternalLinkHandler } from './external-links';
 import { agentActivityLabel } from './agent-activity';
-import { parseChartSpec } from './chart-spec';
+import { parseChartSpec, type ChartSpec } from './chart-spec';
 import { normalizeChartFenceBoundaries } from './chart-markdown';
 import { renderChart, unmountChart } from './chart-mount';
+import { extractPresentedChart, normalizeStoredCharts } from './presented-chart';
 import { wrapCopyable } from './copy-affordance';
 import { writeClipboard } from './clipboard';
 import { chartRootToPngBlob, chartSpecToMarkdown, tableToPngBlob } from './copy-export';
@@ -124,13 +125,17 @@ import {
   isOutputActivity,
   isReasoningActivity,
   isStatusActivity,
+  isToolSummaryActivity,
   planBuilderTimeline,
+  projectBuilderTimeline,
   type BuilderActivity,
   type BuilderOutputActivity,
   type BuilderReasoningActivity,
   type BuilderStatusActivity,
+  type BuilderTimelineSlot,
   type BuilderToolActivity,
-  type BuilderToolEvent
+  type BuilderToolEvent,
+  type BuilderToolSummaryActivity
 } from './builder-activity';
 import { decideChatNavigation } from './navigation-state';
 import {
@@ -258,6 +263,8 @@ type StoredChatMessage = {
   /** Tool calls and reasoning in the order they happened. */
   builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
+  /** Native present_chart results, rendered beneath the answer text. */
+  charts?: ChartSpec[];
   /**
    * The API calls that fed this turn, one entry per citing tool call. Persisted
    * so a chart copied out of a reloaded chat still names its data sources.
@@ -4496,6 +4503,8 @@ async function runScheduledExecution(execution: ScheduledExecution) {
             assistantRecord.thinking = thinking.trim() || undefined;
           },
           onToolResult: (toolCall) => {
+            const chart = extractPresentedChart(toolCall.result);
+            if (chart) (assistantRecord.charts ??= []).push(chart);
             const pluginName = pluginNameForTool(toolCall.toolName);
             const card = extractResultCard(toolCall, pluginName);
             let cardIndex: number | undefined;
@@ -4830,6 +4839,7 @@ function renderStoredTranscript() {
   chatMessages = storedMessages
     .filter((message) => !message.modeStatus)
     .map((message) => ({ role: message.role, content: message.text }));
+  messages.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
   messages.innerHTML = '';
   for (const message of storedMessages) {
     renderStoredMessage(message);
@@ -5013,6 +5023,9 @@ function renderStoredMessage(message: StoredChatMessage) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderModelFailure(body, message.modelFailure);
   }
+  if (message.role === 'assistant' && message.status !== 'running' && message.charts?.length) {
+    renderMessageCharts(article, message.charts, messageContext(message));
+  }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
   }
@@ -5078,7 +5091,16 @@ function renderScheduledTaskConfirmation(body: HTMLElement, record: StoredChatMe
   const hint = document.createElement('p');
   hint.textContent = 'Review the recurring prompt and schedule. Nothing is saved until you confirm.';
   const editor = document.createElement('div');
-  panel.append(title, hint, editor);
+  panel.append(title, hint);
+  // The panel replaces the assistant's text, so a schedule the agent had to
+  // approximate would otherwise be applied silently.
+  if (request.scheduleNote) {
+    const note = document.createElement('p');
+    note.className = 'scheduled-task-note';
+    note.textContent = request.scheduleNote;
+    panel.append(note);
+  }
+  panel.append(editor);
   body.replaceChildren(panel);
   renderTaskEditor(editor, request, {
     submitLabel: 'Create task',
@@ -5198,6 +5220,7 @@ function shareMessage(message: StoredChatMessage) {
     message: {
       text: message.text,
       cards: message.cards && withPluginNames(message.cards),
+      charts: message.charts,
       sources: message.sources
     },
     extensions: shareExtensionsForCards(message.cards ?? []),
@@ -5623,6 +5646,10 @@ async function startAgentTurn(content: string) {
         assistantRecord.status = 'running';
         activeToolName = undefined;
         refreshActivity();
+        const chart = extractPresentedChart(toolCall.result);
+        if (chart) {
+          (assistantRecord.charts ??= []).push(chart);
+        }
         const pluginName = pluginNameForTool(toolCall.toolName);
         const resultCard = extractResultCard(toolCall, pluginName);
         let cardIndex: number | undefined;
@@ -5713,6 +5740,7 @@ async function startAgentTurn(content: string) {
               messageContext(assistantRecord)
             );
           }
+          renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
           pending.classList.remove('pending');
           syncMessageActions(pending, assistantRecord);
         }
@@ -5823,6 +5851,7 @@ async function startAgentTurn(content: string) {
       if (pendingBody) {
         renderMessageText(pendingBody, finalContent, true, messageContext(assistantRecord));
       }
+      renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
       pending.classList.remove('pending');
       if (recommendedExtension) {
         renderExtensionRecommendation(pending, recommendedExtension);
@@ -5973,6 +6002,7 @@ function syncRemountedRun(
       renderModelFailure(body, record.modelFailure);
     } else if (body) {
       renderMessageText(body, record.text, record.role === 'assistant', messageContext(record));
+      renderMessageCharts(article, record.charts, messageContext(record));
       if (record.cards?.length) renderMessageCards(article, record.cards);
       if (record.extensionRecommendation) {
         renderExtensionRecommendation(article, record.extensionRecommendation);
@@ -6698,7 +6728,11 @@ function renderBuilderRun(
       timeline.className = 'builder-timeline';
       container.insertBefore(timeline, summaryEl());
     }
-    reconcileBuilderTimeline(timeline, activities, live && message.status === 'running');
+    reconcileBuilderTimeline(
+      timeline,
+      projectBuilderTimeline(activities),
+      live && message.status === 'running'
+    );
   } else {
     if (timeline) timeline.remove();
     if (message.status === 'running') {
@@ -6771,7 +6805,7 @@ function renderBuilderRun(
 // maps to activity i: either patch the existing card or append a new one.
 function reconcileBuilderTimeline(
   timeline: HTMLElement,
-  activities: BuilderActivity[],
+  activities: BuilderTimelineSlot[],
   live: boolean
 ) {
   const existingIds = Array.from(timeline.children).map(
@@ -6781,6 +6815,17 @@ function reconcileBuilderTimeline(
   for (const op of ops) {
     const activity = activities[op.index];
     const existing = timeline.children[op.index] as HTMLElement | undefined;
+    if (isToolSummaryActivity(activity)) {
+      if (op.action === 'reuse' && existing) {
+        updateBuilderToolSummaryCard(existing as HTMLDetailsElement, activity);
+      } else {
+        timeline.insertBefore(
+          renderBuilderToolSummaryCard(activity),
+          timeline.children[op.index] ?? null
+        );
+      }
+      continue;
+    }
     if (isReasoningActivity(activity)) {
       // A slot can change kind only by insertion, since ids never collide.
       if (op.action === 'reuse' && existing) {
@@ -6905,6 +6950,9 @@ function renderBuilderToolCard(activity: BuilderToolActivity) {
   details.dataset.toolCallId = activity.toolCallId;
 
   const summary = document.createElement('summary');
+  const icon = document.createElement('span');
+  icon.className = 'builder-tool-icon';
+  summary.appendChild(icon);
   const identity = document.createElement('span');
   identity.className = 'builder-tool-identity';
   const name = document.createElement('strong');
@@ -6927,6 +6975,10 @@ function renderBuilderToolCard(activity: BuilderToolActivity) {
   return details;
 }
 
+// A finished, successful call fades from a full card down to one quiet line —
+// same treatment as the reasoning/status entries around it — so only what's
+// actively running or actually failed still reads as a card competing for
+// attention. Clicking it still opens the full arguments/output for debugging.
 function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToolActivity) {
   const cls = `builder-tool is-${activity.status}`;
   if (details.className !== cls) details.className = cls;
@@ -6943,6 +6995,10 @@ function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToo
     details.dataset.autoOpen = shouldOpen ? '1' : '0';
   }
 
+  const icon = details.querySelector('.builder-tool-icon');
+  const iconGlyph =
+    activity.status === 'complete' ? '✓' : activity.status === 'error' ? '✕' : '';
+  if (icon && icon.textContent !== iconGlyph) icon.textContent = iconGlyph;
   const name = details.querySelector('.builder-tool-identity strong');
   if (name && name.textContent !== activity.toolName) name.textContent = activity.toolName;
   const preview = details.querySelector('.builder-tool-preview');
@@ -6953,7 +7009,9 @@ function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToo
   const subject = `${activity.toolName} — ${builderToolArgsSubject(activity.args)}`;
   if (summary && summary.title !== subject) summary.title = subject;
   const status = details.querySelector('.builder-tool-status');
-  if (status && status.textContent !== activity.status) status.textContent = activity.status;
+  // The icon already says "done" for a completed call, so the word would be redundant.
+  const statusText = activity.status === 'complete' ? '' : activity.status;
+  if (status && status.textContent !== statusText) status.textContent = statusText;
 
   const body = details.querySelector<HTMLElement>('.builder-tool-body');
   if (body) {
@@ -6963,6 +7021,53 @@ function updateBuilderToolCard(details: HTMLDetailsElement, activity: BuilderToo
     } else {
       body.querySelector('[data-block="output"]')?.remove();
     }
+  }
+}
+
+// One persistent counter for every finished, successful tool call, instead of
+// a new quiet line per call. It stays at the position where the first call
+// completed and just updates its count as more land, so a long build doesn't
+// scroll the transcript out from under whatever's actively running. Expanding
+// it lists each finished call as the same quiet line, still individually
+// expandable for its arguments/output.
+function renderBuilderToolSummaryCard(activity: BuilderToolSummaryActivity) {
+  const details = document.createElement('details');
+  details.className = 'builder-tool-summary';
+  details.dataset.toolCallId = activity.toolCallId;
+
+  const summary = document.createElement('summary');
+  const icon = document.createElement('span');
+  icon.className = 'builder-tool-icon';
+  icon.textContent = '✓';
+  summary.appendChild(icon);
+  const label = document.createElement('span');
+  label.className = 'builder-tool-summary-label';
+  summary.appendChild(label);
+  details.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.className = 'builder-tool-summary-body';
+  details.appendChild(body);
+
+  updateBuilderToolSummaryCard(details, activity);
+  return details;
+}
+
+function updateBuilderToolSummaryCard(
+  details: HTMLDetailsElement,
+  activity: BuilderToolSummaryActivity
+) {
+  const label = details.querySelector('.builder-tool-summary-label');
+  const labelText = `${activity.count} tool call${activity.count === 1 ? '' : 's'}`;
+  if (label && label.textContent !== labelText) label.textContent = labelText;
+
+  const body = details.querySelector<HTMLElement>('.builder-tool-summary-body');
+  if (!body) return;
+  // Each entry is terminal once folded in here, so only the newly arrived
+  // ones need a card — nothing already rendered ever changes again.
+  while (body.children.length < activity.entries.length) {
+    const entry = activity.entries[body.children.length];
+    body.appendChild(renderBuilderToolCard(entry));
   }
 }
 
@@ -7236,6 +7341,57 @@ function appendCitationLine(
   if (line) container.appendChild(line);
 }
 
+/** Mount one already-validated chart and its source line into a message block. */
+function appendRenderedChart(
+  container: HTMLElement,
+  spec: ChartSpec,
+  context: MessageContext,
+  suppressFallbackCitation = false,
+  fallbackSourceEntries?: string[]
+) {
+  const plotted = spec.sources ?? [];
+  const chartEntries = plotted.length
+    ? chartSourceEntries(context.sources, plotted)
+    : fallbackSourceEntries ?? chartSourceEntries(context.sources, []);
+  const chart = document.createElement('div');
+  chart.dataset.chartRoot = 'true';
+  const wrapper = wrapCopyable(chart, 'Copy chart', () => ({
+    text: chartSpecToMarkdown(spec),
+    image: () => chartRootToPngBlob(chart, spec, chartEntries)
+  }));
+  wrapper.classList.add('copyable-chart');
+  container.appendChild(wrapper);
+  const chartLine = plotted.length
+    ? createChartCitationLine(plotted, context.sources, context.cards)
+    : null;
+  if (chartLine) container.appendChild(chartLine);
+  else appendCitationLine(container, context, suppressFallbackCitation);
+  renderChart(chart, spec);
+}
+
+/**
+ * Structured present_chart results live outside the Markdown string. Rebuild
+ * their blocks after every streamed/final re-render and after chat reload.
+ */
+function renderMessageCharts(
+  article: HTMLElement,
+  charts: ChartSpec[] | undefined,
+  context: MessageContext
+) {
+  const body = article.querySelector<HTMLElement>(':scope > .message-text');
+  if (!body) return;
+  body.querySelectorAll<HTMLElement>(':scope > [data-presented-chart]').forEach((block) => {
+    block.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
+    block.remove();
+  });
+  for (const spec of normalizeStoredCharts(charts)) {
+    const block = document.createElement('div');
+    block.dataset.presentedChart = 'true';
+    appendRenderedChart(block, spec, context);
+    body.appendChild(block);
+  }
+}
+
 function renderMarkdownLightweight(
   container: HTMLElement,
   sourceText: string,
@@ -7284,26 +7440,9 @@ function renderMarkdownLightweight(
       if (language === 'chart') {
         const spec = parseChartSpec(block.join('\n'));
         if (spec) {
-          // A chart cites what it plotted, which only the spec knows: the turn's
-          // other calls found the data rather than supplying it.
-          const plotted = spec.sources ?? [];
-          const chartEntries = plotted.length
-            ? chartSourceEntries(context.sources, plotted)
-            : sourceEntries;
-          const chart = document.createElement('div');
-          chart.dataset.chartRoot = 'true';
-          const wrapper = wrapCopyable(chart, 'Copy chart', () => ({
-            text: chartSpecToMarkdown(spec),
-            image: () => chartRootToPngBlob(chart, spec, chartEntries)
-          }));
-          wrapper.classList.add('copyable-chart');
-          container.appendChild(wrapper);
-          const chartLine = plotted.length
-            ? createChartCitationLine(plotted, context.sources, context.cards)
-            : null;
-          if (chartLine) container.appendChild(chartLine);
-          else appendCitationLine(container, context, citedInline);
-          renderChart(chart, spec);
+          // Legacy saved answers may still contain chart fences. New answers
+          // arrive through present_chart and render outside the Markdown text.
+          appendRenderedChart(container, spec, context, citedInline, sourceEntries);
           continue;
         }
       }

@@ -305,3 +305,52 @@ export function applyBuilderToolEvent(
   if (existingIndex < 0) return [...activities, next];
   return activities.map((activity, index) => (index === existingIndex ? next : activity));
 }
+
+/** A running count of finished tool calls, folded into one slot in the timeline. */
+export type BuilderToolSummaryActivity = {
+  kind: 'tool-summary';
+  toolCallId: 'tool-summary';
+  count: number;
+  entries: BuilderToolActivity[];
+};
+
+export type BuilderTimelineSlot = BuilderActivity | BuilderToolSummaryActivity;
+
+export function isToolSummaryActivity(
+  activity: BuilderTimelineSlot
+): activity is BuilderToolSummaryActivity {
+  return (activity as BuilderToolSummaryActivity).kind === 'tool-summary';
+}
+
+function isFinishedTool(activity: BuilderActivity): activity is BuilderToolActivity {
+  return isToolActivity(activity) && activity.status === 'complete' && !activity.isError;
+}
+
+/**
+ * Folds completed, successful tool calls into one counter slot that stays at
+ * the position where the first one appeared, instead of adding a new
+ * timeline row per finished call — a long build would otherwise read as an
+ * ever-growing wall of identical "Complete" cards. A pending, streaming, or
+ * failed tool call is exactly the thing worth seeing live, so each of those
+ * still gets its own card at its natural position. A single finished call is
+ * left as itself — grouping needs at least two to be worth the label.
+ */
+export function projectBuilderTimeline(activities: BuilderActivity[]): BuilderTimelineSlot[] {
+  if (activities.filter(isFinishedTool).length < 2) return activities;
+
+  const slots: BuilderTimelineSlot[] = [];
+  let summary: BuilderToolSummaryActivity | undefined;
+  for (const activity of activities) {
+    if (isFinishedTool(activity)) {
+      if (!summary) {
+        summary = { kind: 'tool-summary', toolCallId: 'tool-summary', count: 0, entries: [] };
+        slots.push(summary);
+      }
+      summary.count += 1;
+      summary.entries.push(activity);
+      continue;
+    }
+    slots.push(activity);
+  }
+  return slots;
+}

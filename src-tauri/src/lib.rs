@@ -222,6 +222,10 @@ struct StoredChatMessage {
     /// Each entry is { toolName, template, data }; rendered beneath the message.
     #[serde(default)]
     cards: Option<Value>,
+    /// Native present_chart results. Opaque passthrough; the renderer validates
+    /// each ChartSpec again before mounting it.
+    #[serde(default)]
+    charts: Option<Value>,
     /// The API calls that fed this turn, one entry per citing tool call
     /// ({ plugin, label, sourceUrl }). Opaque passthrough so a chart copied out
     /// of a reloaded chat still names its data sources.
@@ -5265,6 +5269,7 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 shared_import: message.shared_import,
                 builder_activities: message.builder_activities,
                 cards: message.cards,
+                charts: message.charts,
                 sources: message.sources,
                 credential_request: message.credential_request,
                 extension_recommendation: message.extension_recommendation,
@@ -6726,6 +6731,7 @@ mod tests {
                 "template": { "name": { "singular": "row", "plural": "rows" }, "layout": [] },
                 "data": { "rows": [{ "payload": "x".repeat(140_000) }] }
             }])),
+            charts: None,
             sources: None,
             credential_request: None,
             extension_recommendation: None,
@@ -7448,6 +7454,7 @@ mod tests {
             shared_import: None,
             builder_activities: Some(activities.clone()),
             cards: None,
+            charts: None,
             sources: None,
             credential_request: None,
             extension_recommendation: None,
@@ -7694,6 +7701,7 @@ mod tests {
             shared_import: None,
             builder_activities: None,
             cards: None,
+            charts: None,
             sources: None,
             credential_request: None,
             extension_recommendation: None,
@@ -7725,6 +7733,7 @@ mod tests {
             shared_import: None,
             builder_activities: None,
             cards: None,
+            charts: None,
             sources: None,
             credential_request: None,
             extension_recommendation: None,
@@ -7746,6 +7755,27 @@ mod tests {
         assert_eq!(message.usage, None);
         assert_eq!(message.mode_status, None);
         assert_eq!(message.model_failure, None);
+    }
+
+    #[test]
+    fn structured_charts_survive_chat_normalization() {
+        let chart = json!({
+            "type": "bar",
+            "x": "event",
+            "series": [{ "key": "probability", "label": "Probability" }],
+            "rows": [{ "event": "Referendum", "probability": 54 }]
+        });
+        let raw = json!({
+            "role": "assistant",
+            "text": "The referendum is narrowly favored.",
+            "timestamp": 7,
+            "charts": [chart.clone()]
+        });
+        let message: StoredChatMessage =
+            serde_json::from_value(raw).expect("structured chart message must load");
+        let normalized = normalize_stored_messages(vec![message]);
+
+        assert_eq!(normalized[0].charts, Some(json!([chart])));
     }
 
     #[test]
@@ -7974,6 +8004,7 @@ mod tests {
                 shared_import: None,
                 builder_activities: None,
                 cards: None,
+                charts: None,
                 sources: None,
                 credential_request: Some(request.clone()),
                 extension_recommendation: Some(recommendation.clone()),
@@ -7998,6 +8029,7 @@ mod tests {
                 shared_import: None,
                 builder_activities: None,
                 cards: None,
+                charts: None,
                 sources: None,
                 credential_request: Some(request.clone()),
                 extension_recommendation: Some(recommendation.clone()),

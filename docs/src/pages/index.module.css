@@ -373,6 +373,7 @@
   grid-template-columns: 2fr 1fr;
 }
 
+.showcaseRowReverse .showcaseMedia,
 .showcaseRowReverse .screenshotPlaceholder {
   order: 1;
 }
@@ -435,6 +436,17 @@
   color: #5b6472;
   font-size: 14px;
   line-height: 1.7;
+}
+
+.showcaseMedia {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  background: #f0f1f3;
+  border: 1px solid #e3e6ea;
+  border-radius: 18px;
 }
 
 .screenshotPlaceholder {
@@ -517,6 +529,7 @@
     order: 1;
   }
 
+  .showcaseRowReverse .showcaseMedia,
   .showcaseRowReverse .screenshotPlaceholder {
     order: 2;
   }
