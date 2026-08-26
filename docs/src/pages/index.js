@@ -194,21 +194,21 @@ function Features() {
   );
 }
 
-function HowItWorks() {
-  const {howItWorks} = homepageCopy;
+function TechnicalDetails() {
+  const {technicalDetails} = homepageCopy;
 
   return (
-    <section className={clsx(styles.section, styles.stepsSection)}>
+    <section className={clsx(styles.section, styles.detailsSection)}>
       <div className={styles.sectionHeading}>
-        <p className={styles.eyebrow}>{howItWorks.eyebrow}</p>
-        <Heading as="h2">{howItWorks.title}</Heading>
+        <p className={styles.eyebrow}>{technicalDetails.eyebrow}</p>
+        <Heading as="h2">{technicalDetails.title}</Heading>
       </div>
-      <div className={styles.steps}>
-        {howItWorks.steps.map((step, index) => (
-          <article className={styles.step} key={step.title}>
-            <span className={styles.stepNumber}>{index + 1}</span>
-            <h3>{step.title}</h3>
-            <p>{step.body}</p>
+      <div className={styles.featureGrid}>
+        {technicalDetails.cards.map((card) => (
+          <article className={styles.featureCard} key={card.title}>
+            <span className={styles.featureIcon}>{card.icon}</span>
+            <h3>{card.title}</h3>
+            <p>{card.body}</p>
           </article>
         ))}
       </div>
@@ -236,7 +236,7 @@ export default function Home() {
         <Hero />
         <Features />
         <PromptShowcases />
-        <HowItWorks />
+        <TechnicalDetails />
         <CTA />
       </main>
     </Layout>

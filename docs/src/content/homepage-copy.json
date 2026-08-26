@@ -44,57 +44,49 @@
       "linuxTo": "/docs/getting-started#linux",
       "windowsInfoTo": "/docs/getting-started#windows"
     },
-    "demoLabel": "Product demo — cited answers from live API data"
+    "demoLabel": "Product demo — live market data, cited"
   },
   "extensions": {
     "enabled": false,
-    "heading": "40+ extensions, ready on install",
+    "heading": "Extensions, ready on install",
     "items": [
-      "Postgres",
-      "Snowflake",
-      "BigQuery",
-      "Stripe",
-      "Salesforce",
-      "HubSpot",
-      "Slack",
-      "Notion",
-      "Zendesk",
-      "QuickBooks",
-      "Shopify",
-      "Sheets",
-      "S3",
-      "MongoDB",
-      "Twilio",
-      "Plaid",
-      "Segment",
-      "Mixpanel",
-      "Airtable",
+      "X",
+      "Polymarket",
+      "Financial Modeling Prep",
+      "Hacker News",
+      "World Bank Data360",
+      "Eurostat",
+      "OECD Data Explorer",
+      "IMF SDMX",
+      "Fantasy Premier League",
+      "Open Library",
+      "D&D 5e",
       "Your API"
     ]
   },
   "features": {
-    "eyebrow": "Why Raynard",
-    "title": "Built for analysts who need proof",
+    "eyebrow": "Mechanics",
+    "title": "What it actually does",
     "cards": [
       {
         "icon": "”",
         "title": "Cited answers",
-        "body": "Every figure Raynard gives you links back to the source it came from."
+        "body": "Every number in an answer links back to the API response it came from."
       },
       {
         "icon": "⇄",
         "title": "Connect anything",
-        "body": "Send Raynard a link to an API’s docs and it can build the connection for you—no config files."
+        "body": "Give it a link to an API’s docs and it writes, tests, and calls the integration itself."
       },
       {
         "icon": "$",
-        "title": "Plain English, real numbers",
-        "body": "Ask questions the way you would ask a colleague. Get grounded numbers, not guesses."
+        "title": "Real numbers",
+        "body": "Figures come from the API’s response, not the model’s memory."
       },
       {
         "icon": "⌘",
         "title": "Native desktop app",
-        "body": "A desktop app for macOS, Linux, and Windows that keeps conversations, connections, and credentials under your control."
+        "body": "Runs on macOS, Linux, and Windows. Conversations and credentials stay on your machine."
       }
     ]
   },
@@ -103,39 +95,39 @@
     "placeholderText": "Screenshot",
     "items": [
       {
-        "title": "Ask about right now",
-        "prompt": "What are people on Hacker News actually arguing about today?",
-        "body": "That’s the Hacker News API. A stock, transit or in-house API works the same.",
+        "title": "One question, three sources",
+        "prompt": "Polymarket’s odds on the next Fed rate cut, what X is saying about it, and how the big banks have moved.",
+        "body": "Three extensions, one answer. Each number keeps the source it came from.",
         "bullets": [
-          "Fetched when you ask, not recalled",
-          "Shows the records behind the answer"
+          "The agent picks which tools to call",
+          "Cards render each source’s own data"
         ],
-        "mediaLabel": "Placeholder for a live Hacker News answer screenshot"
+        "mediaLabel": "Placeholder for a combined Fed-rate-cut answer citing Polymarket, X, and FMP screenshot"
       },
       {
         "title": "No invented numbers",
-        "prompt": "How does GDP per person in the EU compare with the US?",
-        "body": "Real figures from the World Bank, each linked to the record behind it.",
+        "prompt": "How expensive is Nvidia on P/E, EV/EBITDA, and free-cash-flow yield?",
+        "body": "Real figures from Financial Modeling Prep, each linked to the record behind it.",
         "bullets": [
           "The source data stays with the answer",
           "Send the whole thing as a link"
         ],
-        "mediaLabel": "Placeholder for a cited World Bank GDP comparison screenshot",
+        "mediaLabel": "Placeholder for a cited Nvidia valuation screenshot",
         "reverse": true
       },
       {
         "title": "The question that asks itself",
-        "prompt": "Every Monday: analyse Arsenal’s next match.",
+        "prompt": "Every weekday at 7am: what’s trending on X in London and New York.",
         "body": "Daily to yearly, in your time zone, waiting when you open the app.",
         "bullets": [
           "Lands in its own chat, or one you have",
           "Pause it, edit it, or run it early"
         ],
-        "mediaLabel": "Placeholder for a scheduled Fantasy Premier League task screenshot"
+        "mediaLabel": "Placeholder for a scheduled X trends task screenshot"
       },
       {
         "title": "And if it’s not on the list",
-        "prompt": "Add UK crime data — the docs are at data.police.uk/docs",
+        "prompt": "Add CoinGecko — the docs are at docs.coingecko.com",
         "body": "Any API with docs, including the one behind your company’s login.",
         "bullets": [
           "Built and tested once you approve it",
@@ -146,27 +138,35 @@
       }
     ]
   },
-  "howItWorks": {
-    "eyebrow": "How it works",
-    "title": "From question to receipt in three steps",
-    "steps": [
+  "technicalDetails": {
+    "eyebrow": "Under the hood",
+    "title": "How it’s actually built",
+    "cards": [
       {
-        "title": "Point it at your data",
-        "body": "Paste a link to an API’s docs or request a data source. Raynard sets up the extension after you approve it."
+        "icon": "⚷",
+        "title": "Credentials",
+        "body": "API keys live in the OS keychain, not in a config file or .env the app ships."
       },
       {
-        "title": "Ask in plain English",
-        "body": "No query language and no dashboard to build. Just type the question you actually have."
+        "icon": "⇌",
+        "title": "Tool calls",
+        "body": "Each API call is a real tool call inside the agent loop. The response feeds straight back into what the model reasons over next."
       },
       {
-        "title": "Get answers with receipts",
-        "body": "Every number retains its source, so you can double-check the evidence before you rely on it."
+        "icon": "✓",
+        "title": "Extensions",
+        "body": "Each one is TypeScript, covered by tests, and called against the live API once before it’s marked ready."
+      },
+      {
+        "icon": "↻",
+        "title": "Live vs. snapshot",
+        "body": "An opened share link shows the data it was sent with. Ask a follow-up and it queries again, live."
       }
     ]
   },
   "cta": {
-    "title": "Ready to talk data?",
-    "body": "Connect your sources and start asking questions.",
+    "title": "Download Raynard",
+    "body": "Connect a data source and ask your first question.",
     "action": {
       "label": "Choose your download",
       "to": "/docs/getting-started"

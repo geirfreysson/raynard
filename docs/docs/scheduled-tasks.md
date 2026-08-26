@@ -13,7 +13,8 @@ inspect the answer, its result cards, and its sources later.
 Ask for recurring work in the composer. Include the subject and timing in the
 same message, for example:
 
-- “Every day at 08:00, summarize the latest Hacker News stories.”
+- “Every weekday at 07:00, show what is trending on X in London and New
+  York.”
 - “On the first day of every month at 09:00, compare Icelandic inflation with
   the OECD.”
 - “At 09:00 on January 1 and every quarter after that, check how my fantasy

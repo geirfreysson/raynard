@@ -338,8 +338,7 @@
   border-radius: 10px;
 }
 
-.featureCard h3,
-.step h3 {
+.featureCard h3 {
   margin: 0 0 8px;
   color: #16233a;
   font-family: 'Inter', sans-serif;
@@ -347,8 +346,7 @@
   font-weight: 600;
 }
 
-.featureCard p,
-.step p {
+.featureCard p {
   margin: 0;
   color: #5b6472;
   font-size: 14px;
@@ -463,63 +461,13 @@
   text-transform: uppercase;
 }
 
-.stepsSection {
+.detailsSection {
   padding-top: 40px;
   padding-bottom: 96px;
 }
 
-.stepsSection .sectionHeading {
+.detailsSection .sectionHeading {
   margin-bottom: 64px;
-}
-
-.steps {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 40px;
-}
-
-.steps::before {
-  position: absolute;
-  top: 22px;
-  right: 16.5%;
-  left: 16.5%;
-  height: 1px;
-  content: '';
-  background: #e3e6ea;
-}
-
-.step {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-}
-
-.stepNumber {
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  margin-bottom: 24px;
-  color: #ffffff;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 16px;
-  font-weight: 700;
-  background: #16233a;
-  border-radius: 50%;
-}
-
-.step h3 {
-  margin-bottom: 10px;
-  font-size: 17px;
-}
-
-.step p {
-  max-width: 280px;
 }
 
 .cta {
@@ -589,13 +537,8 @@
     max-width: 320px;
   }
 
-  .featureGrid,
-  .steps {
+  .featureGrid {
     grid-template-columns: 1fr;
-  }
-
-  .steps::before {
-    display: none;
   }
 
   .section {

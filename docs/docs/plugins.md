@@ -14,8 +14,8 @@ sidebar_position: 6
       what you would like to do with the service.
     </p>
     <p className="plugin-creation-intro__example">
-      “Connect to the Hacker News API using
-      https://github.com/HackerNews/API and let me browse the top stories.”
+      “Connect to the CoinGecko API using https://docs.coingecko.com and let
+      me track coin prices.”
     </p>
     <p>
       Raynard will propose a plugin for you to review before it writes any code.
