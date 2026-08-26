@@ -260,6 +260,27 @@ background capability granted to generated plugins.
    call is `request_scheduled_task`. The tool returns a structured draft with a
    name, execution-only prompt, destination, recurrence, local time, and IANA
    time zone. It does not perform the requested research in that turn.
+   Only `name` and `prompt` matter, and both are optional in the schema: the
+   tool repairs what it can (`weekday`, `every 3 months`, `7am`, `monday`,
+   `new_chat`) and defaults the rest, because the very next thing the user sees
+   is an editable form. A schedule it could not honour — Monday-to-Friday,
+   anything sub-daily, an unfindable destination chat — is substituted and
+   explained in `scheduleNote`, which the confirmation renders above the form
+   and `taskDraftFromForm` drops before the draft reaches Rust. The only call
+   the tool refuses is one with neither a name nor a prompt; that refusal
+   returns `SCHEDULED_TASK_ARGUMENT_HELP`, the literal argument object, and
+   after `MAX_SCHEDULED_TASK_REJECTIONS` it terminates the turn instead of
+   inviting another guess.
+
+   None of that tolerance is decoration. Scheduling parameters were declared as
+   `Type.Union([Type.Literal(...)])`, which TypeBox renders as `anyOf`/`const`
+   and pi forwards verbatim; a provider that does not surface those constants
+   leaves the model guessing values that can only fail. Kimi K2.5 invented five
+   frequency names matching the real schema only in count, burned thirteen
+   rounds and 175k tokens on `must be equal to constant`, and created nothing.
+   Describe a constrained argument with a plain type plus a `description`
+   naming the values, or with the JSON Schema `enum` keyword that
+   `buildPiTypeFromSchema` now preserves — never with a union of literals.
 2. `src/main.ts` renders the draft as an editable confirmation. Saving calls
    `create_scheduled_task`; Rust validates the destination and calendar fields
    before persisting the task under app-local data at

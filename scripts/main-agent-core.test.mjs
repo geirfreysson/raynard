@@ -12,6 +12,12 @@ import {
   createModel,
   createPresentChartTool,
   createScheduledTaskTool,
+  MAX_SCHEDULED_TASK_REJECTIONS,
+  normalizeDayOfWeek,
+  normalizeScheduleFrequency,
+  normalizeScheduleTime,
+  SCHEDULE_FREQUENCIES,
+  SCHEDULED_TASK_ARGUMENT_HELP,
   createUsageTotal,
   addUsage,
   emptyUsage,
@@ -213,6 +219,202 @@ describe('main agent core', () => {
         })
       })
     ]);
+  });
+
+  // Kimi K2.5 called request_scheduled_task thirteen times and every call was
+  // rejected before execute ran, because Type.Union([Type.Literal(...)]) renders
+  // as anyOf/const and the model never saw the five legal values. These are the
+  // literal arguments it tried, replayed.
+  const KIMI_ATTEMPTS = [
+    { frequency: 'weekday', time: '07:00', destinationType: 'new_chat' },
+    { frequency: 'day', time: '07:00', destinationType: 'new_chat' },
+    { frequency: 'day', time: '07:00' },
+    { frequency: 'week', time: '07:00', dayOfWeek: 1 },
+    { frequency: 'hour', time: '07:00' },
+    { frequency: 'day', time: '07:00', dayOfWeek: 1 },
+    { frequency: 'Daily', time: '07:00' },
+    { frequency: 'day' },
+    { frequency: 'minute', minuteInterval: 60 },
+    { frequency: '1' }
+  ];
+
+  const scheduleContext = {
+    localDateTime: '2026-08-23T14:30:00Z',
+    timeZone: 'Europe/London',
+    chats: [{ id: 'chat-one', name: 'Inflation research' }]
+  };
+
+  const scheduleTool = (requests) =>
+    createScheduledTaskTool(Type, (request) => requests.push(request), { context: scheduleContext });
+
+  it('describes the scheduling arguments in values a model can read, not anyOf/const', () => {
+    const tool = scheduleTool([]);
+    const schema = JSON.stringify(tool.parameters);
+
+    // The exact shape that broke: a literal union renders as {"const": "daily"}.
+    expect(schema).not.toContain('"const"');
+    expect(tool.parameters.properties.frequency.type).toBe('string');
+    for (const frequency of SCHEDULE_FREQUENCIES) {
+      expect(tool.parameters.properties.frequency.description).toContain(frequency);
+    }
+    expect(tool.parameters.properties.destinationType.description).toContain('newChat');
+    expect(tool.parameters.properties.destinationType.description).toContain('existingChat');
+    // The docstring has to carry the argument object itself, not a summary.
+    expect(tool.description).toContain(SCHEDULED_TASK_ARGUMENT_HELP);
+    expect(tool.description).toMatch(/no hourly, minute-level, or Monday-to-Friday schedule/i);
+  });
+
+  it('turns every argument shape the failing chat tried into a confirmable draft', async () => {
+    const requests = [];
+    const tool = scheduleTool(requests);
+
+    for (const attempt of KIMI_ATTEMPTS) {
+      const result = await tool.execute('schedule-replay', {
+        name: 'X Trends London & NYC',
+        prompt: 'Report what is trending on X in London and New York.',
+        ...attempt
+      });
+      expect(result.details.type).toBe('scheduled-task-request');
+      expect(result.terminate).toBe(true);
+    }
+
+    expect(requests).toHaveLength(KIMI_ATTEMPTS.length);
+    for (const request of requests) {
+      expect(SCHEDULE_FREQUENCIES).toContain(request.schedule.frequency);
+      expect(request.schedule.time).toMatch(/^\d{2}:\d{2}$/);
+      expect(request.destinationType).toBe('newChat');
+    }
+  });
+
+  it('says which schedule it substituted when the request cannot be expressed', () => {
+    // Mon-Fri is the actual request that started this; there is no such schedule.
+    expect(normalizeScheduleFrequency('weekday')).toEqual({
+      frequency: 'daily',
+      note: expect.stringMatching(/Monday to Friday/i)
+    });
+    expect(normalizeScheduleFrequency('hourly').frequency).toBe('daily');
+    expect(normalizeScheduleFrequency('hourly').note).toMatch(/shortest schedule is daily/i);
+    expect(normalizeScheduleFrequency('fortnightly')).toEqual({
+      frequency: 'weekly',
+      note: expect.stringMatching(/cannot skip weeks/i)
+    });
+    // An omitted schedule is a draft for the user to finish, not a failure.
+    expect(normalizeScheduleFrequency(undefined)).toEqual({
+      frequency: 'daily',
+      note: expect.stringMatching(/Pick the schedule you want/i)
+    });
+    // Close-enough wording is mapped silently, with no note to explain away.
+    expect(normalizeScheduleFrequency('every month')).toEqual({ frequency: 'monthly', note: '' });
+    expect(normalizeScheduleFrequency('every 3 months')).toEqual({ frequency: 'quarterly', note: '' });
+    expect(normalizeScheduleFrequency('annually')).toEqual({ frequency: 'yearly', note: '' });
+    expect(normalizeScheduleFrequency('Daily')).toEqual({ frequency: 'daily', note: '' });
+  });
+
+  it('repairs clock and calendar wording instead of falling back to the current time', () => {
+    expect(normalizeScheduleTime('7am', '15:30')).toBe('07:00');
+    expect(normalizeScheduleTime('7:05 PM', '15:30')).toBe('19:05');
+    expect(normalizeScheduleTime('12am', '15:30')).toBe('00:00');
+    expect(normalizeScheduleTime('07:00', '15:30')).toBe('07:00');
+    expect(normalizeScheduleTime('later', '15:30')).toBe('15:30');
+    expect(normalizeDayOfWeek('monday', 3)).toBe(1);
+    expect(normalizeDayOfWeek('Sun', 3)).toBe(7);
+    expect(normalizeDayOfWeek(0, 3)).toBe(7);
+    expect(normalizeDayOfWeek('4', 3)).toBe(4);
+    expect(normalizeDayOfWeek('whenever', 3)).toBe(3);
+  });
+
+  it('builds a task from a prompt alone and lets the user choose the rest', async () => {
+    const requests = [];
+    const result = await scheduleTool(requests).execute('schedule-prompt-only', {
+      prompt: 'Report the FTSE close. Include the day move.'
+    });
+
+    expect(result.details.type).toBe('scheduled-task-request');
+    expect(requests[0].name).toBe('Report the FTSE close.');
+    expect(requests[0].schedule.frequency).toBe('daily');
+    expect(requests[0].scheduleNote).toMatch(/Pick the schedule you want/i);
+  });
+
+  it('falls back to a dedicated chat instead of rejecting an unknown destination', async () => {
+    const requests = [];
+    const result = await scheduleTool(requests).execute('schedule-bad-chat', {
+      name: 'Inflation watch',
+      prompt: 'Check Iceland inflation.',
+      frequency: 'weekly',
+      dayOfWeek: 'monday',
+      destinationType: 'existing_chat',
+      destinationChatId: 'chat-that-never-existed'
+    });
+
+    expect(result.details.type).toBe('scheduled-task-request');
+    expect(requests[0].destinationType).toBe('newChat');
+    expect(requests[0].destinationChatId).toBeUndefined();
+    expect(requests[0].schedule.dayOfWeek).toBe(1);
+    expect(requests[0].scheduleNote).toMatch(/destination chat could not be found/i);
+  });
+
+  it('keeps an existing-chat destination the host actually knows', async () => {
+    const requests = [];
+    await scheduleTool(requests).execute('schedule-known-chat', {
+      name: 'Inflation watch',
+      prompt: 'Check Iceland inflation.',
+      frequency: 'daily',
+      destinationType: 'existing_chat',
+      destinationChatId: 'chat-one'
+    });
+
+    expect(requests[0]).toMatchObject({ destinationType: 'existingChat', destinationChatId: 'chat-one' });
+    // Nothing was approximated, so the confirmation shows no correction.
+    expect(requests[0].scheduleNote).toBeUndefined();
+  });
+
+  it('answers an unusable call with the argument list, then stops answering at all', async () => {
+    const requests = [];
+    const tool = scheduleTool(requests);
+
+    for (let attempt = 1; attempt <= MAX_SCHEDULED_TASK_REJECTIONS; attempt += 1) {
+      const rejection = await tool.execute('schedule-empty', {});
+      expect(rejection.details.reason).toBe('missing-content');
+      expect(rejection.terminate).toBe(false);
+      // The old message said only "must be equal to constant".
+      expect(rejection.content[0].text).toContain(SCHEDULED_TASK_ARGUMENT_HELP);
+      expect(rejection.content[0].text).toContain('"frequency": "daily"');
+    }
+
+    const capped = await tool.execute('schedule-empty', {});
+    expect(capped.details.reason).toBe('retry-cap');
+    expect(capped.terminate).toBe(true);
+    expect(capped.content[0].text).toMatch(/Do not call request_scheduled_task again/i);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('names the legal schedules in the prompt so they do not depend on schema fidelity', () => {
+    const enabled = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: [],
+      scheduling: { enabled: true, timeZone: 'Europe/London' }
+    });
+
+    for (const frequency of SCHEDULE_FREQUENCIES) expect(enabled).toContain(frequency);
+    expect(enabled).toMatch(/no hourly, minute-level, or Monday-to-Friday schedule/i);
+    expect(enabled).toMatch(/never call the tool again to discover which values it accepts/i);
+  });
+
+  it('passes a plugin parameter enum to the model as an enum, not a const union', () => {
+    const schema = buildPiTypeFromSchema(Type, {
+      type: 'object',
+      properties: {
+        units: { type: 'string', enum: ['metric', 'imperial'], description: 'Measurement units.' }
+      },
+      required: ['units']
+    });
+
+    expect(schema.properties.units).toMatchObject({
+      type: 'string',
+      enum: ['metric', 'imperial'],
+      description: 'Measurement units.'
+    });
+    expect(JSON.stringify(schema)).not.toContain('"const"');
   });
 
   it('clarifies the data source instead of proposing a plugin without a credible API', () => {
@@ -475,7 +677,11 @@ describe('main agent core', () => {
     });
 
     expect(schema.required).toEqual(['type']);
-    expect(schema.properties.type.anyOf.map((entry) => entry.const)).toEqual(['top', 'new']);
+    // Carried as an `enum`, not a union of consts: some providers never surface
+    // anyOf/const to the model, which then guesses values that always fail.
+    expect(schema.properties.type.enum).toEqual(['top', 'new']);
+    expect(schema.properties.type.type).toBe('string');
+    expect(schema.properties.type.description).toBe('Story list type.');
     expect(schema.properties.limit.type).toBe('integer');
   });
 

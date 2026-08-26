@@ -868,6 +868,18 @@ textarea {
   font-size: 10px;
 }
 
+/* Only present when the agent could not honour the requested schedule, so it
+   has to read as a correction rather than as more form chrome. */
+.scheduled-task-note {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--background-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .scheduled-task-confirmation .task-editor {
   margin-top: 14px;
   gap: 16px;

@@ -5087,7 +5087,16 @@ function renderScheduledTaskConfirmation(body: HTMLElement, record: StoredChatMe
   const hint = document.createElement('p');
   hint.textContent = 'Review the recurring prompt and schedule. Nothing is saved until you confirm.';
   const editor = document.createElement('div');
-  panel.append(title, hint, editor);
+  panel.append(title, hint);
+  // The panel replaces the assistant's text, so a schedule the agent had to
+  // approximate would otherwise be applied silently.
+  if (request.scheduleNote) {
+    const note = document.createElement('p');
+    note.className = 'scheduled-task-note';
+    note.textContent = request.scheduleNote;
+    panel.append(note);
+  }
+  panel.append(editor);
   body.replaceChildren(panel);
   renderTaskEditor(editor, request, {
     submitLabel: 'Create task',

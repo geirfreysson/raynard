@@ -255,7 +255,7 @@ export function buildMainAgentSystemPrompt({ mode, toolNames, plugins, schedulin
       ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For an existing-plugin change, call request_plugin_build. For a new capability, call it only when a concrete API and official documentation URL are established; otherwise clarify the intended source with answer_without_api. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
       : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Offer Build mode only when a concrete, credible API source has been identified. Otherwise use answer_without_api to clarify where the information should come from, suggest plausible public APIs, or ask whether the user meant a relevant installed plugin. When the user asks to modify an existing plugin, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
   const schedulePolicy = scheduling?.enabled !== false
-    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling language removed. Generate a concise name. Default the destination to a dedicated new chat unless the user explicitly identifies an existing chat. For an existing chat, use an exact ID from the saved-chat list. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving.`
+    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling language removed. Generate a concise name. A Raynard schedule is daily, weekly, monthly, quarterly, or yearly at one local clock time — there is no hourly, minute-level, or Monday-to-Friday schedule, so choose the closest and let the user adjust it. Only name and prompt are required: make ONE call with your best guess, omit any schedule field you are unsure of rather than inventing a value, and never call the tool again to discover which values it accepts. Default the destination to a dedicated new chat unless the user explicitly identifies an existing chat. For an existing chat, use an exact ID from the saved-chat list. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving, so an approximate draft is useful and a retry is not.`
     : `4. SCHEDULE: This is already a scheduled execution. Perform the supplied prompt normally and never create another scheduled task.`;
   const scheduleFirstAction = scheduling?.enabled !== false
     ? 'request_scheduled_task for recurring work, '
@@ -332,80 +332,314 @@ Presenting data (charts):
 Available installed API tools: ${names}.`;
 }
 
+// The five schedules the Rust validator and the confirmation editor accept.
+// Anything the user asks for is mapped onto one of these; there is no hourly,
+// minute-level, or Monday-to-Friday schedule.
+export const SCHEDULE_FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+
+// A model that guesses a value wrong gets this back verbatim. The previous
+// rejection said only "must be equal to constant", which named no legal value
+// and sent Kimi through thirteen rounds of guessing, so the help has to be the
+// literal argument object rather than a description of it.
+export const SCHEDULED_TASK_ARGUMENT_HELP = [
+  'request_scheduled_task takes exactly these arguments:',
+  '',
+  '{',
+  '  "name": "Weekday X trends",              // required — short label',
+  '  "prompt": "Report what is trending ...", // required — the work to do on each run',
+  '  "frequency": "daily",                    // optional — daily | weekly | monthly | quarterly | yearly',
+  '  "time": "07:00",                         // optional — local 24-hour HH:MM',
+  '  "dayOfWeek": 1,                          // optional — weekly only, Monday=1 ... Sunday=7',
+  '  "dayOfMonth": 15,                        // optional — monthly/quarterly/yearly only, 1-31',
+  '  "monthOfYear": 8,                        // optional — quarterly/yearly only, 1-12',
+  '  "destinationType": "newChat",            // optional — newChat | existingChat',
+  '  "destinationChatId": "chat-abc123"       // optional — only for existingChat',
+  '}',
+  '',
+  'Only name and prompt are required. Every other argument is optional, is repaired',
+  'when it is close, and is defaulted when it is missing or unusable — so send one',
+  'best-guess call and never retry this tool to search for accepted values.'
+].join('\n');
+
+// How many unusable calls the tool answers with help before it stops answering
+// at all. Without a cap the model can retry until it exhausts the turn.
+export const MAX_SCHEDULED_TASK_REJECTIONS = 2;
+
+const NOTE_UNRECOGNIZED =
+  'The requested repeat was not recognised, so this defaults to every day. Pick the schedule you want.';
+const NOTE_WEEKDAYS =
+  'Raynard cannot schedule Monday to Friday only. This runs every day instead — switch it to Weekly for a single weekday.';
+const NOTE_SUB_DAILY = 'Raynard’s shortest schedule is daily, so this runs once a day at the time below.';
+const NOTE_EVERY_OTHER_WEEK = 'Raynard cannot skip weeks, so this runs every week.';
+const NOTE_UNKNOWN_CHAT =
+  'That destination chat could not be found, so results go to a dedicated task chat. Choose another destination if you meant an existing one.';
+
+// Ordered: the first match wins, so "weekdays" is caught before "week" and
+// "every 3 months" before "month".
+const FREQUENCY_PATTERNS = [
+  [/week ?day|work ?day|business day|mon(day)?\s*(-|–|to|through|thru)\s*fri(day)?/, 'daily', NOTE_WEEKDAYS],
+  [/minute|hourly|hour|\d+\s*h\b/, 'daily', NOTE_SUB_DAILY],
+  [/fortnight|bi[- ]?weekly|every other week|every 2 weeks|every two weeks/, 'weekly', NOTE_EVERY_OTHER_WEEK],
+  [/quarter|every 3 months|every three months/, 'quarterly', ''],
+  [/annual|year/, 'yearly', ''],
+  [/month/, 'monthly', ''],
+  [/week/, 'weekly', ''],
+  [/dai?ly|every day|each day|nightly|day/, 'daily', '']
+];
+
+const WEEKDAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+const MONTH_NAMES = [
+  'january',
+  'february',
+  'march',
+  'april',
+  'may',
+  'june',
+  'july',
+  'august',
+  'september',
+  'october',
+  'november',
+  'december'
+];
+
+function pad(value) {
+  return String(value).padStart(2, '0');
+}
+
+// Returns a usable frequency for every input, plus the sentence the user needs
+// when the answer is an approximation rather than what they asked for.
+export function normalizeScheduleFrequency(raw) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ');
+  if (!text) return { frequency: 'daily', note: NOTE_UNRECOGNIZED };
+  if (SCHEDULE_FREQUENCIES.includes(text)) return { frequency: text, note: '' };
+  for (const [pattern, frequency, note] of FREQUENCY_PATTERNS) {
+    if (pattern.test(text)) return { frequency, note };
+  }
+  return { frequency: 'daily', note: NOTE_UNRECOGNIZED };
+}
+
+// Accepts "07:00", "7:00", "7am", "7 PM", and falls back rather than failing.
+export function normalizeScheduleTime(raw, fallback) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\./g, '');
+  if (!text) return fallback;
+  const match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) return fallback;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  if (match[3] === 'am') hour = hour === 12 ? 0 : hour;
+  else if (match[3] === 'pm') hour = hour === 12 ? 12 : hour + 12;
+  if (hour > 23 || minute > 59) return fallback;
+  return `${pad(hour)}:${pad(minute)}`;
+}
+
+// Monday=1 through Sunday=7, also accepting cron's Sunday=0 and day names.
+export function normalizeDayOfWeek(raw, fallback) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (/^\d+$/.test(text)) {
+    const value = Number(text);
+    if (value === 0) return 7;
+    return value >= 1 && value <= 7 ? value : fallback;
+  }
+  const index = WEEKDAY_NAMES.findIndex((name) => name.startsWith(text.slice(0, 3)));
+  return index >= 0 ? index + 1 : fallback;
+}
+
+export function normalizeMonthOfYear(raw, fallback) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (/^\d+$/.test(text)) {
+    const value = Number(text);
+    return value >= 1 && value <= 12 ? value : fallback;
+  }
+  const index = MONTH_NAMES.findIndex((name) => name.startsWith(text.slice(0, 3)));
+  return index >= 0 ? index + 1 : fallback;
+}
+
+export function normalizeDayOfMonth(raw, fallback) {
+  const text = String(raw ?? '').trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const value = Number(text);
+  return value >= 1 && value <= 31 ? value : fallback;
+}
+
+export function normalizeDestinationType(raw) {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, '');
+  if (!text) return 'newChat';
+  if (/^(existingchat|existing|current|thischat|this|samechat|same)$/.test(text)) return 'existingChat';
+  return 'newChat';
+}
+
+// A short label derived from the work itself, so a call that supplied only a
+// prompt still produces a nameable task instead of being rejected.
+function nameFromPrompt(prompt) {
+  const sentence = prompt.split(/(?<=[.!?])\s|\n/)[0].trim();
+  const source = sentence || prompt;
+  if (source.length <= 60) return source;
+  const clipped = source.slice(0, 60);
+  const boundary = clipped.lastIndexOf(' ');
+  return `${(boundary > 20 ? clipped.slice(0, boundary) : clipped).trim()}…`;
+}
+
 export function createScheduledTaskTool(Type, onRequest, options = {}) {
   const context = options.context || {};
   const now = new Date(context.localDateTime || Date.now());
   const validNow = Number.isNaN(now.getTime()) ? new Date() : now;
-  const defaultTime = `${String(validNow.getHours()).padStart(2, '0')}:${String(validNow.getMinutes()).padStart(2, '0')}`;
+  const defaultTime = `${pad(validNow.getHours())}:${pad(validNow.getMinutes())}`;
   const knownChats = new Set(
     (Array.isArray(context.chats) ? context.chats : []).map((chat) => String(chat.id || ''))
   );
   if (context.currentChatId) knownChats.add(String(context.currentChatId));
+  let rejections = 0;
+  // Deliberately plain strings and integers rather than Type.Union/Type.Literal.
+  // TypeBox renders a union of literals as anyOf/const, which some providers do
+  // not surface to the model at all: Kimi K2.5 invented five frequency values
+  // that matched the real anyOf only in count. A described string reads
+  // correctly everywhere, and execute below repairs whatever arrives.
+  const numberOrString = (description) => Type.Union([Type.Integer(), Type.String()], { description });
   return {
     name: 'request_scheduled_task',
     label: 'Request Scheduled Task',
-    description:
-      'Prepare recurring work for host-rendered user confirmation. This does not create the task until the user confirms it.',
+    description: `Prepare recurring work for the user to confirm. Nothing is created until the user confirms it in an editable form, so one best-guess call is always better than a retry.
+
+Raynard runs a task daily, weekly, monthly, quarterly, or yearly at a single local clock time. There is no hourly, minute-level, or Monday-to-Friday schedule; pick the closest one and the user adjusts it.
+
+Only name and prompt are required. Omit any part of the schedule you are unsure of and the user selects it. This tool never fails because of a schedule it did not understand.
+
+${SCHEDULED_TASK_ARGUMENT_HELP}`,
     parameters: Type.Object({
-      name: Type.String({ description: 'Concise task name.' }),
-      prompt: Type.String({ description: 'The work to perform each run, without scheduling language.' }),
-      destinationType: Type.Optional(Type.Union([Type.Literal('newChat'), Type.Literal('existingChat')])),
-      destinationChatId: Type.Optional(Type.String({ description: 'Exact saved chat ID for an existing-chat destination.' })),
-      frequency: Type.Union([
-        Type.Literal('daily'),
-        Type.Literal('weekly'),
-        Type.Literal('monthly'),
-        Type.Literal('quarterly'),
-        Type.Literal('yearly')
-      ]),
-      time: Type.Optional(Type.String({ description: 'Local 24-hour clock time in HH:MM.' })),
-      dayOfWeek: Type.Optional(Type.Integer({ description: 'Monday=1 through Sunday=7.' })),
-      dayOfMonth: Type.Optional(Type.Integer({ description: 'Calendar day from 1 through 31.' })),
-      monthOfYear: Type.Optional(Type.Integer({ description: 'Anchor month from 1 through 12.' }))
+      // Optional in the schema even though both are required in practice: a
+      // schema-level rejection is raised by pi before execute runs, so its
+      // message cannot carry SCHEDULED_TASK_ARGUMENT_HELP. Letting every call
+      // reach execute is what makes the failure message teach.
+      name: Type.Optional(
+        Type.String({ description: 'Required. Concise task name, for example "Weekday X trends".' })
+      ),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            'Required. The work to perform on each run, with scheduling language removed.'
+        })
+      ),
+      frequency: Type.Optional(
+        Type.String({
+          description:
+            'One of daily, weekly, monthly, quarterly, yearly. Omit it when the request does not map cleanly and the user will choose.'
+        })
+      ),
+      time: Type.Optional(
+        Type.String({ description: 'Local 24-hour clock time as HH:MM, for example "07:00".' })
+      ),
+      dayOfWeek: Type.Optional(numberOrString('Weekly schedules only. Monday=1 through Sunday=7.')),
+      dayOfMonth: Type.Optional(
+        numberOrString('Monthly, quarterly, and yearly schedules only. Calendar day 1 through 31.')
+      ),
+      monthOfYear: Type.Optional(
+        numberOrString('Quarterly and yearly schedules only. Anchor month 1 through 12.')
+      ),
+      destinationType: Type.Optional(
+        Type.String({
+          description: 'Either "newChat" for a dedicated task chat (the default) or "existingChat".'
+        })
+      ),
+      destinationChatId: Type.Optional(
+        Type.String({
+          description: 'Exact saved chat ID. Required only when destinationType is "existingChat".'
+        })
+      )
     }),
     executionMode: 'sequential',
     execute: async (_toolCallId, args) => {
-      const frequency = String(args?.frequency || '');
-      const destinationType = args?.destinationType === 'existingChat' ? 'existingChat' : 'newChat';
-      const destinationChatId = String(args?.destinationChatId || '').trim();
-      if (destinationType === 'existingChat' && !knownChats.has(destinationChatId)) {
-        return {
-          content: [{ type: 'text', text: 'That destination chat is not available. Clarify which saved chat to use.' }],
-          details: { type: 'scheduled-task-request-rejected', reason: 'unknown-chat' },
-          terminate: false
-        };
-      }
-      const request = {
-        name: String(args?.name || '').trim().slice(0, 120),
-        prompt: String(args?.prompt || '').trim(),
-        destinationType,
-        destinationChatId: destinationType === 'existingChat' ? destinationChatId : undefined,
-        schedule: {
-          frequency,
-          time: /^\d{2}:\d{2}$/.test(String(args?.time || '')) ? String(args.time) : defaultTime,
-          timeZone: String(context.timeZone || 'UTC'),
-          dayOfWeek:
-            frequency === 'weekly'
-              ? Number(args?.dayOfWeek) || ((validNow.getDay() + 6) % 7) + 1
-              : undefined,
-          dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
-            ? Number(args?.dayOfMonth) || validNow.getDate()
-            : undefined,
-          monthOfYear: ['quarterly', 'yearly'].includes(frequency)
-            ? Number(args?.monthOfYear) || validNow.getMonth() + 1
-            : undefined
+      const suppliedName = String(args?.name || '').trim().slice(0, 120);
+      const suppliedPrompt = String(args?.prompt || '').trim();
+      // The work itself is the only thing that cannot be defaulted. Either
+      // field alone is enough to build a task the user can finish editing.
+      if (!suppliedName && !suppliedPrompt) {
+        rejections += 1;
+        if (rejections > MAX_SCHEDULED_TASK_REJECTIONS) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Scheduling was abandoned after ${rejections} calls with no name and no prompt. Do not call request_scheduled_task again in this turn. Tell the user no task was created and ask what the recurring prompt should be.`
+              }
+            ],
+            details: { type: 'scheduled-task-request-rejected', reason: 'retry-cap' },
+            terminate: true
+          };
         }
-      };
-      if (!request.name || !request.prompt) {
         return {
-          content: [{ type: 'text', text: 'A scheduled task needs both a name and an execution prompt.' }],
+          content: [
+            {
+              type: 'text',
+              text: `A scheduled task needs a prompt describing the work, a name, or both. Everything else is optional.\n\n${SCHEDULED_TASK_ARGUMENT_HELP}`
+            }
+          ],
           details: { type: 'scheduled-task-request-rejected', reason: 'missing-content' },
           terminate: false
         };
       }
+      const prompt = suppliedPrompt || suppliedName;
+      const name = suppliedName || nameFromPrompt(prompt).slice(0, 120);
+
+      const { frequency, note: frequencyNote } = normalizeScheduleFrequency(args?.frequency);
+      const destinationChatId = String(args?.destinationChatId || '').trim();
+      let destinationType = normalizeDestinationType(args?.destinationType);
+      // A chat ID the host does not know is corrected to a dedicated chat
+      // rather than rejected: the destination is a dropdown in the very next
+      // thing the user sees, so a wrong guess costs them one click.
+      let destinationNote = '';
+      if (destinationType === 'existingChat' && !knownChats.has(destinationChatId)) {
+        destinationType = 'newChat';
+        destinationNote = NOTE_UNKNOWN_CHAT;
+      }
+      const scheduleNote = [frequencyNote, destinationNote].filter(Boolean).join(' ');
+
+      const request = {
+        name,
+        prompt,
+        destinationType,
+        destinationChatId: destinationType === 'existingChat' ? destinationChatId : undefined,
+        schedule: {
+          frequency,
+          time: normalizeScheduleTime(args?.time, defaultTime),
+          timeZone: String(context.timeZone || 'UTC'),
+          dayOfWeek:
+            frequency === 'weekly'
+              ? normalizeDayOfWeek(args?.dayOfWeek, ((validNow.getDay() + 6) % 7) + 1)
+              : undefined,
+          dayOfMonth: ['monthly', 'quarterly', 'yearly'].includes(frequency)
+            ? normalizeDayOfMonth(args?.dayOfMonth, validNow.getDate())
+            : undefined,
+          monthOfYear: ['quarterly', 'yearly'].includes(frequency)
+            ? normalizeMonthOfYear(args?.monthOfYear, validNow.getMonth() + 1)
+            : undefined
+        },
+        // Shown above the confirmation form. This is the only way the user
+        // learns that their wording was approximated rather than honoured.
+        scheduleNote: scheduleNote || undefined
+      };
       onRequest(request);
       return {
-        content: [{ type: 'text', text: 'The scheduled task is ready for user confirmation.' }],
+        content: [
+          {
+            type: 'text',
+            text: scheduleNote
+              ? `The scheduled task is ready for user confirmation. The schedule was adjusted: ${scheduleNote} The user is being shown that note and can change the schedule before saving, so do not call this tool again.`
+              : 'The scheduled task is ready for user confirmation.'
+          }
+        ],
         details: { type: 'scheduled-task-request', ...request },
         terminate: true
       };
@@ -419,8 +653,20 @@ export function buildPiTypeFromSchema(Type, schemaNode) {
   }
 
   const options = schemaNode.description ? { description: String(schemaNode.description) } : {};
+  // Kept as a JSON Schema `enum`. Type.Union([Type.Literal(...)]) renders as
+  // anyOf/const, which some providers never surface to the model — it then
+  // guesses values and every call fails validation. Ajv enforces `enum` just as
+  // strictly, so this only changes what the model can read.
   if (Array.isArray(schemaNode.enum) && schemaNode.enum.length) {
-    return Type.Union(schemaNode.enum.map((value) => Type.Literal(value)), options);
+    const kinds = new Set(schemaNode.enum.map((value) => typeof value));
+    const kind = kinds.size === 1 ? [...kinds][0] : '';
+    return Type.Unsafe({
+      ...(kind === 'string' || kind === 'number' || kind === 'boolean'
+        ? { type: kind === 'number' ? 'number' : kind }
+        : {}),
+      enum: [...schemaNode.enum],
+      ...options
+    });
   }
   if (Array.isArray(schemaNode.anyOf) && schemaNode.anyOf.length) {
     return Type.Union(

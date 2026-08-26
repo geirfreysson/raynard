@@ -106,6 +106,10 @@ export type ScheduledTaskRequest = {
   prompt: string;
   destinationType: 'existingChat' | 'newChat';
   destinationChatId?: string;
+  // Set when the tool could not honour the requested repeat exactly — an
+  // unsupported cadence, or a destination chat it could not find. Shown above
+  // the confirmation form and dropped before the draft reaches Rust.
+  scheduleNote?: string;
   schedule: {
     frequency: ScheduledTaskFrequency;
     time: string;
