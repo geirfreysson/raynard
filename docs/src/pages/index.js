@@ -6,6 +6,7 @@ import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import homepageCopy from '../content/homepage-copy.json';
 import shareConfig from '../../../share.config.json';
+import {trackDownloadClick} from '../lib/analytics';
 import {platformForUserAgent} from '../lib/download';
 import styles from './index.module.css';
 
@@ -65,11 +66,21 @@ function DownloadAction() {
   }, []);
 
   const current = downloads.platforms[platform];
+  const currentTarget = downloadTargetFor(platform);
   const alternatives = downloads.order.filter((key) => key !== platform);
 
   return (
     <div className={styles.downloadAction}>
-      <Link className={styles.primaryButton} to={downloadTargetFor(platform)}>
+      <Link
+        className={styles.primaryButton}
+        to={currentTarget}
+        onClick={() => trackDownloadClick({
+          platform,
+          placement: 'homepage_primary',
+          url: currentTarget,
+          label: current.label,
+        })}
+      >
         <DownloadIcon />
         {current.label}
       </Link>
@@ -85,12 +96,26 @@ function DownloadAction() {
       )}
       <div className={styles.downloadAlternatives}>
         {downloads.alternativesPrefix}{' '}
-        {alternatives.map((key, index) => (
-          <span key={key}>
-            {index > 0 && <span aria-hidden="true"> · </span>}
-            <Link to={downloadTargetFor(key)}>{downloads.platforms[key].name}</Link>
-          </span>
-        ))}
+        {alternatives.map((key, index) => {
+          const target = downloadTargetFor(key);
+          const label = downloads.platforms[key].name;
+          return (
+            <span key={key}>
+              {index > 0 && <span aria-hidden="true"> · </span>}
+              <Link
+                to={target}
+                onClick={() => trackDownloadClick({
+                  platform: key,
+                  placement: 'homepage_alternative',
+                  url: target,
+                  label,
+                })}
+              >
+                {label}
+              </Link>
+            </span>
+          );
+        })}
       </div>
     </div>
   );
@@ -243,7 +268,18 @@ function CTA() {
     <section className={styles.cta}>
       <Heading as="h2">{cta.title}</Heading>
       <p>{cta.body}</p>
-      <Link className={styles.primaryButton} to={cta.action.to}>{cta.action.label}</Link>
+      <Link
+        className={styles.primaryButton}
+        to={cta.action.to}
+        onClick={() => trackDownloadClick({
+          platform: 'chooser',
+          placement: 'homepage_cta',
+          url: cta.action.to,
+          label: cta.action.label,
+        })}
+      >
+        {cta.action.label}
+      </Link>
     </section>
   );
 }

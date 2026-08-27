@@ -2,6 +2,8 @@
 
 import {themes as prismThemes} from 'prism-react-renderer';
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Raynard',
@@ -17,6 +19,29 @@ const config = {
   organizationName: 'geirfreysson',
   projectName: 'raynard',
   onBrokenLinks: 'throw',
+  clientModules: isProduction ? ['./src/lib/analytics-client.js'] : [],
+  headTags: isProduction ? [
+    {
+      tagName: 'script',
+      attributes: {
+        async: 'true',
+        src: 'https://www.googletagmanager.com/gtag/js?id=G-T58M9890TY',
+      },
+    },
+    {
+      tagName: 'script',
+      attributes: {},
+      innerHTML: `
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+        gtag('config', 'G-T58M9890TY', {
+          page_location: window.location.href.split('#')[0],
+          page_path: window.location.pathname + window.location.search,
+        });
+      `,
+    },
+  ] : [],
 
   i18n: {
     defaultLocale: 'en',

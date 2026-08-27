@@ -2,13 +2,15 @@
 sidebar_position: 2
 ---
 
+import DownloadLink from '@site/src/components/DownloadLink';
+
 # Getting started
 
 ## Install Raynard
 
 ### macOS
 
-[Download the Apple Silicon DMG](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg),
+<DownloadLink platform="macos" url="https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-mac-arm64.dmg">Download the Apple Silicon DMG</DownloadLink>,
 open it, and move Raynard into Applications.
 
 ### Linux
@@ -24,14 +26,14 @@ Raynard to the application menu, creates the `raynard` terminal command, and
 launches the app.
 
 For a manual or package-managed installation, use the
-[x86_64 AppImage](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-x86_64.AppImage)
-or [amd64 Debian package](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-amd64.deb).
+<DownloadLink platform="linux" url="https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-x86_64.AppImage">x86_64 AppImage</DownloadLink>
+or <DownloadLink platform="debian" url="https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-linux-amd64.deb">amd64 Debian package</DownloadLink>.
 Make an AppImage executable with `chmod +x Raynard-linux-x86_64.AppImage`, or
 install the Debian package with `sudo apt install ./Raynard-linux-amd64.deb`.
 
 ### Windows
 
-[Download the x64 installer](https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-windows-x64-setup.exe)
+<DownloadLink platform="windows" url="https://github.com/geirfreysson/raynard/releases/latest/download/Raynard-windows-x64-setup.exe">Download the x64 installer</DownloadLink>
 and open it, or install and launch Raynard from PowerShell:
 
 ```powershell
