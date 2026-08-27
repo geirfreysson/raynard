@@ -121,7 +121,7 @@ function DownloadAction() {
   );
 }
 
-function DemoVideo({label, src}) {
+function DemoVideo({label, src, poster}) {
   const videoRef = useRef(null);
   const [hasStarted, setHasStarted] = useState(false);
 
@@ -148,6 +148,7 @@ function DemoVideo({label, src}) {
         controls={hasStarted}
         playsInline
         preload="metadata"
+        poster={poster}
       >
         <source src={src} type="video/mp4" />
       </video>
@@ -182,7 +183,7 @@ function Hero() {
         <DownloadAction />
 
         <div className={styles.demoFrame}>
-          <DemoVideo label={hero.demoLabel} src={hero.demoVideo} />
+          <DemoVideo label={hero.demoLabel} src={hero.demoVideo} poster={hero.demoPoster} />
         </div>
       </header>
 

@@ -45,7 +45,8 @@
       "windowsInfoTo": "/docs/getting-started#windows"
     },
     "demoLabel": "Product demo — live market data, cited",
-    "demoVideo": "/img/screenshots/raymond-demo-video.mp4"
+    "demoVideo": "/img/screenshots/raymond-demo-video.mp4",
+    "demoPoster": "/img/screenshots/raymond-demo-poster.jpg"
   },
   "extensions": {
     "enabled": false,
