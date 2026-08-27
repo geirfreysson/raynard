@@ -3,14 +3,14 @@
     "description": "Talk to data APIs in plain English with Raynard."
   },
   "hero": {
-    "eyebrow": "Desktop app for macOS, Linux, and Windows",
-    "title": "The AI analyst that cites its sources",
+    "eyebrow": "Open source desktop app for macOS, Linux, and Windows",
+    "title": "The AI agent that connects to any data source, public or private, and always cites its sources",
     "slogan": {
       "before": "Talk",
       "emphasis": "data",
       "after": "to me."
     },
-    "body": "Raynard connects to data APIs so you can ask questions in plain English—every number comes back with a reference you can check.",
+    "body": "Raynard connects to data APIs, public or private, so you can ask questions in plain English—every answer comes back with a reference you can check.",
     "downloads": {
       "order": [
         "macos",
@@ -136,7 +136,8 @@
           "Built and tested once you approve it",
           "Keys in your keychain, chats on your machine"
         ],
-        "mediaLabel": "Placeholder for the extension build flow screenshot",
+        "video": "/img/screenshots/create-plugin-screenshot.mp4",
+        "mediaLabel": "Raynard creating and testing a new API extension",
         "reverse": true
       }
     ]
@@ -147,23 +148,23 @@
     "cards": [
       {
         "icon": "⚷",
-        "title": "Credentials",
-        "body": "API keys live in the OS keychain, not in a config file or .env the app ships."
+        "title": "API-grounded answers",
+        "body": "Every question is answered with a call to an API, and that response is fed into the AI."
       },
       {
         "icon": "⇌",
-        "title": "Tool calls",
-        "body": "Each API call is a real tool call inside the agent loop. The response feeds straight back into what the model reasons over next."
+        "title": "Direct references",
+        "body": "Every answer includes a reference with a direct link to the API result behind it."
       },
       {
         "icon": "✓",
-        "title": "Extensions",
-        "body": "Each one is TypeScript, covered by tests, and called against the live API once before it’s marked ready."
+        "title": "Open extensions",
+        "body": "Create extensions easily to talk to new APIs, whether they’re public or private."
       },
       {
         "icon": "↻",
-        "title": "Live vs. snapshot",
-        "body": "An opened share link shows the data it was sent with. Ask a follow-up and it queries again, live."
+        "title": "Powered by Pi",
+        "body": "Raynard is powered by Pi, the same AI agent that powers OpenClaw."
       }
     ]
   },
