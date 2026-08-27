@@ -1,4 +1,4 @@
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
@@ -6,7 +6,7 @@ import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import homepageCopy from '../content/homepage-copy.json';
 import shareConfig from '../../../share.config.json';
-import {trackDownloadClick} from '../lib/analytics';
+import {trackDemoVideoPlay, trackDownloadClick} from '../lib/analytics';
 import {platformForUserAgent} from '../lib/download';
 import styles from './index.module.css';
 
@@ -121,6 +121,52 @@ function DownloadAction() {
   );
 }
 
+function DemoVideo({label, src}) {
+  const videoRef = useRef(null);
+  const [hasStarted, setHasStarted] = useState(false);
+
+  const playDemo = () => {
+    trackDemoVideoPlay({
+      placement: 'homepage_hero',
+      url: src,
+      label,
+    });
+    setHasStarted(true);
+
+    const playRequest = videoRef.current?.play();
+    if (playRequest) {
+      playRequest.catch(() => setHasStarted(false));
+    }
+  };
+
+  return (
+    <div className={styles.demoMedia}>
+      <video
+        ref={videoRef}
+        className={styles.demoVideo}
+        aria-label={label}
+        controls={hasStarted}
+        playsInline
+        preload="metadata"
+      >
+        <source src={src} type="video/mp4" />
+      </video>
+      {!hasStarted && (
+        <button
+          className={styles.demoOverlay}
+          type="button"
+          aria-label={`Play ${label}`}
+          onClick={playDemo}
+        >
+          <span className={styles.playButton} aria-hidden="true">
+            <span className={styles.playIcon} aria-hidden="true" />
+          </span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Hero() {
   const {hero, extensions} = homepageCopy;
 
@@ -136,17 +182,7 @@ function Hero() {
         <DownloadAction />
 
         <div className={styles.demoFrame}>
-          <div className={styles.demoChrome} aria-hidden="true">
-            <span className={styles.dotRed} />
-            <span className={styles.dotYellow} />
-            <span className={styles.dotGreen} />
-          </div>
-          <div className={styles.demoMedia}>
-            <div className={styles.playButton} aria-hidden="true">
-              <span className={styles.playIcon} />
-            </div>
-            <span className={styles.demoLabel}>{hero.demoLabel}</span>
-          </div>
+          <DemoVideo label={hero.demoLabel} src={hero.demoVideo} />
         </div>
       </header>
 

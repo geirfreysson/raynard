@@ -23,22 +23,23 @@ const config = {
   headTags: isProduction ? [
     {
       tagName: 'script',
-      attributes: {
-        async: 'true',
-        src: 'https://www.googletagmanager.com/gtag/js?id=G-T58M9890TY',
-      },
-    },
-    {
-      tagName: 'script',
       attributes: {},
       innerHTML: `
-        window.dataLayer = window.dataLayer || [];
-        function gtag(){dataLayer.push(arguments);}
-        gtag('js', new Date());
-        gtag('config', 'G-T58M9890TY', {
-          page_location: window.location.href.split('#')[0],
-          page_path: window.location.pathname + window.location.search,
-        });
+        if (window.location.hostname === 'raynard.ai' || window.location.hostname === 'www.raynard.ai') {
+          window.dataLayer = window.dataLayer || [];
+          window.gtag = function(){window.dataLayer.push(arguments);};
+
+          var analyticsScript = document.createElement('script');
+          analyticsScript.async = true;
+          analyticsScript.src = 'https://www.googletagmanager.com/gtag/js?id=G-T58M9890TY';
+          document.head.appendChild(analyticsScript);
+
+          window.gtag('js', new Date());
+          window.gtag('config', 'G-T58M9890TY', {
+            page_location: window.location.href.split('#')[0],
+            page_path: window.location.pathname + window.location.search,
+          });
+        }
       `,
     },
   ] : [],

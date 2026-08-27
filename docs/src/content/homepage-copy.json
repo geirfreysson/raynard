@@ -44,7 +44,8 @@
       "linuxTo": "/docs/getting-started#linux",
       "windowsInfoTo": "/docs/getting-started#windows"
     },
-    "demoLabel": "Product demo — live market data, cited"
+    "demoLabel": "Product demo — live market data, cited",
+    "demoVideo": "/img/screenshots/raymond-demo-video.mp4"
   },
   "extensions": {
     "enabled": false,
