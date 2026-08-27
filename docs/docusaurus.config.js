@@ -69,6 +69,7 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
+      image: 'img/og-card.png',
       colorMode: {
         defaultMode: 'light',
         respectPrefersColorScheme: false,
