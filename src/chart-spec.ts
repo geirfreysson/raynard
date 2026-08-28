@@ -167,31 +167,122 @@ function tryParseJson(text: string): { value: unknown } | null {
 }
 
 /**
- * Kimi has been observed corrupting an otherwise well-formed chart spec with
- * one stray trailing token before the real fence close: an extra `}` or `]`
- * (e.g. `...}]}}` instead of `...}]}`), or one or two stray backticks glued
- * directly onto the JSON with no newline before the actual ``` fence line
- * (e.g. `...}]}\`\`` on the content line, then ``` \`\`\` ``` on its own
- * line next). Either sinks a plain `JSON.parse`. Recover by stripping a
- * trailing bracket or backtick and retrying, bounded to a few attempts so a
- * genuinely broken payload still gives up rather than stripping real
- * content. The schema checks below still run on the result, so a
- * lucky-but-wrong strip cannot produce a spec that was not actually intended
- * as one.
+ * Smart/curly quotes are never valid JSON syntax, so they can only appear
+ * inside string content — normalizing them can turn a parse failure into a
+ * success but can never break text that already parsed. A model sometimes
+ * introduces these by echoing pasted text into a title or label.
+ */
+function straightenSmartQuotes(text: string): string {
+  return text.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+}
+
+/**
+ * Drop a comma that is only followed by a closing `}`/`]` (ignoring
+ * whitespace) — invalid JSON, but one of the most common slips a model makes
+ * when it edits a hand-written list in place, e.g. `[1, 2, 3,]`. Tracks
+ * string state so a comma that happens to appear inside quoted text is never
+ * touched.
+ */
+function stripDanglingCommas(text: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+    if (char === ',') {
+      let lookahead = i + 1;
+      while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead += 1;
+      if (text[lookahead] === '}' || text[lookahead] === ']') continue;
+    }
+    result += char;
+  }
+
+  return result;
+}
+
+/**
+ * Extract the first balanced top-level JSON object out of `text`, ignoring
+ * anything before its opening `{` or after its matching closing `}`. This is
+ * a general-purpose fix rather than a list of hardcoded shapes: whatever
+ * comes after the object closes — a stray trailing `}`/`]`, one or two stray
+ * backticks glued on before the real fence close, prose glued directly onto
+ * the JSON's tail with no newline — is simply not part of it, and neither is
+ * narration a model left before the opening `{`. Tracks string state so a
+ * brace or bracket character inside quoted text is never mistaken for
+ * structure. Returns null when no complete, balanced object exists (a
+ * genuinely truncated payload), so a fragment is never silently misread as a
+ * chart.
+ */
+function extractBalancedObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{' || char === '[') {
+      depth += 1;
+    } else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * A chart spec is JSON a model writes inline in an answer, not an API
+ * response, so it arrives with the usual ways a model corrupts hand-written
+ * JSON: smart quotes left over from pasted text, a dangling trailing comma,
+ * a stray trailing bracket or backtick, or narration glued directly onto the
+ * JSON's head or tail with no newline in between. Each repair only widens
+ * what a later attempt is allowed to try — it never invents content — and
+ * the full schema validation in `parseChartSpec` still runs on whatever
+ * comes out, so a lucky-but-wrong repair can only turn "malformed JSON" into
+ * "valid JSON that then fails validation," which falls back to a code block
+ * exactly as an outright parse failure would.
  */
 function parseJsonWithTrailingRepair(text: string): unknown {
   const direct = tryParseJson(text);
   if (direct) return direct.value;
 
-  let candidate = text;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const stripped = candidate.replace(/[}\]`][ \t]*$/, '');
-    if (stripped === candidate || !stripped) return undefined;
-    candidate = stripped;
-    const parsed = tryParseJson(candidate);
-    if (parsed) return parsed.value;
-  }
-  return undefined;
+  const straightened = straightenSmartQuotes(text);
+  const straightenedParsed = tryParseJson(straightened);
+  if (straightenedParsed) return straightenedParsed.value;
+
+  const withoutDanglingCommas = stripDanglingCommas(straightened);
+  const commaParsed = tryParseJson(withoutDanglingCommas);
+  if (commaParsed) return commaParsed.value;
+
+  const extracted = extractBalancedObject(withoutDanglingCommas);
+  if (!extracted) return undefined;
+  const extractedParsed = tryParseJson(extracted);
+  return extractedParsed ? extractedParsed.value : undefined;
 }
 
 /** Parse a ```chart fence body. Returns null for anything malformed. */

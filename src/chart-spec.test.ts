@@ -290,14 +290,54 @@ describe('parseChartSpec', () => {
     expect(parseChartSpec(`${valid}\`\``)?.x).toBe('year');
   });
 
-  it('does not repair a spec missing more than a trailing stray bracket', () => {
+  it('repairs a spec buried under any amount of trailing garbage', () => {
     const valid = JSON.stringify({
       type: 'line',
       x: 'year',
       series: [{ key: 'Iceland' }],
       rows: [{ year: 2020, Iceland: 1 }]
     });
-    expect(parseChartSpec(`${valid}}}}}}`)).toBeNull();
+    expect(parseChartSpec(`${valid}}}}}}}}}}`)?.x).toBe('year');
+    expect(parseChartSpec(`${valid}Source: [11][12] — see above.`)?.x).toBe('year');
+    expect(parseChartSpec(`${valid}\n\nMore text after a blank line.`)?.x).toBe('year');
+  });
+
+  it('repairs a spec with narration glued directly onto the opening brace', () => {
+    const valid = JSON.stringify({
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'Iceland' }],
+      rows: [{ year: 2020, Iceland: 1 }]
+    });
+    expect(parseChartSpec(`Here is the chart:${valid}`)?.x).toBe('year');
+  });
+
+  it('repairs a spec with a dangling trailing comma', () => {
+    const source =
+      '{"type":"bar","x":"country","series":[{"key":"value"},],"rows":[{"country":"Iceland","value":1,},]}';
+    expect(parseChartSpec(source)?.x).toBe('country');
+  });
+
+  it('repairs a spec with smart quotes left over from pasted text', () => {
+    const source =
+      '{“type”:“line”,“x”:“year”,“series”:[{“key”:“Iceland”}],“rows”:[{“year”:2020,“Iceland”:1}]}';
+    expect(parseChartSpec(source)?.x).toBe('year');
+  });
+
+  it('leaves a title containing a comma-then-bracket and an apostrophe untouched while repairing an unrelated stray bracket', () => {
+    const valid = JSON.stringify({
+      type: 'line',
+      x: 'year',
+      title: "Iceland's exports (goods, }services)",
+      series: [{ key: 'Iceland' }],
+      rows: [{ year: 2020, Iceland: 1 }]
+    });
+    const spec = parseChartSpec(`${valid}}`);
+    expect(spec?.title).toBe("Iceland's exports (goods, }services)");
+  });
+
+  it('does not repair a genuinely truncated spec', () => {
+    expect(parseChartSpec('{ "type": "line", "x": "year", "series": [')).toBeNull();
     expect(parseChartSpec('{ "type": "line" ]')).toBeNull();
   });
 });
