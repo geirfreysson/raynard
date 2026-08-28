@@ -279,6 +279,17 @@ describe('parseChartSpec', () => {
     expect(parseChartSpec(`${valid} }`)?.x).toBe('year');
   });
 
+  it('repairs a spec with stray backticks glued on before the real fence close (observed from Kimi)', () => {
+    const valid = JSON.stringify({
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'Iceland' }],
+      rows: [{ year: 2020, Iceland: 1 }]
+    });
+    expect(parseChartSpec(`${valid}\``)?.x).toBe('year');
+    expect(parseChartSpec(`${valid}\`\``)?.x).toBe('year');
+  });
+
   it('does not repair a spec missing more than a trailing stray bracket', () => {
     const valid = JSON.stringify({
       type: 'line',
@@ -286,7 +297,7 @@ describe('parseChartSpec', () => {
       series: [{ key: 'Iceland' }],
       rows: [{ year: 2020, Iceland: 1 }]
     });
-    expect(parseChartSpec(`${valid}}}}}`)).toBeNull();
+    expect(parseChartSpec(`${valid}}}}}}`)).toBeNull();
     expect(parseChartSpec('{ "type": "line" ]')).toBeNull();
   });
 });

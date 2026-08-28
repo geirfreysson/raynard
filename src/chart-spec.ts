@@ -167,21 +167,25 @@ function tryParseJson(text: string): { value: unknown } | null {
 }
 
 /**
- * Kimi has been observed appending one stray closing `}` or `]` after an
- * otherwise well-formed chart spec (e.g. `...}]}}` or `...}]}]` instead of
- * `...}]}`), which sinks a plain `JSON.parse`. Recover by stripping a
- * trailing bracket and retrying, bounded to a few attempts so a genuinely
- * broken payload still gives up rather than stripping real content. The
- * schema checks below still run on the result, so a lucky-but-wrong strip
- * cannot produce a spec that was not actually intended as one.
+ * Kimi has been observed corrupting an otherwise well-formed chart spec with
+ * one stray trailing token before the real fence close: an extra `}` or `]`
+ * (e.g. `...}]}}` instead of `...}]}`), or one or two stray backticks glued
+ * directly onto the JSON with no newline before the actual ``` fence line
+ * (e.g. `...}]}\`\`` on the content line, then ``` \`\`\` ``` on its own
+ * line next). Either sinks a plain `JSON.parse`. Recover by stripping a
+ * trailing bracket or backtick and retrying, bounded to a few attempts so a
+ * genuinely broken payload still gives up rather than stripping real
+ * content. The schema checks below still run on the result, so a
+ * lucky-but-wrong strip cannot produce a spec that was not actually intended
+ * as one.
  */
 function parseJsonWithTrailingRepair(text: string): unknown {
   const direct = tryParseJson(text);
   if (direct) return direct.value;
 
   let candidate = text;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const stripped = candidate.replace(/[}\]][ \t]*$/, '');
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const stripped = candidate.replace(/[}\]`][ \t]*$/, '');
     if (stripped === candidate || !stripped) return undefined;
     candidate = stripped;
     const parsed = tryParseJson(candidate);
