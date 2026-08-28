@@ -266,6 +266,29 @@ describe('parseChartSpec', () => {
     expect(parseChartSpec('[1, 2, 3]')).toBeNull();
     expect(parseChartSpec('{ "type": "line", ')).toBeNull();
   });
+
+  it('repairs a spec with one stray trailing closing bracket (observed from Kimi)', () => {
+    const valid = JSON.stringify({
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'Iceland' }],
+      rows: [{ year: 2020, Iceland: 1 }]
+    });
+    expect(parseChartSpec(`${valid}}`)?.x).toBe('year');
+    expect(parseChartSpec(`${valid}]`)?.x).toBe('year');
+    expect(parseChartSpec(`${valid} }`)?.x).toBe('year');
+  });
+
+  it('does not repair a spec missing more than a trailing stray bracket', () => {
+    const valid = JSON.stringify({
+      type: 'line',
+      x: 'year',
+      series: [{ key: 'Iceland' }],
+      rows: [{ year: 2020, Iceland: 1 }]
+    });
+    expect(parseChartSpec(`${valid}}}}}`)).toBeNull();
+    expect(parseChartSpec('{ "type": "line" ]')).toBeNull();
+  });
 });
 
 describe('toChartNumber', () => {
