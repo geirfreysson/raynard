@@ -7434,17 +7434,18 @@ function renderMarkdownLightweight(
       if (index < sourceLines.length) {
         index += 1;
       }
-      // A ```chart fence carries a JSON spec the host draws with Recharts. An
-      // unparseable spec falls through to the ordinary code block below so the
-      // model's output is never swallowed.
-      if (language === 'chart') {
-        const spec = parseChartSpec(block.join('\n'));
-        if (spec) {
-          // Legacy saved answers may still contain chart fences. New answers
-          // arrive through present_chart and render outside the Markdown text.
-          appendRenderedChart(container, spec, context, citedInline, sourceEntries);
-          continue;
-        }
+      // A ```chart fence carries a JSON spec the host draws with Recharts.
+      // Some models (observed with Kimi) emit the same JSON without labelling
+      // the fence ```chart, so any fence body is tried against the chart
+      // schema regardless of its language tag. An unparseable spec falls
+      // through to the ordinary code block below so the model's output is
+      // never swallowed.
+      const spec = parseChartSpec(block.join('\n'));
+      if (spec) {
+        // Legacy saved answers may still contain chart fences. New answers
+        // arrive through present_chart and render outside the Markdown text.
+        appendRenderedChart(container, spec, context, citedInline, sourceEntries);
+        continue;
       }
       const pre = document.createElement('pre');
       const code = document.createElement('code');

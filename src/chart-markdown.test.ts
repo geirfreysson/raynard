@@ -21,4 +21,17 @@ describe('normalizeChartFenceBoundaries', () => {
     const malformed = 'Explain this:```chart\nnot json\n```';
     expect(normalizeChartFenceBoundaries(malformed)).toBe(malformed);
   });
+
+  it('repairs a valid chart spec whose fence forgot the chart language tag', () => {
+    const untagged =
+      '```\n{"type":"line","x":"year","series":[{"key":"value"}],"rows":[{"year":"2024","value":1}]}\n```';
+    expect(normalizeChartFenceBoundaries(`Here you go:${untagged}`)).toBe(
+      `Here you go:\n\n${untagged}`
+    );
+  });
+
+  it('leaves an ordinary untagged code fence untouched', () => {
+    const code = '```\nconst x = 1;\n```';
+    expect(normalizeChartFenceBoundaries(`Example:${code}`)).toBe(`Example:${code}`);
+  });
 });
