@@ -10,7 +10,7 @@
       "emphasis": "data",
       "after": "to me."
     },
-    "body": "Raynard connects to data APIs, public or private, so you can ask questions in plain English—every answer comes back with a reference you can check.",
+    "body": "Raynard is an AI agent for data, not code—it turns a plain-English question into API calls across your sources and answers with a citation for every number.",
     "downloads": {
       "order": [
         "macos",
