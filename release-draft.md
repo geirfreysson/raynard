@@ -1,24 +1,30 @@
-# Raynard v0.9.0
+# Raynard v0.10.0
 
-Charts render correctly from a wider range of model output, and the marketing
-site picks up a real demo video, a social share card, and download analytics.
+Chart JSON that a model corrupts in transit now recovers through a general
+repair pipeline instead of a short list of exact, previously-seen shapes.
 
-## More resilient chart rendering
+## General-purpose chart JSON repair
 
-Two chart-parsing gaps, both observed live against Kimi K2.5, are fixed. A
-fenced code block is now checked against the chart JSON schema regardless of
-its language tag — a model that emits a valid chart spec without labelling
-the fence ` ```chart ` still renders as a chart instead of falling back to a
-plain code block. Separately, a model that appends one stray trailing `}` or
-`]` after an otherwise well-formed spec — turning `...}]}` into `...}]}}` —
-no longer sinks the whole block: the parser retries with the stray bracket
-stripped before giving up. Both fixes still run every candidate through the
-existing schema validation, so a malformed body can never be misread as a
-chart.
+`v0.9.0` fixed two exact malformations observed from Kimi K2.5: a chart fence
+missing its `chart` language tag, and one stray trailing `}`/`]` glued onto an
+otherwise well-formed spec. Further testing turned up a third shape — one or
+two stray backticks glued directly onto the JSON with no newline before the
+real fence close — which the narrow, bounded bracket-stripping from `v0.9.0`
+didn't cover.
 
-## Docs site polish
+Rather than add a fourth special case, chart parsing now runs a small pipeline
+of general-purpose repairs, each re-validated by the full chart schema before
+use:
 
-The homepage hero now plays a clickable demo video with a poster image
-instead of a static graphic, complete with a dedicated social share card for
-link previews. Download link clicks are now tracked, and the hero copy was
-tightened to lead with what Raynard actually does.
+- straighten smart/curly quotes left over from pasted text
+- strip a dangling trailing comma before a closing bracket or brace, tracking
+  string state so a comma inside a title or label is never touched
+- extract the first balanced top-level JSON object, ignoring any narration
+  glued onto its head or tail and any amount of trailing garbage after it
+  closes
+
+That balanced-object extraction alone covers every trailing-garbage shape
+seen so far — and any future one shaped the same way — instead of only the
+specific bracket and backtick sequences already observed. A genuinely
+truncated or broken spec still falls back to an ordinary code block rather
+than being misread as a chart.
