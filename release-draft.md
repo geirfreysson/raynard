@@ -1,30 +1,24 @@
-# Raynard v0.10.0
+# Raynard v0.11.0
 
-Chart JSON that a model corrupts in transit now recovers through a general
-repair pipeline instead of a short list of exact, previously-seen shapes.
+A `/new` slash command and a fix for wide markdown tables that were silently
+falling back to unreadable raw text.
 
-## General-purpose chart JSON repair
+## `/new` slash command
 
-`v0.9.0` fixed two exact malformations observed from Kimi K2.5: a chart fence
-missing its `chart` language tag, and one stray trailing `}`/`]` glued onto an
-otherwise well-formed spec. Further testing turned up a third shape — one or
-two stray backticks glued directly onto the JSON with no newline before the
-real fence close — which the narrow, bounded bracket-stripping from `v0.9.0`
-didn't cover.
+Typing `/new` now runs the same flow as the sidebar's New Chat action:
+switches to the Chats sidebar and opens a fresh conversation with the
+pre-chat suggestions. It's registered in the slash menu alongside
+`/extensions`, `/models`, `/settings`, and `/status`, so it's discoverable
+without knowing it exists.
 
-Rather than add a fourth special case, chart parsing now runs a small pipeline
-of general-purpose repairs, each re-validated by the full chart schema before
-use:
+## Wide markdown tables render correctly
 
-- straighten smart/curly quotes left over from pasted text
-- strip a dangling trailing comma before a closing bracket or brace, tracking
-  string state so a comma inside a title or label is never touched
-- extract the first balanced top-level JSON object, ignoring any narration
-  glued onto its head or tail and any amount of trailing garbage after it
-  closes
+The lightweight markdown renderer capped tables at 8 columns. Any table wider
+than that — a routine shape for a multi-metric comparison, e.g. several
+stocks across price, valuation, and margin columns — silently fell back to
+unparsed, raw pipe-delimited text instead of an HTML table, with no
+indication anything had gone wrong.
 
-That balanced-object extraction alone covers every trailing-garbage shape
-seen so far — and any future one shaped the same way — instead of only the
-specific bracket and backtick sequences already observed. A genuinely
-truncated or broken spec still falls back to an ordinary code block rather
-than being misread as a chart.
+The cap is now 24 columns, and a table wide enough to exceed the message
+width scrolls horizontally instead of squeezing every column down to a few
+unreadable pixels.
