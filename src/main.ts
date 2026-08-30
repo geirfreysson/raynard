@@ -499,7 +499,12 @@ const INLINE_MARKDOWN_PATTERN =
 const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
-const MAX_MARKDOWN_TABLE_COLUMNS = 8;
+// A real comparison table (e.g. several stocks x price/valuation/margin
+// columns) routinely runs past a dozen columns. The cap only exists to stop
+// pathological input from rendering an unusably wide table; 8 was low enough
+// that a well-formed table fell back to raw, unparsed pipe text instead of an
+// HTML table.
+const MAX_MARKDOWN_TABLE_COLUMNS = 24;
 const DEFAULT_SPLASH_PROMPTS = [
   'Start a lightweight research conversation',
   'Summarize what this barebones app can do',
@@ -7552,12 +7557,14 @@ function renderMarkdownLightweight(
       // Copy the source rather than the rendered table, so a table truncated
       // for display still lands on the clipboard whole.
       const tableMarkdown = sourceLines.slice(tableStart, index).join('\n');
-      container.appendChild(
-        wrapCopyable(table, 'Copy table', () => ({
-          text: tableMarkdown,
-          image: () => tableToPngBlob(table, sourceEntries)
-        }))
-      );
+      const tableWrapper = wrapCopyable(table, 'Copy table', () => ({
+        text: tableMarkdown,
+        image: () => tableToPngBlob(table, sourceEntries)
+      }));
+      // A wide table (many columns, or long cell text) scrolls horizontally
+      // rather than squeezing every column unreadably into the message width.
+      tableWrapper.classList.add('copyable-table');
+      container.appendChild(tableWrapper);
       appendCitationLine(container, context, citedInline);
       continue;
     }

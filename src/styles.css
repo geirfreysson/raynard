@@ -2001,10 +2001,17 @@ textarea:focus {
 
 .message-text table {
   width: 100%;
+  min-width: max-content;
   border-collapse: collapse;
   margin: 10px 0;
   font-size: 13px;
-  table-layout: fixed;
+  table-layout: auto;
+}
+
+/* A table with many columns is wider than the message column; scroll it
+   horizontally instead of squeezing every column down to a few pixels. */
+.message-text .copyable-table {
+  overflow-x: auto;
 }
 
 .message-text th,
