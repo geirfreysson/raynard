@@ -87,6 +87,12 @@ import {
   createCitationLine,
   createInlineCitation
 } from './citation-modal';
+import {
+  appendInlineMarkdownSafe,
+  EMPTY_MESSAGE_CONTEXT,
+  messageContext,
+  type MessageContext
+} from './inline-markdown';
 import { describeModelFailure } from './model-error';
 import {
   cancelAgentTurnStream,
@@ -477,25 +483,6 @@ type ChatMeta = Pick<
   activeBuildPlugin?: ActiveBuildPlugin;
 };
 
-/**
- * What a rendered assistant message knows about the turn behind it: the API
- * calls it cited, and the result cards those calls produced. A citation points
- * at a card by index, so the rows are stored once and read from here.
- */
-type MessageContext = {
-  sources: ChartSource[];
-  cards: StoredResultCard[];
-};
-
-const EMPTY_MESSAGE_CONTEXT: MessageContext = { sources: [], cards: [] };
-
-function messageContext(record: { sources?: ChartSource[]; cards?: StoredResultCard[] }): MessageContext {
-  return { sources: record.sources ?? [], cards: record.cards ?? [] };
-}
-
-// The trailing alternative is a citation marker the model wrote, e.g. [^3].
-const INLINE_MARKDOWN_PATTERN =
-  /(?:`([^`]+)`)|(?:\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(?:\*\*([^*]+)\*\*)|(?:__([^_]+)__)|(?:\*([^*]+)\*)|(?:_([^_]+)_)|(?:\[\^(\d{1,3})\])/g;
 const MAX_MARKDOWN_RENDER_LENGTH = 20000;
 const MAX_MARKDOWN_RENDER_LINES = 500;
 const MAX_MARKDOWN_TABLE_ROWS = 40;
@@ -7600,56 +7587,6 @@ function renderMarkdownLightweight(
     const paragraph = document.createElement('p');
     appendInlineMarkdownSafe(paragraph, paragraphLines.join(' '), context);
     container.appendChild(paragraph);
-  }
-}
-
-function appendInlineMarkdownSafe(
-  container: HTMLElement,
-  text: string,
-  context: MessageContext = EMPTY_MESSAGE_CONTEXT
-) {
-  const source = String(text || '');
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  INLINE_MARKDOWN_PATTERN.lastIndex = 0;
-
-  while ((match = INLINE_MARKDOWN_PATTERN.exec(source))) {
-    if (match.index > lastIndex) {
-      container.appendChild(document.createTextNode(source.slice(lastIndex, match.index)));
-    }
-
-    if (match[1]) {
-      const code = document.createElement('code');
-      code.textContent = match[1];
-      container.appendChild(code);
-    } else if (match[2] && match[3]) {
-      // No target="_blank": the delegated handler forwards the click to the OS browser.
-      const link = document.createElement('a');
-      link.href = match[3];
-      link.rel = 'noreferrer noopener';
-      link.textContent = match[2];
-      container.appendChild(link);
-    } else if (match[4] || match[5]) {
-      const strong = document.createElement('strong');
-      strong.textContent = match[4] || match[5];
-      container.appendChild(strong);
-    } else if (match[6] || match[7]) {
-      const emphasis = document.createElement('em');
-      emphasis.textContent = match[6] || match[7];
-      container.appendChild(emphasis);
-    } else if (match[8]) {
-      // A marker for a reference this turn never issued cites nothing, so it
-      // stays the literal text the model wrote rather than becoming a chip.
-      const citation = createInlineCitation(Number(match[8]), context.sources, context.cards);
-      container.appendChild(citation ?? document.createTextNode(match[0]));
-    }
-
-    lastIndex = INLINE_MARKDOWN_PATTERN.lastIndex;
-  }
-
-  if (lastIndex < source.length) {
-    container.appendChild(document.createTextNode(source.slice(lastIndex)));
   }
 }
 
