@@ -1309,6 +1309,13 @@ async function runSlashCommand(typed: string, input: HTMLTextAreaElement | null)
     await openSettingsPage();
     return true;
   }
+  if (command === '/new') {
+    if (input) input.value = '';
+    hideSlashMenu();
+    setSidebarView('chats');
+    await startNewConversation({ showPreChat: true });
+    return true;
+  }
   return false;
 }
 

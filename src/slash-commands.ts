@@ -13,6 +13,7 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/extensions', description: 'Browse installed and bundled extensions' },
   { command: '/models', description: 'Connect or switch model providers' },
+  { command: '/new', description: 'Start a new chat' },
   { command: '/settings', description: 'App version and updates' },
   { command: '/status', description: 'Token usage and provider quota' }
 ];
