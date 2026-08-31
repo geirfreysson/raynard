@@ -285,6 +285,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
   const grid = <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />;
   const legend = showLegend ? (
     <Legend
+      verticalAlign="top"
       wrapperStyle={{ fontSize: 12, cursor: 'pointer' }}
       // Recharts greys an entry whose series is hidden; point it at the theme
       // rather than its hard-coded #ccc, which is invisible in dark mode.

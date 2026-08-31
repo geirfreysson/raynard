@@ -128,6 +128,9 @@ describe('ChartBlock', () => {
 
     expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(2);
     expect(container.querySelectorAll('.recharts-line-dot')).toHaveLength(6);
+    const legend = container.querySelector<HTMLElement>('.recharts-legend-wrapper');
+    expect(legend?.style.top).not.toBe('');
+    expect(legend?.style.bottom).toBe('');
     expect(container.textContent).toContain('GDP per person employed');
     expect(container.innerHTML).toContain('--chart-1');
     expect(container.innerHTML).toContain('--chart-2');
