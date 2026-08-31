@@ -1,40 +1,17 @@
-# Raynard v0.11.1
+# Raynard v0.12.0
 
-A bugfix release: citations, links, and inline code wrapped in bold or italic
-text now render properly instead of appearing as raw markup.
+A bugfix release: Kimi conversations work again after Moonshot decommissioned
+the `kimi-k2.5` model.
 
-## Citations inside emphasis render as chips
+## Kimi chats stopped working when Moonshot retired kimi-k2.5
 
-Assistant answers cite their sources with `[^n]` markers, which the renderer
-turns into clickable chips that open the observation behind the number. Any
-marker the model wrapped in emphasis was rendered as literal text instead.
+Moonshot discontinued `kimi-k2.5` on 2026-08-31 in favor of `kimi-k2.6`. Every
+Kimi turn immediately failed with a 404 from Moonshot's API, since Raynard's
+Moonshot provider defaulted to and stored the now-dead model id.
 
-That is exactly the shape models reach for when attributing a block, so it hit
-constantly. A research answer ending its sections with
+The provider preset's default chat model now points at `kimi-k2.6`. An
+install that already had `kimi-k2.5` saved as its active chat or coding model
+is migrated automatically the next time its config loads — no need to notice
+the failure and reselect a model in `/models`.
 
-    *Sources: [^7], [^8]*
-
-showed the raw `[^7]` and `[^8]` rather than chips, while bare markers
-elsewhere in the same answer worked normally — leaving an answer with some
-citations clickable and others not, for no reason visible to the reader.
-
-Replaying one real 31-reference answer through the fixed renderer: all 13
-cited markers now resolve, where 9 of them previously stayed literal.
-
-The cause was that inline markdown is matched with a single flat pattern, and
-the `<strong>`/`<em>` branches filled their node with `textContent` — which
-discarded every nested span. Links and inline code inside emphasis were lost
-the same way, so `**See [the docs](https://example.com)**` rendered its
-markdown source rather than a link.
-
-Emphasis now renders its own contents, bounded by a nesting cap. Because the
-pattern is a shared stateful regex, spans are collected before any node is
-appended, so a nested walk cannot disturb the position of the walk that
-started it.
-
-## Internals
-
-The inline renderer moved out of `src/main.ts` into `src/inline-markdown.ts`.
-`main.ts` is the application entry point and runs side effects on import, so
-nothing in it could be covered by a test; the extracted module is now tested
-directly, including citations, links, and code nested inside emphasis.
+`kimi-k3`, the default coding model, is unaffected and unchanged.
