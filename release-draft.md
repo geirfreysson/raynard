@@ -1,17 +1,14 @@
-# Raynard v0.12.0
+# Raynard v0.12.1
 
-A bugfix release: Kimi conversations work again after Moonshot decommissioned
-the `kimi-k2.5` model.
+A bugfix release for chart readability: legends now sit above the plot instead
+of overlapping the x-axis.
 
-## Kimi chats stopped working when Moonshot retired kimi-k2.5
+## Chart legends no longer cover x-axis labels
 
-Moonshot discontinued `kimi-k2.5` on 2026-08-31 in favor of `kimi-k2.6`. Every
-Kimi turn immediately failed with a 404 from Moonshot's API, since Raynard's
-Moonshot provider defaulted to and stored the now-dead model id.
+Multi-series charts previously used Recharts' default bottom legend. On line
+charts with enough series or longer labels, the legend could occupy the same
+space as the x-axis and obscure its labels.
 
-The provider preset's default chat model now points at `kimi-k2.6`. An
-install that already had `kimi-k2.5` saved as its active chat or coding model
-is migrated automatically the next time its config loads — no need to notice
-the failure and reselect a model in `/models`.
-
-`kimi-k3`, the default coding model, is unaffected and unchanged.
+Legends now use the chart's top alignment. Recharts reserves plot space for the
+legend there, keeping the x-axis clear while preserving the existing controls
+for hiding and restoring individual series.
