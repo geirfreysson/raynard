@@ -5371,7 +5371,7 @@ fn provider_preset(provider_id: &str) -> Option<ProviderPreset> {
             id: "moonshot",
             name: "Kimi",
             base_url: "https://api.moonshot.ai/v1",
-            default_chat_model: "kimi-k2.5",
+            default_chat_model: "kimi-k2.6",
             default_coding_model: "kimi-k3",
             api_key_names: &[
                 "STOCKBOT_MODEL_API_KEY",
@@ -5486,6 +5486,16 @@ fn app_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("config.json"))
 }
 
+/// Moonshot discontinued `kimi-k2.5` on 2026-08-31 in favor of `kimi-k2.6`; a
+/// config saved before that date can still carry the dead id, and Moonshot's
+/// API now 404s on every turn until the user notices and reselects a model.
+fn migrate_deprecated_model_id(model: Option<String>) -> Option<String> {
+    match model.as_deref() {
+        Some("kimi-k2.5") => Some("kimi-k2.6".to_string()),
+        _ => model,
+    }
+}
+
 fn load_app_config(app: &tauri::AppHandle) -> Result<AppConfig, String> {
     let path = app_config_path(app)?;
     if !path.is_file() {
@@ -5494,7 +5504,11 @@ fn load_app_config(app: &tauri::AppHandle) -> Result<AppConfig, String> {
 
     let raw =
         fs::read_to_string(path).map_err(|error| format!("Could not read app config: {error}"))?;
-    serde_json::from_str(&raw).map_err(|error| format!("Could not parse app config: {error}"))
+    let mut config: AppConfig =
+        serde_json::from_str(&raw).map_err(|error| format!("Could not parse app config: {error}"))?;
+    config.active_model = migrate_deprecated_model_id(config.active_model);
+    config.active_coding_model = migrate_deprecated_model_id(config.active_coding_model);
+    Ok(config)
 }
 
 fn save_app_config(app: &tauri::AppHandle, config: AppConfig) -> Result<(), String> {
@@ -6466,7 +6480,8 @@ mod tests {
         external_url_target, externalize_large_card_data_in, externalize_result_data_in,
         format_quota_window, generated_plugin_source_mtime_millis, install_catalog_extension_from,
         load_bookmark_cache_in, load_generated_plugin_runtime_tools_cached,
-        load_or_rebuild_chat_history_index_in, merge_turn_usage, next_available_plugin_slug,
+        load_or_rebuild_chat_history_index_in, merge_turn_usage, migrate_deprecated_model_id,
+        next_available_plugin_slug,
         normalize_plugin_display_name, normalize_plugin_slug, normalize_stored_messages,
         now_millis, oauth_needs_refresh, packaged_node_path_for, packaged_runtime_scripts_dir_for,
         parse_chatgpt_usage, parse_moonshot_balance, parse_stored_credential,
@@ -7891,6 +7906,19 @@ mod tests {
         assert!(parse_chatgpt_usage(&json!({})).is_none());
         assert!(parse_chatgpt_usage(&json!({ "detail": "Not Found" })).is_none());
         assert!(parse_chatgpt_usage(&json!({ "used_percent": "42" })).is_none());
+    }
+
+    #[test]
+    fn migrate_deprecated_model_id_remaps_only_the_dead_kimi_slug() {
+        assert_eq!(
+            migrate_deprecated_model_id(Some("kimi-k2.5".to_string())),
+            Some("kimi-k2.6".to_string())
+        );
+        assert_eq!(
+            migrate_deprecated_model_id(Some("kimi-k3".to_string())),
+            Some("kimi-k3".to_string())
+        );
+        assert_eq!(migrate_deprecated_model_id(None), None);
     }
 
     #[test]
