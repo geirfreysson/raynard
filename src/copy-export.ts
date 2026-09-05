@@ -28,6 +28,8 @@ const CHART_TITLE_GAP = 12;
 const LEGEND_SWATCH = 10;
 /** Height of the brand mark on an exported image, in CSS pixels. */
 const BRAND_HEIGHT = 10;
+/** Wordmark written beside the fox on copied chart and table images. */
+const BRAND_LABEL = 'raynard.ai';
 /** Space between the content and the footer below it. */
 const BRAND_GAP = 6;
 /** Room under the wordmark's baseline for its descender. */
@@ -300,7 +302,7 @@ function planFooter(entries: string[], contentWidth: number) {
   if (!scratch) return { lines: [] as string[], height: BRAND_HEIGHT + BRAND_DESCENDER, brand: 0 };
 
   scratch.font = brandFont();
-  const brand = scratch.measureText('raynard').width + 4 + BRAND_HEIGHT * FOX_ASPECT;
+  const brand = scratch.measureText(BRAND_LABEL).width + 4 + BRAND_HEIGHT * FOX_ASPECT;
 
   scratch.font = sourceFont();
   const lines = planSourceLines(scratch, entries, contentWidth - brand - BRAND_GAP * 2);
@@ -340,9 +342,9 @@ async function drawBrandMark(context: CanvasRenderingContext2D, right: number, b
     context.fillStyle = mutedColor();
     context.textBaseline = 'alphabetic';
     context.textAlign = 'right';
-    context.fillText('raynard', right, bottom);
+    context.fillText(BRAND_LABEL, right, bottom);
 
-    const labelWidth = context.measureText('raynard').width;
+    const labelWidth = context.measureText(BRAND_LABEL).width;
     const foxWidth = BRAND_HEIGHT * FOX_ASPECT;
     const fox = await loadSvgImage(foxLogoMarkup);
     context.drawImage(

@@ -23,6 +23,7 @@ import {
   type IconNode
 } from 'lucide';
 import {
+  bookmarkLabel,
   bookmarkMessageKey,
   bookmarkPreview,
   canBookmarkMessage,
@@ -30,7 +31,7 @@ import {
 } from './bookmarks';
 import { getErrorMessage } from './errors';
 import { filterChatsByName } from './chat-filter';
-import { latestChatTurnIso } from './chat-history';
+import { latestChatTurnIso, orderChatsByUpdatedAt, upsertChatByUpdatedAt } from './chat-history';
 import {
   calendarFieldsFor,
   relativeRunLabel,
@@ -49,6 +50,7 @@ import {
 import { createCoalescedSaveQueue } from './chat-persistence';
 import type { ExtensionRecommendation } from './extension-recommendation';
 import {
+  catalogExtensionHasUpdate,
   catalogExtensionMatches,
   extensionRemovalAction,
   groupExtensions
@@ -76,7 +78,7 @@ import { agentActivityLabel } from './agent-activity';
 import { parseChartSpec, type ChartSpec } from './chart-spec';
 import { normalizeChartFenceBoundaries } from './chart-markdown';
 import { renderChart, unmountChart } from './chart-mount';
-import { extractPresentedChart, normalizeStoredCharts } from './presented-chart';
+import { extractPresentedChart, normalizeStoredCharts, planChartPlacement } from './presented-chart';
 import { wrapCopyable } from './copy-affordance';
 import { writeClipboard } from './clipboard';
 import { chartRootToPngBlob, chartSpecToMarkdown, tableToPngBlob } from './copy-export';
@@ -186,6 +188,19 @@ import {
   getReferenceQueryAtCursor,
   type MentionItem
 } from './mention';
+import {
+  buildBookmarkMentionIndex,
+  buildBookmarkMentionItems,
+  expandBookmarkMentions,
+  parseBookmarkReferenceBlocks,
+  type MentionableBookmark
+} from './bookmark-mentions';
+import { openBookmarkReferenceModal } from './bookmark-reference-modal';
+import {
+  memoryScopeDisplayName,
+  type MemoryChangeRequest,
+  type StoredMemory
+} from './memory';
 import foxLogoMarkup from './assets/northfox-fox-logo.svg?raw';
 import './styles.css';
 
@@ -269,8 +284,16 @@ type StoredChatMessage = {
   /** Tool calls and reasoning in the order they happened. */
   builderActivities?: BuilderActivity[];
   cards?: StoredResultCard[];
-  /** Native present_chart results, rendered beneath the answer text. */
+  /** Native present_chart results, rendered inline at the point in the text where each was produced. */
   charts?: ChartSpec[];
+  /**
+   * Character offset into `text`, one per entry of `charts`, marking where the
+   * model had written to when it called present_chart for that chart. Absent
+   * for messages saved before this existed, and for a chart whose offset can't
+   * be resolved (e.g. still streaming past it) — either falls back to
+   * rendering after the rest of the text, same as the old append-only layout.
+   */
+  chartOffsets?: number[];
   /**
    * The API calls that fed this turn, one entry per citing tool call. Persisted
    * so a chart copied out of a reloaded chat still names its data sources.
@@ -294,6 +317,10 @@ type StoredChatMessage = {
   scheduledTaskId?: string;
   scheduledTaskName?: string;
   scheduledExecutionId?: string;
+  /** Agent-proposed memory create/update/delete, awaiting the user's confirmation. */
+  memoryChangeRequest?: MemoryChangeRequest;
+  /** Set once the user acts on `memoryChangeRequest`, so a reload shows the resolved state, not stale buttons. */
+  memoryChangeOutcome?: 'saved' | 'discarded';
 };
 
 type StoredCredentialRequest = {
@@ -338,6 +365,8 @@ type StoredBookmark = {
   messageKey: string;
   chatId: string;
   chatName: string;
+  /** Model-written label. Empty on bookmarks saved before titles, or when naming failed. */
+  title: string;
   prompt: string;
   answer: string;
   messageTimestamp: number;
@@ -431,6 +460,8 @@ type CatalogExtension = {
   tools: CatalogExtensionTool[];
   requiresKey: boolean;
   installed: boolean;
+  /** Version of the installed snapshot. Empty when the extension is not installed. */
+  installedVersion: string;
 };
 
 type CatalogExtensionList = {
@@ -843,12 +874,19 @@ let activeChatMeta = createChatMeta(activeSessionId);
 let chatMessages: ChatMessage[] = [];
 let storedMessages: StoredChatMessage[] = [];
 let chatHistoryRows: ChatHistoryRow[] = [];
+let chatHistoryRevision = 0;
 let generatedPlugins: GeneratedPlugin[] = [];
 let catalogExtensions: CatalogExtension[] = [];
 let bookmarkRows: StoredBookmark[] = [];
 let bookmarkTotal = 0;
 let bookmarkLoading = false;
 let bookmarkRefreshQueued = false;
+/** Bookmark ids currently waiting on the background AI naming call, so their row can show a spinner. */
+const namingBookmarkIds = new Set<string>();
+/** The full bookmark collection, kept in sync for the @-mention menu (list_bookmarks is paginated). */
+let bookmarkMentionRows: StoredBookmark[] = [];
+/** Every saved memory, used to resolve a proposal's current scope and to render `/memory`. */
+let memoryRows: StoredMemory[] = [];
 let scheduledTasks: ScheduledTask[] = [];
 let activeScheduledTaskId: string | null = null;
 let scheduledTaskRunnerActive = false;
@@ -905,6 +943,8 @@ initProviderOnboarding().catch(() => {
 void refreshChatHistory();
 void refreshGeneratedPlugins();
 void refreshScheduledTasks();
+void refreshBookmarkMentionIndex();
+void refreshMemoryRows();
 syncModeControls();
 
 // Shared answers. The subscription drains anything the OS delivered before the
@@ -1301,6 +1341,10 @@ async function runSlashCommand(typed: string, input: HTMLTextAreaElement | null)
     await openSettingsPage();
     return true;
   }
+  if (command === '/memory') {
+    await openMemoryCommandFlow(input);
+    return true;
+  }
   if (command === '/new') {
     if (input) input.value = '';
     hideSlashMenu();
@@ -1330,7 +1374,10 @@ function syncMentionMenu(input: HTMLTextAreaElement | null) {
     hideMentionMenu();
     return;
   }
-  const items = filterMentionItems(buildMentionItems(generatedPlugins), ref.query);
+  const items = filterMentionItems(
+    [...buildMentionItems(generatedPlugins), ...buildBookmarkMentionItems(bookmarkMentionRows)],
+    ref.query
+  );
   if (!items.length) {
     hideMentionMenu();
     return;
@@ -1595,7 +1642,8 @@ function renderCatalogExtensionRow(extension: CatalogExtension, installed: boole
   const action = document.createElement('button');
   action.type = 'button';
   action.className = 'extensions-install-button';
-  action.textContent = installed ? 'Open' : 'Install';
+  const hasUpdate = catalogExtensionHasUpdate(extension);
+  action.textContent = installed ? (hasUpdate ? `Update to v${extension.version}` : 'Open') : 'Install';
   if (installed) {
     const plugin = generatedPlugins.find((candidate) =>
       catalogExtensionMatches(candidate, extension)
@@ -1609,6 +1657,10 @@ function renderCatalogExtensionRow(extension: CatalogExtension, installed: boole
     });
     action.addEventListener('click', () => {
       if (!plugin) return;
+      if (hasUpdate) {
+        void updateCatalogExtension(extension, action);
+        return;
+      }
       closeExtensionsModal();
       void openGeneratedPlugin(plugin.id);
     });
@@ -1648,6 +1700,43 @@ async function installCatalogExtension(
     if (extensionsModalHint) {
       extensionsModalHint.textContent = getErrorMessage(error, `Could not install ${extension.name}.`);
     }
+  }
+}
+
+/**
+ * Replaces an installed extension with the version bundled in this app release.
+ *
+ * Uninstalling and reinstalling would also pick up new files, but that path
+ * forgets the extension's stored API key, so a routine update would make the
+ * user re-enter it. This keeps the credential and the cached responses.
+ */
+async function updateCatalogExtension(
+  extension: CatalogExtension,
+  button: HTMLButtonElement
+) {
+  const label = button.textContent || `Update to v${extension.version}`;
+  button.disabled = true;
+  button.textContent = 'Updating...';
+  if (extensionsModalHint) extensionsModalHint.textContent = `Updating ${extension.name}...`;
+  try {
+    const updated = await invoke<GeneratedPlugin>('update_catalog_extension', {
+      slug: extension.slug
+    });
+    await loadExtensionsModal();
+    if (extensionsModalHint) {
+      extensionsModalHint.textContent = `${extension.name} updated to v${extension.version}.`;
+    }
+    if (selectedCatalogExtensionSlug === extension.slug) {
+      await openGeneratedPlugin(updated.id);
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = label;
+    const message = getErrorMessage(error, `Could not update ${extension.name}.`);
+    if (sidebarView === 'plugins' && chatHistoryStatus) {
+      chatHistoryStatus.textContent = message;
+    }
+    if (extensionsModalHint) extensionsModalHint.textContent = message;
   }
 }
 
@@ -1758,6 +1847,88 @@ async function openSettingsPage() {
   chatForm?.classList.add('is-hidden');
   document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
   settingsToggle?.setAttribute('aria-pressed', 'true');
+}
+
+/**
+ * `/memory` — a read-only view of what the agent has remembered, grouped by
+ * scope. There is no edit/delete control here by design: a memory is only
+ * ever changed by the agent proposing a create/update/delete that the user
+ * confirms in-chat, never by a form on this screen.
+ */
+async function openMemoryCommandFlow(input: HTMLTextAreaElement | null) {
+  if (!pluginDetailView || !messages) return;
+  if (input) input.value = '';
+  hideSlashMenu();
+  mainViewRevision += 1;
+
+  const rows = await refreshMemoryRows();
+
+  activeScheduledTaskId = null;
+  selectedPluginId = '';
+  selectedCatalogExtensionSlug = '';
+  renderGeneratedPlugins();
+  renderScheduledTasks();
+
+  pluginDetailView.replaceChildren();
+  const page = document.createElement('div');
+  page.className = 'memory-view';
+
+  const header = document.createElement('h2');
+  header.textContent = 'Memory';
+  page.appendChild(header);
+
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'memory-view-empty';
+    empty.textContent = 'Nothing remembered yet.';
+    page.appendChild(empty);
+  } else {
+    const groups = new Map<string, StoredMemory[]>();
+    for (const row of rows) {
+      const label = memoryScopeDisplayName(row);
+      const group = groups.get(label) ?? [];
+      group.push(row);
+      groups.set(label, group);
+    }
+    const orderedLabels = [
+      'Global',
+      ...[...groups.keys()].filter((label) => label !== 'Global').sort()
+    ];
+    for (const label of orderedLabels) {
+      const group = groups.get(label);
+      if (!group?.length) continue;
+      const section = document.createElement('section');
+      section.className = 'memory-view-group';
+      const title = document.createElement('h3');
+      title.textContent = label;
+      section.appendChild(title);
+      const list = document.createElement('ul');
+      list.className = 'memory-view-list';
+      for (const memory of [...group].sort((a, b) => b.updatedAt - a.updatedAt)) {
+        const item = document.createElement('li');
+        item.className = 'memory-view-item';
+        const content = document.createElement('p');
+        content.textContent = memory.content;
+        item.appendChild(content);
+        const meta = document.createElement('span');
+        meta.className = 'memory-view-item-meta';
+        meta.textContent = `Updated ${formatChatDate(new Date(memory.updatedAt).toISOString())}`;
+        item.appendChild(meta);
+        list.appendChild(item);
+      }
+      section.appendChild(list);
+      page.appendChild(section);
+    }
+  }
+
+  pluginDetailView.appendChild(page);
+
+  shell?.classList.add('plugin-view');
+  shell?.classList.remove('pre-chat');
+  pluginDetailView.classList.remove('is-hidden');
+  messages.classList.add('is-hidden');
+  chatForm?.classList.add('is-hidden');
+  document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
 }
 
 /**
@@ -3780,9 +3951,13 @@ function createPluginCodeSection(title: string, codeText: string) {
 }
 
 async function refreshChatHistory() {
+  const revision = chatHistoryRevision;
   try {
     const result = await invoke<ChatHistoryList>('list_chat_history');
-    chatHistoryRows = result.chats;
+    // A save may finish while this index read is in flight. Its returned row is
+    // newer than this snapshot, so never let the stale read move that chat back.
+    if (revision !== chatHistoryRevision) return;
+    chatHistoryRows = orderChatsByUpdatedAt(result.chats);
     renderChatHistory();
     if (chatHistoryStatus && sidebarView === 'chats') {
       chatHistoryStatus.textContent = sidebarStatusText('chats');
@@ -3792,6 +3967,24 @@ async function refreshChatHistory() {
       chatHistoryStatus.textContent = getErrorMessage(error, 'Could not load chats.');
     }
   }
+}
+
+async function refreshBookmarkMentionIndex() {
+  try {
+    bookmarkMentionRows = await invoke<StoredBookmark[]>('list_bookmark_mentions');
+  } catch {
+    // The @-mention menu just won't offer bookmarks this session; not worth surfacing.
+  }
+}
+
+async function refreshMemoryRows(): Promise<StoredMemory[]> {
+  try {
+    memoryRows = await invoke<StoredMemory[]>('list_memories');
+  } catch {
+    // A memory confirmation still renders from the request itself; only the
+    // "current scope" lookup and `/memory` listing degrade.
+  }
+  return memoryRows;
 }
 
 async function refreshBookmarks(reset: boolean) {
@@ -3839,23 +4032,51 @@ function renderBookmarks() {
   if (!bookmarkList) return;
   bookmarkList.replaceChildren();
   for (const bookmark of bookmarkRows) {
-    const open = document.createElement('button');
-    open.type = 'button';
-    open.className = 'bookmark-row';
-    open.setAttribute('aria-label', `Open bookmarked answer for: ${bookmark.prompt}`);
+    const label = bookmarkLabel(bookmark);
 
+    const row = document.createElement('div');
+    row.className = 'bookmark-row';
+
+    const titleButton = document.createElement('button');
+    titleButton.type = 'button';
+    titleButton.className = 'bookmark-row-title-button';
+    titleButton.title = 'Click to rename';
+    titleButton.setAttribute('aria-label', `Rename bookmark: ${label}`);
+
+    const titleWrap = document.createElement('span');
+    titleWrap.className = 'bookmark-row-title';
     const prompt = document.createElement('strong');
     prompt.className = 'bookmark-row-prompt';
-    prompt.textContent = bookmarkPreview(bookmark.prompt, 100);
+    prompt.textContent = bookmarkPreview(label, 100);
+    titleWrap.appendChild(prompt);
+    if (namingBookmarkIds.has(bookmark.id)) {
+      const spinner = document.createElement('span');
+      spinner.className = 'bookmark-row-naming-spinner';
+      spinner.setAttribute('role', 'status');
+      spinner.setAttribute('aria-label', 'Naming…');
+      titleWrap.appendChild(spinner);
+    }
+    titleButton.appendChild(titleWrap);
+    titleButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      startBookmarkRename(bookmark, titleWrap);
+    });
+
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'bookmark-row-open';
+    open.setAttribute('aria-label', `Open bookmarked answer for: ${label}`);
     const answer = document.createElement('span');
     answer.className = 'bookmark-row-answer';
     answer.textContent = bookmarkPreview(bookmark.answer, 220);
     const meta = document.createElement('span');
     meta.className = 'bookmark-row-meta';
     meta.textContent = `${bookmark.chatName} · ${formatChatDate(new Date(bookmark.createdAt).toISOString())}`;
-    open.append(prompt, answer, meta);
+    open.append(answer, meta);
     open.addEventListener('click', () => void openBookmarkedAnswer(bookmark));
-    bookmarkList.appendChild(open);
+
+    row.append(titleButton, open);
+    bookmarkList.appendChild(row);
   }
 
   if (bookmarkRows.length < bookmarkTotal) {
@@ -3866,6 +4087,63 @@ function renderBookmarks() {
     more.disabled = bookmarkLoading;
     more.addEventListener('click', () => void refreshBookmarks(false));
     bookmarkList.appendChild(more);
+  }
+}
+
+/** Swaps a bookmark row's title for an inline text input, committed on Enter/blur. */
+function startBookmarkRename(bookmark: StoredBookmark, titleWrap: HTMLElement) {
+  if (titleWrap.querySelector('input')) return;
+  const currentLabel = bookmarkLabel(bookmark);
+
+  titleWrap.replaceChildren();
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'bookmark-row-title-input';
+  input.value = currentLabel;
+  input.setAttribute('aria-label', 'Bookmark title');
+  titleWrap.appendChild(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = (commit: boolean) => {
+    if (settled) return;
+    settled = true;
+    const nextTitle = input.value.trim();
+    if (commit && nextTitle !== currentLabel) {
+      void saveBookmarkTitle(bookmark, nextTitle);
+    } else {
+      renderBookmarks();
+    }
+  };
+  input.addEventListener('mousedown', (event) => event.stopPropagation());
+  input.addEventListener('click', (event) => event.stopPropagation());
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+async function saveBookmarkTitle(bookmark: StoredBookmark, title: string) {
+  try {
+    const updated = await invoke<StoredBookmark>('save_bookmark', {
+      bookmark: { ...bookmark, title } satisfies StoredBookmark
+    });
+    const row = bookmarkRows.find((entry) => entry.id === updated.id);
+    if (row) bookmarkRows[bookmarkRows.indexOf(row)] = updated;
+    const activeEntry = activeBookmarks.get(updated.messageKey);
+    if (activeEntry?.id === updated.id) activeBookmarks.set(updated.messageKey, updated);
+    void refreshBookmarkMentionIndex();
+  } catch (error) {
+    console.warn('Could not rename bookmark:', getErrorMessage(error, 'unknown error'));
+  } finally {
+    renderBookmarks();
   }
 }
 
@@ -4503,7 +4781,10 @@ async function runScheduledExecution(execution: ScheduledExecution) {
           },
           onToolResult: (toolCall) => {
             const chart = extractPresentedChart(toolCall.result);
-            if (chart) (assistantRecord.charts ??= []).push(chart);
+            if (chart) {
+              (assistantRecord.charts ??= []).push(chart);
+              (assistantRecord.chartOffsets ??= []).push(streamed.length);
+            }
             const pluginName = pluginNameForTool(toolCall.toolName);
             const card = extractResultCard(toolCall, pluginName);
             let cardIndex: number | undefined;
@@ -4585,9 +4866,19 @@ async function openBookmarkedAnswer(bookmark: StoredBookmark) {
         message.role === 'assistant' && bookmarkMessageKey(message) === bookmark.messageKey
     );
     const article = record ? renderedMessageArticles.get(record) : undefined;
-    article?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    article?.classList.add('bookmark-target');
-    if (article) window.setTimeout(() => article.classList.remove('bookmark-target'), 1200);
+    if (article) {
+      const scrollToArticle = () => article.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // The chat container may have just been unhidden, and result cards/charts
+      // below the target can still be mounting: a scroll issued in the same
+      // tick can measure a layout that has not settled and undershoot. One
+      // corrective pass after layout has a chance to catch up fixes that.
+      requestAnimationFrame(() => {
+        scrollToArticle();
+        window.setTimeout(scrollToArticle, 250);
+      });
+      article.classList.add('bookmark-target');
+      window.setTimeout(() => article.classList.remove('bookmark-target'), 1200);
+    }
   } catch (error) {
     if (chatHistoryStatus && sidebarView === 'bookmarks') {
       chatHistoryStatus.textContent = getErrorMessage(error, 'Could not open bookmarked chat.');
@@ -4668,7 +4959,10 @@ async function persistActiveChatHistory() {
 async function persistChatSnapshot(meta: ChatMeta | undefined, stored: StoredChatMessage[]) {
   if (!meta || !stored.length) return;
   meta.updatedAt = latestChatTurnIso(stored, meta.updatedAt);
-  await chatSnapshotSaves.enqueue(meta.chatId, { ...meta, messages: stored });
+  const row = await chatSnapshotSaves.enqueue(meta.chatId, { ...meta, messages: stored });
+  chatHistoryRevision += 1;
+  chatHistoryRows = upsertChatByUpdatedAt(chatHistoryRows, row);
+  renderChatHistory();
 }
 
 async function markChatRead(chatId: string, force = false) {
@@ -4682,8 +4976,8 @@ async function markChatRead(chatId: string, force = false) {
 
   try {
     const updated = await invoke<ChatHistoryRow>('mark_chat_history_read', { chatId });
-    const index = chatHistoryRows.findIndex((chat) => chat.chatId === chatId);
-    if (index >= 0) chatHistoryRows[index] = updated;
+    chatHistoryRevision += 1;
+    chatHistoryRows = upsertChatByUpdatedAt(chatHistoryRows, updated);
     renderChatHistory();
   } catch (error) {
     if (existing) existing.unread = wasUnread;
@@ -5014,6 +5308,9 @@ function renderStoredMessage(message: StoredChatMessage) {
   if (message.role === 'assistant' && message.extensionRecommendation) {
     renderExtensionRecommendation(article, message.extensionRecommendation);
   }
+  if (message.role === 'assistant' && message.memoryChangeRequest) {
+    renderMemoryChangeConfirmation(article, message.memoryChangeRequest, message);
+  }
   if (message.role === 'assistant' && message.scheduledTaskRequest) {
     const body = article.querySelector<HTMLElement>('.message-text');
     if (body) renderScheduledTaskConfirmation(body, message);
@@ -5023,7 +5320,14 @@ function renderStoredMessage(message: StoredChatMessage) {
     if (body) renderModelFailure(body, message.modelFailure);
   }
   if (message.role === 'assistant' && message.status !== 'running' && message.charts?.length) {
-    renderMessageCharts(article, message.charts, messageContext(message));
+    renderMessageBody(
+      article,
+      message.text,
+      true,
+      message.charts,
+      message.chartOffsets,
+      messageContext(message)
+    );
   }
   if (message.role === 'assistant' && message.cards?.length) {
     renderMessageCards(article, message.cards);
@@ -5232,6 +5536,47 @@ function shareMessage(message: StoredChatMessage) {
   });
 }
 
+/**
+ * Replaces a new bookmark's prompt label with a model-written title.
+ *
+ * Runs detached from the save so the button never waits on a model call. Every
+ * failure is silent by design: the bookmark is already saved and already reads
+ * sensibly under its prompt, so there is nothing for the user to act on. The
+ * bookmark may also have been removed while the model was thinking, which the
+ * host reports as an error and which must not repaint a row that is gone.
+ */
+async function nameBookmarkInBackground(
+  chatId: string,
+  messageKey: string,
+  chatBookmarks: Map<string, StoredBookmark>
+) {
+  const id = `${chatId}:${messageKey}`;
+  try {
+    const named = await invoke<StoredBookmark>('name_bookmark', { chatId, messageKey });
+    if (!named.title.trim()) return;
+    // Only touch the map if this bookmark is still in it: the user may have
+    // unbookmarked, or switched chats, while the title was being written.
+    if (!chatBookmarks.has(messageKey)) return;
+    chatBookmarks.set(messageKey, named);
+    const row = bookmarkRows.find((bookmark) => bookmark.id === named.id);
+    if (row) {
+      bookmarkRows[bookmarkRows.indexOf(row)] = named;
+    } else if (sidebarView === 'bookmarks') {
+      await refreshBookmarks(true);
+    }
+    // The title feeds the @-mention slug, so a naming pass changes it.
+    void refreshBookmarkMentionIndex();
+  } catch (error) {
+    // Keeping the prompt as the label is the fallback, so there is nothing to
+    // interrupt the user with. It is still logged: a title that never arrives is
+    // otherwise indistinguishable from one the model chose not to change.
+    console.warn('Could not name bookmark:', getErrorMessage(error, 'unknown error'));
+  } finally {
+    namingBookmarkIds.delete(id);
+    if (sidebarView === 'bookmarks') renderBookmarks();
+  }
+}
+
 async function toggleMessageBookmark(
   article: HTMLElement,
   message: StoredChatMessage,
@@ -5251,12 +5596,16 @@ async function toggleMessageBookmark(
     } else {
       const prompt = promptForAssistant(chatStoredMessages, message);
       if (!prompt) throw new Error('Could not find the prompt for this response.');
+      // Save with no title and let the row fall back to the prompt. Naming costs
+      // a model call, and waiting for it here left the button spinning on what
+      // is otherwise an instant action.
       const bookmark = await invoke<StoredBookmark>('save_bookmark', {
         bookmark: {
           id: `${chatId}:${messageKey}`,
           messageKey,
           chatId,
           chatName,
+          title: '',
           prompt,
           answer: message.text,
           messageTimestamp: message.timestamp,
@@ -5264,11 +5613,14 @@ async function toggleMessageBookmark(
         } satisfies StoredBookmark
       });
       chatBookmarks.set(messageKey, bookmark);
+      namingBookmarkIds.add(bookmark.id);
+      void nameBookmarkInBackground(chatId, messageKey, chatBookmarks);
     }
     if (activeSessionId === chatId && activeBookmarks === chatBookmarks) {
       syncMessageActions(article, message);
     }
     if (sidebarView === 'bookmarks') await refreshBookmarks(true);
+    void refreshBookmarkMentionIndex();
   } catch (error) {
     button.title = getErrorMessage(error, 'Could not update bookmark.');
   } finally {
@@ -5425,11 +5777,15 @@ async function submitMessage(
 ) {
   if (!input || !messages) return;
 
-  const content = input.value.trim();
-  if (!content) return;
+  const typed = input.value.trim();
+  if (!typed) return;
   // Slash commands are host commands, not messages, so they still run locally
   // while the agent is working.
-  if (await runSlashCommand(content, input)) return;
+  if (await runSlashCommand(typed, input)) return;
+  // Expanded once, here, so the same text reaches the transcript, the persisted
+  // record, and the model — a bookmark mention must survive a chat reload, and
+  // the saved text is the only thing rebuilt into model-visible history on load.
+  const content = expandBookmarkMentions(typed, buildBookmarkMentionIndex(bookmarkMentionRows));
 
   const run = chatRuns.get(activeSessionId);
   if (run) {
@@ -5568,6 +5924,7 @@ async function startAgentTurn(content: string) {
     let requestedSchedule: ScheduledTaskRequest | undefined;
     let requestedCredential: CredentialRequest | undefined;
     let recommendedExtension: ExtensionRecommendation | undefined;
+    let requestedMemoryChange: MemoryChangeRequest | undefined;
     /**
      * Set the moment the turn's reply is in hand.
      *
@@ -5648,6 +6005,7 @@ async function startAgentTurn(content: string) {
         const chart = extractPresentedChart(toolCall.result);
         if (chart) {
           (assistantRecord.charts ??= []).push(chart);
+          (assistantRecord.chartOffsets ??= []).push(streamed.length);
         }
         const pluginName = pluginNameForTool(toolCall.toolName);
         const resultCard = extractResultCard(toolCall, pluginName);
@@ -5696,6 +6054,10 @@ async function startAgentTurn(content: string) {
         requestedCredential = request;
         void logAgentTurnEvent('credential_request', { request, mode: turnMode }, turnSessionId);
       },
+      onMemoryChangeRequest: (request) => {
+        requestedMemoryChange = request;
+        void logAgentTurnEvent('memory_change_request', { request }, turnSessionId);
+      },
       onExtensionRecommendation: (recommendation) => {
         recommendedExtension = recommendation;
         void logAgentTurnEvent(
@@ -5732,14 +6094,15 @@ async function startAgentTurn(content: string) {
           }
           if (thinkingPreview.parentElement) thinkingPreview.remove();
           if (pendingBody) {
-            renderMessageText(
-              pendingBody,
+            renderMessageBody(
+              pending,
               assistantRecord.text,
               true,
+              assistantRecord.charts,
+              assistantRecord.chartOffsets,
               messageContext(assistantRecord)
             );
           }
-          renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
           pending.classList.remove('pending');
           syncMessageActions(pending, assistantRecord);
         }
@@ -5848,12 +6211,21 @@ async function startAgentTurn(content: string) {
     const finalContent = reply.content || streamed || 'The model returned an empty response.';
     if (turnIsActive()) {
       if (pendingBody) {
-        renderMessageText(pendingBody, finalContent, true, messageContext(assistantRecord));
+        renderMessageBody(
+          pending,
+          finalContent,
+          true,
+          assistantRecord.charts,
+          assistantRecord.chartOffsets,
+          messageContext(assistantRecord)
+        );
       }
-      renderMessageCharts(pending, assistantRecord.charts, messageContext(assistantRecord));
       pending.classList.remove('pending');
       if (recommendedExtension) {
         renderExtensionRecommendation(pending, recommendedExtension);
+      }
+      if (requestedMemoryChange) {
+        renderMemoryChangeConfirmation(pending, requestedMemoryChange, assistantRecord);
       }
       turnChatMessages.push({ role: 'assistant', content: finalContent });
     }
@@ -5866,6 +6238,7 @@ async function startAgentTurn(content: string) {
     assistantRecord.status = 'completed';
     assistantRecord.error = undefined;
     assistantRecord.extensionRecommendation = recommendedExtension;
+    assistantRecord.memoryChangeRequest = requestedMemoryChange;
     await persistChatSnapshot(turnMeta, turnStored);
     if (turnIsActive()) syncMessageActions(pending, assistantRecord);
     void logAgentTurnEvent('turn_completed', {
@@ -6000,8 +6373,14 @@ function syncRemountedRun(
       // something that looks like an assistant answer.
       renderModelFailure(body, record.modelFailure);
     } else if (body) {
-      renderMessageText(body, record.text, record.role === 'assistant', messageContext(record));
-      renderMessageCharts(article, record.charts, messageContext(record));
+      renderMessageBody(
+        article,
+        record.text,
+        record.role === 'assistant',
+        record.charts,
+        record.chartOffsets,
+        messageContext(record)
+      );
       if (record.cards?.length) renderMessageCards(article, record.cards);
       if (record.extensionRecommendation) {
         renderExtensionRecommendation(article, record.extensionRecommendation);
@@ -6171,6 +6550,124 @@ function renderExtensionRecommendation(
 
   panel.append(copy, install, status);
   article.appendChild(panel);
+}
+
+/**
+ * The agent proposed remembering, correcting, or forgetting one fact. Nothing
+ * is written until the user clicks Save — there is no user-facing edit form,
+ * only this confirm/discard choice over what the agent already composed.
+ * Rendered both live and when replaying history, guarded by
+ * `record.memoryChangeOutcome` so a reload after the user already acted shows
+ * the resolved state rather than stale buttons.
+ */
+function renderMemoryChangeConfirmation(
+  article: HTMLElement,
+  request: MemoryChangeRequest,
+  record: StoredChatMessage
+) {
+  article.querySelector<HTMLElement>(':scope > .memory-change-confirmation')?.remove();
+
+  const panel = document.createElement('section');
+  panel.className = 'capability-confirmation memory-change-confirmation';
+
+  const existing = request.memoryId ? memoryRows.find((row) => row.id === request.memoryId) : undefined;
+  const scope = existing?.scope || request.scope;
+  const scopeLabel = existing ? memoryScopeDisplayName(existing) : request.scopeLabel || request.scope;
+  const displayContent =
+    request.content || existing?.content || '(This memory will be removed.)';
+
+  if (record.memoryChangeOutcome) {
+    const resolved = document.createElement('p');
+    resolved.textContent =
+      record.memoryChangeOutcome === 'saved'
+        ? `Remembered${scopeLabel !== 'Global' ? ` for ${scopeLabel}` : ''}.`
+        : 'Discarded. Nothing was changed.';
+    panel.appendChild(resolved);
+    article.appendChild(panel);
+    return;
+  }
+
+  const title = document.createElement('h3');
+  title.textContent =
+    request.action === 'delete'
+      ? 'Forget this?'
+      : request.action === 'update'
+        ? 'Update this memory?'
+        : 'Remember this?';
+  panel.appendChild(title);
+
+  const description = document.createElement('p');
+  description.textContent =
+    scopeLabel === 'Global'
+      ? 'Reviewed and confirmed here, nothing is saved otherwise.'
+      : `For ${scopeLabel}. Reviewed and confirmed here, nothing is saved otherwise.`;
+  panel.appendChild(description);
+
+  const content = document.createElement('p');
+  content.className = 'capability-request-summary';
+  content.textContent = displayContent;
+  panel.appendChild(content);
+
+  const actions = document.createElement('div');
+  actions.className = 'capability-actions';
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'capability-primary-action';
+  save.textContent = request.action === 'delete' ? 'Forget it' : 'Save';
+  actions.appendChild(save);
+
+  const discard = document.createElement('button');
+  discard.type = 'button';
+  discard.className = 'capability-secondary-action';
+  discard.textContent = 'Discard';
+  actions.appendChild(discard);
+
+  panel.appendChild(actions);
+  article.appendChild(panel);
+
+  const status = document.createElement('p');
+  status.setAttribute('aria-live', 'polite');
+
+  save.addEventListener('click', () => {
+    save.disabled = true;
+    discard.disabled = true;
+    void (async () => {
+      try {
+        if (request.action === 'delete') {
+          await invoke('delete_memory', { scope, id: request.memoryId });
+        } else {
+          await invoke<StoredMemory>('save_memory', {
+            memory: {
+              id: request.memoryId || '',
+              scope,
+              content: request.content || '',
+              scopeLabel: existing?.scopeLabel || request.scopeLabel,
+              createdAt: 0,
+              updatedAt: 0
+            } satisfies StoredMemory
+          });
+        }
+        await refreshMemoryRows();
+        record.memoryChangeOutcome = 'saved';
+        await persistActiveChatHistory();
+        renderMemoryChangeConfirmation(article, request, record);
+      } catch (error) {
+        save.disabled = false;
+        discard.disabled = false;
+        status.textContent = getErrorMessage(error, 'Could not save this memory.');
+        panel.appendChild(status);
+      }
+    })();
+  });
+
+  discard.addEventListener('click', () => {
+    save.disabled = true;
+    discard.disabled = true;
+    record.memoryChangeOutcome = 'discarded';
+    void persistActiveChatHistory();
+    renderMemoryChangeConfirmation(article, request, record);
+  });
 }
 
 /**
@@ -7293,6 +7790,10 @@ function renderMessageText(
   context: MessageContext = EMPTY_MESSAGE_CONTEXT
 ) {
   if (!markdown) {
+    if (text.includes('[Referenced bookmark:')) {
+      renderPlainTextWithBookmarkRefs(container, text);
+      return;
+    }
     container.textContent = text;
     return;
   }
@@ -7300,6 +7801,39 @@ function renderMessageText(
   renderMarkdown(container, text, context);
   if (!container.childNodes.length) {
     container.textContent = text;
+  }
+}
+
+/**
+ * A user bubble's sent text really carries the full quoted bookmark content
+ * (so the model keeps it across a reload), but the bubble itself only shows a
+ * small clickable "reading …" marker in its place — same interaction as an
+ * inline citation, opening the full quote in a modal instead of the transcript.
+ */
+function renderPlainTextWithBookmarkRefs(container: HTMLElement, text: string) {
+  const blocks = parseBookmarkReferenceBlocks(text);
+  if (!blocks.length) {
+    container.textContent = text;
+    return;
+  }
+  container.textContent = '';
+  let lastIndex = 0;
+  for (const block of blocks) {
+    if (block.start > lastIndex) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex, block.start)));
+    }
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'bookmark-ref-chip';
+    chip.textContent = `📄 reading ${block.title}`;
+    chip.addEventListener('click', () =>
+      openBookmarkReferenceModal(block.title, block.prompt, block.answer)
+    );
+    container.appendChild(chip);
+    lastIndex = block.end;
+  }
+  if (lastIndex < text.length) {
+    container.appendChild(document.createTextNode(text.slice(lastIndex)));
   }
 }
 
@@ -7368,27 +7902,62 @@ function appendRenderedChart(
   renderChart(chart, spec);
 }
 
+function appendChartBlock(body: HTMLElement, spec: ChartSpec, context: MessageContext) {
+  const block = document.createElement('div');
+  block.dataset.presentedChart = 'true';
+  appendRenderedChart(block, spec, context);
+  body.appendChild(block);
+}
+
 /**
- * Structured present_chart results live outside the Markdown string. Rebuild
- * their blocks after every streamed/final re-render and after chat reload.
+ * Render an assistant message's Markdown text together with its structured
+ * present_chart results, each chart landing at the point in the text where the
+ * model had written to when it called present_chart for it — "bla bla [chart]
+ * bla bla" comes out chart-in-the-middle, not chart-always-at-the-end. A chart
+ * with no resolvable offset (a message saved before `chartOffsets` existed, or
+ * an offset the current text has not reached) falls back to rendering after
+ * everything, same as the original append-only layout. Rebuilt after every
+ * streamed/final re-render and after chat reload, since structured chart
+ * results live outside the Markdown string itself.
  */
-function renderMessageCharts(
+function renderMessageBody(
   article: HTMLElement,
+  text: string,
+  markdown: boolean,
   charts: ChartSpec[] | undefined,
+  chartOffsets: number[] | undefined,
   context: MessageContext
 ) {
   const body = article.querySelector<HTMLElement>(':scope > .message-text');
   if (!body) return;
-  body.querySelectorAll<HTMLElement>(':scope > [data-presented-chart]').forEach((block) => {
-    block.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
-    block.remove();
-  });
-  for (const spec of normalizeStoredCharts(charts)) {
-    const block = document.createElement('div');
-    block.dataset.presentedChart = 'true';
-    appendRenderedChart(block, spec, context);
-    body.appendChild(block);
+  const normalizedCharts = normalizeStoredCharts(charts);
+
+  if (!markdown || !normalizedCharts.length) {
+    renderMessageText(body, text, markdown, context);
+    for (const spec of normalizedCharts) appendChartBlock(body, spec, context);
+    return;
   }
+
+  body.querySelectorAll<HTMLElement>('[data-chart-root]').forEach(unmountChart);
+  body.replaceChildren();
+
+  const { anchored, trailing } = planChartPlacement(text, normalizedCharts, chartOffsets);
+
+  let cursor = 0;
+  const renderSegment = (segmentText: string) => {
+    if (!segmentText) return;
+    const segment = document.createElement('div');
+    renderMarkdown(segment, segmentText, context);
+    body.append(...segment.childNodes);
+  };
+  for (const { spec, offset } of anchored) {
+    renderSegment(text.slice(cursor, offset));
+    appendChartBlock(body, spec, context);
+    cursor = offset;
+  }
+  renderSegment(text.slice(cursor));
+  if (!body.childNodes.length) body.textContent = text;
+  for (const spec of trailing) appendChartBlock(body, spec, context);
 }
 
 function renderMarkdownLightweight(

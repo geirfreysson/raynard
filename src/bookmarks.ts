@@ -33,7 +33,7 @@ export function promptForAssistant<T extends BookmarkableChatMessage>(
   return '';
 }
 
-function stableTextHash(text: string): string {
+export function stableTextHash(text: string): string {
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index += 1) {
     hash ^= text.charCodeAt(index);
@@ -44,6 +44,17 @@ function stableTextHash(text: string): string {
 
 export function bookmarkMessageKey(message: Pick<BookmarkableChatMessage, 'timestamp' | 'text'>) {
   return `${Math.max(0, Math.trunc(message.timestamp)).toString(36)}-${stableTextHash(message.text)}`;
+}
+
+/**
+ * The label a bookmark is listed under.
+ *
+ * Prefers the model-written title, falling back to the prompt so bookmarks
+ * saved before titles existed — and any whose naming call failed — still read
+ * sensibly instead of showing an empty row.
+ */
+export function bookmarkLabel(bookmark: { title?: string; prompt: string }): string {
+  return String(bookmark.title ?? '').trim() || bookmark.prompt;
 }
 
 export function bookmarkPreview(text: string, maxLength = 180): string {

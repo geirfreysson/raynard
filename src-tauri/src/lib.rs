@@ -307,10 +307,44 @@ struct StoredBookmark {
     message_key: String,
     chat_id: String,
     chat_name: String,
+    /// Short model-written label for this bookmark. Empty for bookmarks saved
+    /// before titles existed, and whenever naming failed, so readers fall back
+    /// to `prompt`.
+    #[serde(default)]
+    title: String,
     prompt: String,
     answer: String,
     message_timestamp: i64,
     created_at: i64,
+}
+
+/// A durable fact the agent proposed remembering, always persisted only after
+/// the user confirms. `scope` is `"global"` or an installed plugin's stable
+/// directory slug (never its renameable display name), so a memory survives a
+/// plugin rename and naturally stops being injected once that plugin is
+/// removed.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct StoredMemory {
+    id: String,
+    scope: String,
+    content: String,
+    /// The plugin's display name at the time this memory was captured/edited,
+    /// so a since-renamed or removed plugin's entries still read sensibly.
+    #[serde(default)]
+    scope_label: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Default, Clone)]
+struct MemoryStoreState {
+    cache: Arc<Mutex<Option<MemoryCache>>>,
+}
+
+#[derive(Default)]
+struct MemoryCache {
+    by_id: BTreeMap<String, StoredMemory>,
 }
 
 #[derive(Serialize)]
@@ -493,6 +527,11 @@ struct CatalogExtension {
     tools: Vec<CatalogExtensionTool>,
     requires_key: bool,
     installed: bool,
+    /// The version recorded inside the installed copy, which is a snapshot taken
+    /// at install time and never refreshed on its own. When this differs from
+    /// `version` the bundled catalog has moved on and an update is offered.
+    /// Empty when the extension is not installed.
+    installed_version: String,
 }
 
 #[derive(Serialize)]
@@ -586,6 +625,35 @@ async fn list_bookmarks(
     })
     .await
     .map_err(|error| format!("Could not join bookmark listing task: {error}"))?
+}
+
+fn all_bookmarks(cache: &BookmarkCache) -> Vec<StoredBookmark> {
+    cache.ordered.values().cloned().collect()
+}
+
+/// The whole bookmark collection, unpaginated, for the @-mention menu: it
+/// needs every bookmark available synchronously as the user types, unlike
+/// `list_bookmarks`'s paginated sidebar listing.
+#[tauri::command]
+async fn list_bookmark_mentions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+) -> Result<Vec<StoredBookmark>, String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = bookmarks_dir(&app)?;
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock bookmarks.".to_string())?;
+        if guard.is_none() {
+            *guard = Some(load_bookmark_cache_in(&root)?);
+        }
+        let cache = guard.as_ref().expect("bookmark cache initialized");
+        Ok(all_bookmarks(cache))
+    })
+    .await
+    .map_err(|error| format!("Could not join bookmark mention listing task: {error}"))?
 }
 
 fn scheduled_tasks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -829,6 +897,152 @@ async fn list_chat_bookmarks(
     .map_err(|error| format!("Could not join chat bookmark listing task: {error}"))?
 }
 
+/// Names an already-saved bookmark with the chat model, in the background.
+///
+/// Bookmarks used to be listed under the prompt that produced them, which reads
+/// poorly: prompts are long and describe the question rather than the finding.
+/// Saving deliberately does not wait for this — the bookmark is stored first and
+/// shows its prompt, and this replaces the label when the model answers.
+///
+/// Returns the updated bookmark, or the unchanged one when it is already named.
+/// A previously generated title is reused from the cache without calling the
+/// model, so re-bookmarking an answer is instant and free.
+#[tauri::command]
+async fn name_bookmark(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    chat_id: String,
+    message_key: String,
+) -> Result<StoredBookmark, String> {
+    let root = bookmarks_dir(&app)?;
+    let safe_chat_id = normalize_chat_id(&chat_id);
+    let safe_message_key = normalize_bookmark_key(&message_key)?;
+    let locator = bookmark_locator(&safe_chat_id, &safe_message_key);
+    let path = bookmark_path_in(&root, &safe_chat_id, &safe_message_key);
+
+    let read_bookmark = |path: &Path| -> Result<StoredBookmark, String> {
+        let raw = fs::read_to_string(path)
+            .map_err(|_| "This bookmark is no longer saved.".to_string())?;
+        serde_json::from_str::<StoredBookmark>(&raw)
+            .map_err(|error| format!("Could not read bookmark: {error}"))
+    };
+
+    let bookmark = read_bookmark(&path)?;
+    if !bookmark.title.trim().is_empty() {
+        return Ok(bookmark);
+    }
+
+    // A title generated for this answer before, possibly for a bookmark that has
+    // since been removed and re-added.
+    if let Some(cached) = read_cached_bookmark_title(&root, &locator) {
+        return store_bookmark_title(&state, &root, &path, &locator, &cached, false);
+    }
+
+    let mut config = resolve_model_config(Some(&app))?;
+    if config.auth_method == AuthMethod::OAuth {
+        config.api_key = resolve_provider_access_token(&config.provider).await?;
+    } else if config.api_key.is_empty() {
+        return Err("Save a chat model API key before naming bookmarks.".to_string());
+    }
+
+    let sidecar_path = resolve_bookmark_title_sidecar_path()?;
+    let request = json!({
+        "provider": config.provider,
+        "baseUrl": config.base_url,
+        "model": config.model,
+        "apiKey": config.api_key,
+        "prompt": bookmark.prompt,
+        "answer": bookmark.answer,
+    });
+
+    let output = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut child = Command::new(resolve_node_command())
+            .arg(sidecar_path)
+            .current_dir(
+                env::current_dir()
+                    .map_err(|error| format!("Could not read current directory: {error}"))?,
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("Could not start bookmark title sidecar: {error}"))?;
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Could not open bookmark title sidecar input.".to_string())?;
+            let raw = serde_json::to_vec(&request)
+                .map_err(|error| format!("Could not serialize title request: {error}"))?;
+            stdin
+                .write_all(&raw)
+                .map_err(|error| format!("Could not send the title request: {error}"))?;
+        }
+        let finished = child
+            .wait_with_output()
+            .map_err(|error| format!("Could not read the title reply: {error}"))?;
+        Ok(finished.stdout)
+    })
+    .await
+    .map_err(|error| format!("Could not run the bookmark title sidecar: {error}"))??;
+
+    let line = String::from_utf8_lossy(&output);
+    let last = line
+        .lines()
+        .filter(|entry| !entry.trim().is_empty())
+        .next_back()
+        .unwrap_or_default();
+    let parsed: Value = serde_json::from_str(last)
+        .map_err(|_| "The bookmark title sidecar returned no result.".to_string())?;
+    if parsed.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(parsed
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Could not name this bookmark.")
+            .to_string());
+    }
+    let title = normalize_bookmark_title(parsed.get("title").and_then(Value::as_str).unwrap_or(""));
+    if title.is_empty() {
+        return Err("The model did not return a usable title.".to_string());
+    }
+    store_bookmark_title(&state, &root, &path, &locator, &title, true)
+}
+
+/// Writes a resolved title onto the stored bookmark and into the live cache.
+///
+/// Naming runs in the background, so the bookmark may have been removed while
+/// the model was thinking. Re-reading the file here rather than trusting the
+/// copy loaded earlier is what stops a late title from resurrecting a bookmark
+/// the user has already deleted.
+fn store_bookmark_title(
+    state: &tauri::State<'_, BookmarkStoreState>,
+    root: &Path,
+    path: &Path,
+    locator: &str,
+    title: &str,
+    remember: bool,
+) -> Result<StoredBookmark, String> {
+    // Remember the title even if the bookmark itself is gone: bookmarking the
+    // same answer again should not pay for another model call.
+    if remember {
+        write_bookmark_title_in(root, locator, title)?;
+    }
+    let raw =
+        fs::read_to_string(path).map_err(|_| "This bookmark is no longer saved.".to_string())?;
+    let mut bookmark = serde_json::from_str::<StoredBookmark>(&raw)
+        .map_err(|error| format!("Could not read bookmark: {error}"))?;
+    bookmark.title = normalize_bookmark_title(title);
+    write_bookmark_in(root, &bookmark)?;
+    let mut guard = state
+        .cache
+        .lock()
+        .map_err(|_| "Could not lock bookmarks.".to_string())?;
+    if let Some(cache) = guard.as_mut() {
+        upsert_bookmark_cache(cache, bookmark.clone());
+    }
+    Ok(bookmark)
+}
+
 #[tauri::command]
 async fn save_bookmark(
     app: tauri::AppHandle,
@@ -893,6 +1107,108 @@ async fn delete_bookmark(
     })
     .await
     .map_err(|error| format!("Could not join bookmark delete task: {error}"))?
+}
+
+#[tauri::command]
+async fn list_memories(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MemoryStoreState>,
+) -> Result<Vec<StoredMemory>, String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = memories_dir(&app)?;
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock memories.".to_string())?;
+        if guard.is_none() {
+            *guard = Some(load_memory_cache_in(&root)?);
+        }
+        let cache = guard.as_ref().expect("memory cache initialized");
+        Ok(cache.by_id.values().cloned().collect())
+    })
+    .await
+    .map_err(|error| format!("Could not join memory listing task: {error}"))?
+}
+
+/// Upserts by id, so one command covers both a brand-new memory (empty `id`)
+/// and an edit to an existing one — the same shape `save_bookmark` already
+/// proves is enough for a record this small.
+#[tauri::command]
+async fn save_memory(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MemoryStoreState>,
+    memory: StoredMemory,
+) -> Result<StoredMemory, String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = memories_dir(&app)?;
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock memories.".to_string())?;
+        if guard.is_none() {
+            *guard = Some(load_memory_cache_in(&root)?);
+        }
+        // An edit's created_at must survive normalization: look the previous
+        // entry up before it is overwritten by a freshly generated one.
+        let mut memory = memory;
+        if !memory.id.trim().is_empty() {
+            if let Some(cache) = guard.as_ref() {
+                if let Some(previous) = cache.by_id.get(memory.id.trim()) {
+                    if memory.created_at <= 0 {
+                        memory.created_at = previous.created_at;
+                    }
+                }
+            }
+        }
+        let memory = normalize_memory(memory)?;
+        write_memory_in(&root, &memory)?;
+        if let Some(cache) = guard.as_mut() {
+            cache.by_id.insert(memory.id.clone(), memory.clone());
+        }
+        Ok(memory)
+    })
+    .await
+    .map_err(|error| format!("Could not join memory save task: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_memory(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MemoryStoreState>,
+    scope: String,
+    id: String,
+) -> Result<(), String> {
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = memories_dir(&app)?;
+        let safe_scope = normalize_memory_scope(&scope)?;
+        let safe_id = normalize_memory_id(&id)?;
+        let path = memory_path_in(&root, &safe_scope, &safe_id);
+        if path.is_file() {
+            fs::remove_file(&path).map_err(|error| format!("Could not remove memory: {error}"))?;
+        }
+        if let Some(parent) = path.parent() {
+            if parent.is_dir()
+                && fs::read_dir(parent)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(false)
+            {
+                fs::remove_dir(parent).ok();
+            }
+        }
+        let mut guard = store
+            .cache
+            .lock()
+            .map_err(|_| "Could not lock memories.".to_string())?;
+        if let Some(cache) = guard.as_mut() {
+            cache.by_id.remove(&safe_id);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Could not join memory delete task: {error}"))?
 }
 
 #[tauri::command]
@@ -1263,6 +1579,38 @@ fn install_catalog_extension(
     let manifest_path = target_dir.join("plugin.json");
     let mut plugin = read_generated_plugin_manifest(&target_dir, &manifest_path)
         .ok_or_else(|| "The installed extension manifest could not be read.".to_string())?;
+    enrich_generated_plugin_tools_from_runtime(&mut plugin, &target_dir);
+    annotate_plugin_credentials(&mut plugin);
+    Ok(plugin)
+}
+
+#[tauri::command]
+fn update_catalog_extension(
+    app: tauri::AppHandle,
+    slug: String,
+) -> Result<GeneratedPlugin, String> {
+    let catalog_dir = catalog_extensions_dir(&app)?;
+    let installed_dir = generated_plugins_dir(&app)?;
+    ensure_dir(&installed_dir)?;
+    ensure_shared_plugin_sdk(&installed_dir)?;
+
+    // Resolve through the static catalog first, for the same reason installing
+    // does: a caller must not reach a directory the catalog does not list.
+    let listed = read_catalog_extensions(&catalog_dir, &installed_dir)?;
+    let Some(extension) = listed.iter().find(|extension| extension.slug == slug) else {
+        return Err(format!("Catalog extension not found: {}", slug.trim()));
+    };
+    if !extension.installed {
+        return Err(format!("{} is not installed.", extension.name));
+    }
+
+    let target_dir = update_catalog_extension_from(&catalog_dir, &installed_dir, &slug)?;
+    // Tool schemas and card previews are cached beside the extension; the stale
+    // file describes the version that was just replaced.
+    let _ = fs::remove_file(target_dir.join(".runtime-tools.json"));
+    let manifest_path = target_dir.join("plugin.json");
+    let mut plugin = read_generated_plugin_manifest(&target_dir, &manifest_path)
+        .ok_or_else(|| "The updated extension manifest could not be read.".to_string())?;
     enrich_generated_plugin_tools_from_runtime(&mut plugin, &target_dir);
     annotate_plugin_credentials(&mut plugin);
     Ok(plugin)
@@ -2949,6 +3297,7 @@ async fn run_main_agent_stream(
     ensure_dir(&plugin_root)?;
     ensure_shared_plugin_sdk(&plugin_root)?;
     let mut plugins = Vec::new();
+    let mut installed_plugin_slugs = Vec::new();
     for entry in fs::read_dir(&plugin_root)
         .map_err(|error| format!("Could not read generated plugins: {error}"))?
     {
@@ -2969,6 +3318,13 @@ async fn run_main_agent_stream(
         // that struct is also what list_generated_plugins hands the renderer.
         attach_plugin_credential_values(&mut serialized, &plugin);
         plugins.push(serialized);
+        installed_plugin_slugs.push(
+            plugin_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     let catalog_dir = catalog_extensions_dir(&app)?;
     let available_extensions = read_catalog_extensions(&catalog_dir, &plugin_root)?
@@ -2976,6 +3332,14 @@ async fn run_main_agent_stream(
         .filter(|extension| !extension.installed)
         .collect::<Vec<_>>();
     let chats = load_or_rebuild_chat_history_index_in(&chat_history_dir(&app)?)?;
+    // Recomputed fresh every turn, like `plugins` above: a memory edited or
+    // deleted a moment ago must never be stale in the very next turn.
+    let all_memories: Vec<StoredMemory> = load_memory_cache_in(&memories_dir(&app)?)?
+        .by_id
+        .into_values()
+        .collect();
+    let selected_memories =
+        select_memories_for_turn(&all_memories, &installed_plugin_slugs, 10, 5, 20);
     let sidecar_request = json!({
         "messages": messages
             .iter()
@@ -2988,6 +3352,7 @@ async fn run_main_agent_stream(
         "apiKey": config.api_key,
         "pluginRunnerPath": plugin_runner_path.to_string_lossy().to_string(),
         "plugins": plugins,
+        "memories": selected_memories,
         // Kept out of the system prompt. The sidecar exposes this catalog only
         // after the model calls its on-demand missing-capability search tool.
         "availableExtensions": available_extensions,
@@ -3980,6 +4345,228 @@ fn bookmarks_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("bookmarks"))
 }
 
+fn memories_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("memories"))
+}
+
+/// Same FNV-1a used by the renderer's bookmark slugs (`src/bookmarks.ts`), so a
+/// memory id is deterministic given its content and capture time rather than
+/// needing a new random-id dependency.
+fn stable_text_hash(text: &str) -> String {
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in text.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:x}")
+}
+
+fn generate_memory_id(content: &str) -> String {
+    format!("mem-{}-{}", now_millis(), stable_text_hash(content))
+}
+
+fn normalize_memory_scope(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let value = if trimmed.is_empty() {
+        "global"
+    } else {
+        trimmed
+    };
+    if value.len() > 160
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Memory scope is invalid.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_memory_id(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.len() > 160
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Memory id is invalid.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+/// Validates and fills in a memory before it is written: a non-empty `id` is
+/// treated as an edit to that entry, an empty one mints a new id (so
+/// create and edit share one upsert-by-id path, like `save_bookmark`).
+fn normalize_memory(mut memory: StoredMemory) -> Result<StoredMemory, String> {
+    memory.content = memory.content.trim().to_string();
+    if memory.content.is_empty() {
+        return Err("A memory requires non-empty content.".to_string());
+    }
+    memory.scope = normalize_memory_scope(&memory.scope)?;
+    memory.scope_label = memory.scope_label.trim().to_string();
+    let now = now_millis();
+    memory.id = if memory.id.trim().is_empty() {
+        memory.created_at = now;
+        generate_memory_id(&memory.content)
+    } else {
+        let id = normalize_memory_id(&memory.id)?;
+        if memory.created_at <= 0 {
+            memory.created_at = now;
+        }
+        id
+    };
+    memory.updated_at = now;
+    Ok(memory)
+}
+
+fn memory_path_in(root: &Path, scope: &str, id: &str) -> PathBuf {
+    root.join(scope).join(format!("{id}.json"))
+}
+
+fn write_memory_in(root: &Path, memory: &StoredMemory) -> Result<(), String> {
+    let scope_dir = root.join(&memory.scope);
+    ensure_dir(&scope_dir)?;
+    let path = memory_path_in(root, &memory.scope, &memory.id);
+    let raw = serde_json::to_vec(memory)
+        .map_err(|error| format!("Could not serialize memory: {error}"))?;
+    fs::write(path, raw).map_err(|error| format!("Could not save memory: {error}"))
+}
+
+fn load_memory_cache_in(root: &Path) -> Result<MemoryCache, String> {
+    ensure_dir(root)?;
+    let mut cache = MemoryCache::default();
+    let scope_dirs =
+        fs::read_dir(root).map_err(|error| format!("Could not read memories: {error}"))?;
+    for scope_dir in scope_dirs.flatten() {
+        let path = scope_dir.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let entries =
+            fs::read_dir(&path).map_err(|error| format!("Could not read memory scope: {error}"))?;
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&entry_path) else {
+                continue;
+            };
+            let Ok(memory) = serde_json::from_str::<StoredMemory>(&raw) else {
+                continue;
+            };
+            cache.by_id.insert(memory.id.clone(), memory);
+        }
+    }
+    Ok(cache)
+}
+
+/// Selects which memories are worth a turn's system-prompt space: a capped set
+/// of global entries plus a capped-per-plugin, capped-in-total set scoped to
+/// plugins that are actually installed right now, both newest-edited first.
+/// A memory scoped to a since-removed plugin is naturally excluded — no
+/// explicit cleanup needed.
+fn select_memories_for_turn(
+    all: &[StoredMemory],
+    active_plugin_slugs: &[String],
+    global_cap: usize,
+    per_plugin_cap: usize,
+    plugin_total_cap: usize,
+) -> Vec<StoredMemory> {
+    let mut global: Vec<&StoredMemory> = all
+        .iter()
+        .filter(|memory| memory.scope == "global")
+        .collect();
+    global.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    global.truncate(global_cap);
+
+    let mut plugin_selected: Vec<&StoredMemory> = Vec::new();
+    for slug in active_plugin_slugs {
+        let mut scoped: Vec<&StoredMemory> =
+            all.iter().filter(|memory| &memory.scope == slug).collect();
+        scoped.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        scoped.truncate(per_plugin_cap);
+        plugin_selected.extend(scoped);
+    }
+    plugin_selected.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    plugin_selected.truncate(plugin_total_cap);
+
+    global.into_iter().chain(plugin_selected).cloned().collect()
+}
+
+/// Model-written titles, kept alive after the bookmark that produced them.
+///
+/// Naming costs a model call, so bookmarking, unbookmarking, and bookmarking the
+/// same answer again must not pay for it three times. The cache is keyed by the
+/// bookmark locator and outlives the bookmark file itself, which is the whole
+/// point: the second bookmark of an answer is named instantly and for free.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BookmarkTitleEntry {
+    title: String,
+    updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
+struct BookmarkTitleCache {
+    #[serde(default)]
+    titles: BTreeMap<String, BookmarkTitleEntry>,
+}
+
+/// Titles live beside the per-chat bookmark directories. `load_bookmark_cache_in`
+/// descends only into directories, so this file is invisible to it.
+fn bookmark_titles_path(root: &Path) -> PathBuf {
+    root.join("titles.json")
+}
+
+/// A cache miss is never an error: an unreadable or half-written cache should
+/// cost a model call, not the bookmark.
+fn read_bookmark_titles_in(root: &Path) -> BookmarkTitleCache {
+    fs::read_to_string(bookmark_titles_path(root))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BookmarkTitleCache>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Newest titles to keep. Bookmarks are re-opened for a long time, so this is
+/// generous; it exists only to stop the file growing without bound.
+const BOOKMARK_TITLE_CACHE_LIMIT: usize = 2000;
+
+fn write_bookmark_title_in(root: &Path, locator: &str, title: &str) -> Result<(), String> {
+    ensure_dir(root)?;
+    let mut cache = read_bookmark_titles_in(root);
+    cache.titles.insert(
+        locator.to_string(),
+        BookmarkTitleEntry {
+            title: title.to_string(),
+            updated_at: now_millis(),
+        },
+    );
+    if cache.titles.len() > BOOKMARK_TITLE_CACHE_LIMIT {
+        let mut entries = cache.titles.into_iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| right.1.updated_at.cmp(&left.1.updated_at));
+        entries.truncate(BOOKMARK_TITLE_CACHE_LIMIT);
+        cache = BookmarkTitleCache {
+            titles: entries.into_iter().collect(),
+        };
+    }
+    let raw = serde_json::to_vec(&cache)
+        .map_err(|error| format!("Could not serialize bookmark titles: {error}"))?;
+    fs::write(bookmark_titles_path(root), raw)
+        .map_err(|error| format!("Could not save bookmark titles: {error}"))
+}
+
+fn read_cached_bookmark_title(root: &Path, locator: &str) -> Option<String> {
+    read_bookmark_titles_in(root)
+        .titles
+        .get(locator)
+        .map(|entry| normalize_bookmark_title(&entry.title))
+        .filter(|title| !title.is_empty())
+}
+
 fn normalize_bookmark_key(raw: &str) -> Result<String, String> {
     let value = raw.trim();
     if value.is_empty()
@@ -4001,6 +4588,9 @@ fn normalize_bookmark(mut bookmark: StoredBookmark) -> Result<StoredBookmark, St
     bookmark.message_key = normalize_bookmark_key(&bookmark.message_key)?;
     bookmark.id = format!("{}:{}", bookmark.chat_id, bookmark.message_key);
     bookmark.chat_name = normalize_chat_name(&bookmark.chat_name);
+    // A title is optional: naming is a convenience, and a bookmark whose title
+    // could not be generated still has to save.
+    bookmark.title = normalize_bookmark_title(&bookmark.title);
     bookmark.prompt = bookmark.prompt.trim().to_string();
     bookmark.answer = bookmark.answer.trim().to_string();
     bookmark.created_at = if bookmark.created_at > 0 {
@@ -4352,6 +4942,24 @@ fn read_catalog_extension_detail_from(
     Ok(CatalogExtensionDetail { extension, detail })
 }
 
+/// Reads the version an installed copy reports for itself.
+///
+/// A missing or unreadable manifest is reported as an empty version rather than
+/// an error: the catalog listing must still render for every other extension,
+/// and an unreadable copy is exactly the case an update should be offered for.
+fn installed_manifest_version(installed_extension_dir: &Path) -> String {
+    fs::read_to_string(installed_extension_dir.join("plugin.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("version")
+                .and_then(Value::as_str)
+                .map(|version| version.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
 fn read_catalog_extensions(
     catalog_dir: &Path,
     installed_dir: &Path,
@@ -4433,6 +5041,7 @@ fn read_catalog_extensions(
             version: catalog_manifest_string(&manifest, "version", &slug)?,
             requires_key: !read_plugin_credentials(&manifest).is_empty(),
             installed: installed_dir.join(&slug).is_dir(),
+            installed_version: installed_manifest_version(&installed_dir.join(&slug)),
             tools,
         });
     }
@@ -4504,6 +5113,60 @@ fn install_catalog_extension_from(
     })();
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+    Ok(target)
+}
+
+/// Replaces an installed catalog extension with the bundled catalog copy.
+///
+/// This is the upgrade path a new app release needs: the bundled catalog ships
+/// updated files, but an installed copy is a snapshot taken at install time and
+/// nothing else refreshes it. Uninstall-then-install would work except that
+/// `delete_generated_plugin` deliberately forgets the extension's keychain
+/// credentials, so every extension change would make the user re-enter their API
+/// key. Replacing the directory in place leaves both the keychain entry (keyed
+/// by plugin id, not path) and the sibling `.plugin-data` cache untouched.
+///
+/// The new copy is staged beside the target and swapped in, so a failure part
+/// way through leaves the working extension in place rather than a half-written
+/// directory.
+fn update_catalog_extension_from(
+    catalog_dir: &Path,
+    installed_dir: &Path,
+    raw_slug: &str,
+) -> Result<PathBuf, String> {
+    let slug = raw_slug.trim();
+    if !is_catalog_extension_slug(slug) {
+        return Err("Catalog extension id is invalid.".to_string());
+    }
+    let source = catalog_dir.join(slug);
+    if !source.is_dir() || !source.join("plugin.json").is_file() {
+        return Err(format!("Catalog extension not found: {slug}"));
+    }
+    let target = installed_dir.join(slug);
+    if !target.is_dir() {
+        return Err(format!("Extension is not installed: {slug}"));
+    }
+    let staged = installed_dir.join(format!(".tmp-update-{slug}-{}", now_millis()));
+    let replaced = installed_dir.join(format!(".old-update-{slug}-{}", now_millis()));
+    if staged.exists() || replaced.exists() {
+        return Err("Could not allocate a temporary extension directory.".to_string());
+    }
+    let result = (|| -> Result<(), String> {
+        copy_dir_recursive(&source, &staged)?;
+        fs::rename(&target, &replaced)
+            .map_err(|error| format!("Could not replace {slug}: {error}"))?;
+        if let Err(error) = fs::rename(&staged, &target) {
+            // Put the working copy back before reporting the failure.
+            let _ = fs::rename(&replaced, &target);
+            return Err(format!("Could not finish updating {slug}: {error}"));
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&replaced);
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&staged);
         return Err(error);
     }
     Ok(target)
@@ -4729,6 +5392,10 @@ fn resolve_main_agent_sidecar_path() -> Result<PathBuf, String> {
 
 fn resolve_oauth_login_sidecar_path() -> Result<PathBuf, String> {
     resolve_runtime_script_path("oauth-login-sidecar.mjs")
+}
+
+fn resolve_bookmark_title_sidecar_path() -> Result<PathBuf, String> {
+    resolve_runtime_script_path("bookmark-title-sidecar.mjs")
 }
 
 fn resolve_plugin_tool_runner_path() -> Result<PathBuf, String> {
@@ -5213,6 +5880,16 @@ fn build_plugin_readme(slug: &str, description: &str, source_urls: &[String]) ->
     )
 }
 
+/// Collapses a bookmark title to one bounded line, or to empty when absent.
+///
+/// The sidecar already strips the decoration a model tends to add, but a title
+/// can also arrive from an older client or a hand-edited store, so the length
+/// and shape are enforced again here rather than trusted.
+fn normalize_bookmark_title(raw: &str) -> String {
+    let value = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    value.chars().take(120).collect()
+}
+
 fn normalize_chat_name(raw: &str) -> String {
     let value = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     if value.is_empty() {
@@ -5504,8 +6181,8 @@ fn load_app_config(app: &tauri::AppHandle) -> Result<AppConfig, String> {
 
     let raw =
         fs::read_to_string(path).map_err(|error| format!("Could not read app config: {error}"))?;
-    let mut config: AppConfig =
-        serde_json::from_str(&raw).map_err(|error| format!("Could not parse app config: {error}"))?;
+    let mut config: AppConfig = serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse app config: {error}"))?;
     config.active_model = migrate_deprecated_model_id(config.active_model);
     config.active_coding_model = migrate_deprecated_model_id(config.active_coding_model);
     Ok(config)
@@ -6475,26 +7152,30 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        account_id_from_access_token, bookmark_page, build_plugin_tools_stub,
-        canonical_provider_id, clear_plugin_api_cache, ensure_shared_plugin_sdk,
-        external_url_target, externalize_large_card_data_in, externalize_result_data_in,
-        format_quota_window, generated_plugin_source_mtime_millis, install_catalog_extension_from,
-        load_bookmark_cache_in, load_generated_plugin_runtime_tools_cached,
-        load_or_rebuild_chat_history_index_in, merge_turn_usage, migrate_deprecated_model_id,
-        next_available_plugin_slug,
+        account_id_from_access_token, all_bookmarks, bookmark_page, bookmark_titles_path,
+        build_plugin_tools_stub, canonical_provider_id, clear_plugin_api_cache,
+        ensure_shared_plugin_sdk, external_url_target, externalize_large_card_data_in,
+        externalize_result_data_in, format_quota_window, generated_plugin_source_mtime_millis,
+        install_catalog_extension_from, installed_manifest_version, load_bookmark_cache_in,
+        load_generated_plugin_runtime_tools_cached, load_or_rebuild_chat_history_index_in,
+        memory_path_in, merge_turn_usage, migrate_deprecated_model_id, next_available_plugin_slug,
+        normalize_bookmark, normalize_bookmark_title, normalize_memory, normalize_memory_scope,
         normalize_plugin_display_name, normalize_plugin_slug, normalize_stored_messages,
         now_millis, oauth_needs_refresh, packaged_node_path_for, packaged_runtime_scripts_dir_for,
         parse_chatgpt_usage, parse_moonshot_balance, parse_stored_credential,
-        plugin_credential_account, provider_preset, read_catalog_extension_detail_from,
-        read_catalog_extensions, read_generated_plugin_manifest, read_keychain_account,
-        read_plugin_cache_settings, rebuild_chat_history_index_in,
-        remove_chat_history_index_row_in, rename_generated_plugin_in, save_plugin_cache_settings,
+        plugin_credential_account, provider_preset, read_bookmark_titles_in,
+        read_cached_bookmark_title, read_catalog_extension_detail_from, read_catalog_extensions,
+        read_generated_plugin_manifest, read_keychain_account, read_plugin_cache_settings,
+        rebuild_chat_history_index_in, remove_chat_history_index_row_in,
+        rename_generated_plugin_in, save_plugin_cache_settings, select_memories_for_turn,
         select_runtime_script_path, set_chat_history_unread_in, share_deep_link_payload,
-        steer_command_type, upsert_bookmark_cache, upsert_chat_history_index_in, write_bookmark_in,
-        AuthMethod, BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
+        steer_command_type, update_catalog_extension_from, upsert_bookmark_cache,
+        upsert_chat_history_index_in, write_bookmark_in, write_bookmark_title_in, AuthMethod,
+        BookmarkCache, BuilderStreamEvent, ChatHistoryRow, GeneratedPluginTool,
         PluginBuilderRequest, PluginCacheSettings, ProviderQuota, RuntimeToolsCache,
-        StoredBookmark, StoredChatMessage, StoredCredential, StreamEvent, UsageTotals,
-        APP_URL_SCHEME, KEYCHAIN_CACHE, OAUTH_REFRESH_MARGIN_MS,
+        StoredBookmark, StoredChatMessage, StoredCredential, StoredMemory, StreamEvent,
+        UsageTotals, APP_URL_SCHEME, BOOKMARK_TITLE_CACHE_LIMIT, KEYCHAIN_CACHE,
+        OAUTH_REFRESH_MARGIN_MS,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -6902,6 +7583,7 @@ mod tests {
             message_key: key.to_string(),
             chat_id: chat_id.to_string(),
             chat_name: format!("Chat {chat_id}"),
+            title: format!("Title {key}"),
             prompt: format!("Prompt {key}"),
             answer: format!("Answer {key}"),
             message_timestamp: created_at - 10,
@@ -6927,6 +7609,82 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_titles_are_cached_beyond_the_bookmark_that_produced_them() {
+        let root = std::env::temp_dir().join(format!("raynard-bookmark-titles-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create bookmarks root");
+
+        assert_eq!(read_cached_bookmark_title(&root, "chat-one:key"), None);
+        write_bookmark_title_in(&root, "chat-one:key", "Apple FY2024 margins").unwrap();
+        assert_eq!(
+            read_cached_bookmark_title(&root, "chat-one:key"),
+            Some("Apple FY2024 margins".to_string())
+        );
+        assert_eq!(read_cached_bookmark_title(&root, "chat-one:other"), None);
+
+        // The cache sits beside the per-chat directories and must stay invisible
+        // to the loader that scans them.
+        fs::create_dir_all(root.join("chat-one")).expect("create chat dir");
+        let cache = load_bookmark_cache_in(&root).expect("load bookmarks");
+        assert_eq!(bookmark_page(&cache, 0, 10).total, 0);
+
+        // A corrupt cache costs a model call, never the bookmark.
+        fs::write(bookmark_titles_path(&root), "{ not json").unwrap();
+        assert_eq!(read_cached_bookmark_title(&root, "chat-one:key"), None);
+        write_bookmark_title_in(&root, "chat-one:key", "Recovered title").unwrap();
+        assert_eq!(
+            read_cached_bookmark_title(&root, "chat-one:key"),
+            Some("Recovered title".to_string())
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bookmark_title_cache_stays_bounded() {
+        let root =
+            std::env::temp_dir().join(format!("raynard-bookmark-title-cap-{}", now_millis()));
+        fs::create_dir_all(&root).expect("create bookmarks root");
+        for index in 0..(BOOKMARK_TITLE_CACHE_LIMIT + 25) {
+            write_bookmark_title_in(&root, &format!("chat:{index}"), &format!("Title {index}"))
+                .unwrap();
+        }
+        let cache = read_bookmark_titles_in(&root);
+        assert_eq!(cache.titles.len(), BOOKMARK_TITLE_CACHE_LIMIT);
+        let newest = format!("chat:{}", BOOKMARK_TITLE_CACHE_LIMIT + 24);
+        assert!(cache.titles.contains_key(&newest));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bookmarks_saved_before_titles_still_load_and_normalize() {
+        // Titles arrived after bookmarks did, so a stored file from an earlier
+        // build has no `title` key at all. It must still deserialize.
+        let stored: StoredBookmark = serde_json::from_value(json!({
+            "id": "chat-one:key",
+            "messageKey": "key",
+            "chatId": "chat-one",
+            "chatName": "Chat one",
+            "prompt": "What are Apple margins?",
+            "answer": "46.2% in FY2024.",
+            "messageTimestamp": 10,
+            "createdAt": 20
+        }))
+        .expect("deserialize a pre-title bookmark");
+        assert_eq!(stored.title, "");
+        assert_eq!(normalize_bookmark(stored).unwrap().title, "");
+
+        assert_eq!(
+            normalize_bookmark_title("  Apple   FY2024\n margins "),
+            "Apple FY2024 margins"
+        );
+        assert_eq!(normalize_bookmark_title("   "), "");
+        assert_eq!(
+            normalize_bookmark_title(&"x".repeat(300)).chars().count(),
+            120
+        );
+    }
+
+    #[test]
     fn bookmark_pages_stay_bounded_for_large_collections() {
         let mut cache = BookmarkCache::default();
         for index in 0..10_000 {
@@ -6937,6 +7695,7 @@ mod tests {
                     message_key: format!("key-{index}"),
                     chat_id: "chat-one".to_string(),
                     chat_name: "Large chat".to_string(),
+                    title: format!("Title {index}"),
                     prompt: format!("Prompt {index}"),
                     answer: format!("Answer {index}"),
                     message_timestamp: index + 1,
@@ -6949,6 +7708,134 @@ mod tests {
         assert_eq!(page.total, 10_000);
         assert_eq!(page.bookmarks.len(), 50);
         assert_eq!(page.bookmarks[0].message_key, "key-9999");
+    }
+
+    #[test]
+    fn bookmark_mention_list_returns_full_cache_unpaginated() {
+        let mut cache = BookmarkCache::default();
+        for index in 0..250 {
+            upsert_bookmark_cache(
+                &mut cache,
+                StoredBookmark {
+                    id: format!("chat-one:key-{index}"),
+                    message_key: format!("key-{index}"),
+                    chat_id: "chat-one".to_string(),
+                    chat_name: "Large chat".to_string(),
+                    title: format!("Title {index}"),
+                    prompt: format!("Prompt {index}"),
+                    answer: format!("Answer {index}"),
+                    message_timestamp: index + 1,
+                    created_at: index + 1,
+                },
+            );
+        }
+
+        // Unlike `bookmark_page`, which clamps `limit` to 100, the @-mention
+        // listing must return every bookmark so client-side filtering has the
+        // full collection to search as the user types.
+        let all = all_bookmarks(&cache);
+        assert_eq!(all.len(), 250);
+    }
+
+    fn draft_memory(content: &str, scope: &str) -> StoredMemory {
+        StoredMemory {
+            id: String::new(),
+            scope: scope.to_string(),
+            content: content.to_string(),
+            scope_label: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn normalize_memory_rejects_empty_content() {
+        let error = normalize_memory(draft_memory("   ", "global")).unwrap_err();
+        assert!(error.contains("non-empty content"));
+    }
+
+    #[test]
+    fn normalize_memory_trims_and_generates_id() {
+        let memory = normalize_memory(draft_memory("  Prefers concise answers.  ", "")).unwrap();
+        assert_eq!(memory.content, "Prefers concise answers.");
+        // An empty scope falls back to global rather than being rejected.
+        assert_eq!(memory.scope, "global");
+        assert!(!memory.id.trim().is_empty());
+        assert!(memory.created_at > 0);
+        assert!(memory.updated_at > 0);
+    }
+
+    #[test]
+    fn normalize_memory_scope_rejects_unsafe_characters() {
+        assert!(normalize_memory_scope("world bank!").is_err());
+        assert!(normalize_memory_scope("world-bank_api").is_ok());
+    }
+
+    #[test]
+    fn memory_path_rejects_unsafe_scope_or_id() {
+        // memory_path_in itself does not validate; normalize_memory_scope and
+        // normalize_memory_id are the gate, exercised the same way
+        // normalize_bookmark_key gates bookmark paths.
+        assert!(normalize_memory_scope("../etc").is_err());
+        let root = Path::new("/tmp/memories");
+        let path = memory_path_in(root, "global", "mem-1-abc");
+        assert_eq!(path, root.join("global").join("mem-1-abc.json"));
+    }
+
+    #[test]
+    fn select_memories_for_turn_respects_global_and_per_plugin_caps() {
+        let mut all = Vec::new();
+        for index in 0..20 {
+            let mut memory = draft_memory(&format!("global fact {index}"), "global");
+            memory.id = format!("g{index}");
+            memory.updated_at = index;
+            all.push(memory);
+        }
+        for index in 0..10 {
+            let mut memory = draft_memory(&format!("plugin fact {index}"), "world-bank");
+            memory.id = format!("p{index}");
+            memory.updated_at = index;
+            all.push(memory);
+        }
+
+        let selected = select_memories_for_turn(&all, &["world-bank".to_string()], 10, 5, 20);
+        let global_count = selected
+            .iter()
+            .filter(|memory| memory.scope == "global")
+            .count();
+        let plugin_count = selected
+            .iter()
+            .filter(|memory| memory.scope == "world-bank")
+            .count();
+        assert_eq!(global_count, 10);
+        assert_eq!(plugin_count, 5);
+    }
+
+    #[test]
+    fn select_memories_for_turn_orders_by_updated_at_desc() {
+        let mut older = draft_memory("older", "global");
+        older.id = "older".to_string();
+        older.updated_at = 1;
+        let mut newer = draft_memory("newer", "global");
+        newer.id = "newer".to_string();
+        newer.updated_at = 2;
+
+        let selected = select_memories_for_turn(&[older, newer], &[], 10, 5, 20);
+        assert_eq!(selected[0].id, "newer");
+        assert_eq!(selected[1].id, "older");
+    }
+
+    #[test]
+    fn select_memories_for_turn_excludes_scopes_not_currently_installed() {
+        let mut memory = draft_memory("stale plugin fact", "removed-plugin");
+        memory.id = "stale".to_string();
+        memory.updated_at = 5;
+
+        // "removed-plugin" is not in the active slug list, so it is excluded —
+        // a memory scoped to an uninstalled plugin is never injected.
+        let selected =
+            select_memories_for_turn(&[memory], &["other-plugin".to_string()], 10, 5, 20);
+        assert!(selected.is_empty());
     }
 
     #[test]
@@ -7280,6 +8167,70 @@ mod tests {
         assert!(install_catalog_extension_from(&catalog, &installed, "../open-library").is_err());
 
         fs::remove_dir_all(root).expect("remove install fixture");
+    }
+
+    #[test]
+    fn catalog_update_replaces_installed_files_and_keeps_plugin_data() {
+        let root = std::env::temp_dir().join(format!("raynard-catalog-update-{}", now_millis()));
+        let catalog = root.join("catalog");
+        let installed = root.join("installed");
+        let extension = catalog.join("open-library");
+        fs::create_dir_all(&extension).expect("create catalog extension");
+        fs::create_dir_all(&installed).expect("create installed root");
+        fs::write(extension.join("plugin.json"), "{\"version\":\"1.0.0\"}\n")
+            .expect("write manifest");
+        fs::write(extension.join("tools.ts"), "export const tools = {};\n").expect("write tools");
+
+        let target = install_catalog_extension_from(&catalog, &installed, "open-library")
+            .expect("install extension");
+        assert_eq!(installed_manifest_version(&target), "1.0.0");
+
+        // The cache lives beside the extension, not inside it, so an update must
+        // leave it alone.
+        let data_dir = installed.join(".plugin-data").join("open-library");
+        fs::create_dir_all(&data_dir).expect("create plugin data");
+        fs::write(data_dir.join("cache-settings.json"), "{}\n").expect("write plugin data");
+        // A stale schema cache from the replaced version.
+        fs::write(target.join(".runtime-tools.json"), "[]\n").expect("write runtime cache");
+
+        fs::write(extension.join("plugin.json"), "{\"version\":\"2.0.0\"}\n")
+            .expect("publish newer manifest");
+        fs::write(
+            extension.join("tools.ts"),
+            "export const tools = { next: 1 };\n",
+        )
+        .expect("publish newer tools");
+        fs::write(extension.join("client.ts"), "export const added = true;\n")
+            .expect("publish added file");
+
+        let updated = update_catalog_extension_from(&catalog, &installed, "open-library")
+            .expect("update extension");
+        assert_eq!(updated, target);
+        assert_eq!(installed_manifest_version(&updated), "2.0.0");
+        assert_eq!(
+            fs::read_to_string(updated.join("tools.ts")).expect("read updated tools"),
+            "export const tools = { next: 1 };\n"
+        );
+        assert!(updated.join("client.ts").is_file());
+        assert!(data_dir.join("cache-settings.json").is_file());
+        // Staging directories must not survive a successful update.
+        let leftovers = fs::read_dir(&installed)
+            .expect("read installed root")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".tmp-update-") || name.starts_with(".old-update-")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+
+        assert!(update_catalog_extension_from(&catalog, &installed, "../open-library").is_err());
+        assert!(update_catalog_extension_from(&catalog, &installed, "missing").is_err());
+        fs::remove_dir_all(installed.join("open-library")).expect("uninstall extension");
+        assert!(update_catalog_extension_from(&catalog, &installed, "open-library").is_err());
+
+        fs::remove_dir_all(root).expect("remove update fixture");
     }
 
     #[test]
@@ -8093,6 +9044,7 @@ pub fn run() {
         .manage(AgentSteerState::default())
         .manage(ProviderQuotaCache::default())
         .manage(BookmarkStoreState::default())
+        .manage(MemoryStoreState::default())
         .manage(ScheduledTaskWakeState::default())
         .manage(PendingDeepLinks::default())
         .manage(AppUpdateStore::default())
@@ -8161,6 +9113,7 @@ pub fn run() {
             steer_main_agent_stream,
             clear_generated_plugin_cache,
             delete_bookmark,
+            delete_memory,
             download_app_update,
             delete_chat_history,
             delete_generated_plugin,
@@ -8175,11 +9128,14 @@ pub fn run() {
             open_external_url,
             install_app_update,
             install_catalog_extension,
+            update_catalog_extension,
             list_catalog_extensions,
             list_bookmarks,
+            list_bookmark_mentions,
             list_chat_bookmarks,
             list_generated_plugins,
             list_chat_history,
+            list_memories,
             list_model_providers,
             list_due_scheduled_tasks,
             list_scheduled_tasks,
@@ -8197,6 +9153,8 @@ pub fn run() {
             run_plugin_builder_stream,
             run_provider_oauth_login,
             save_bookmark,
+            save_memory,
+            name_bookmark,
             run_model_chat,
             run_model_chat_stream,
             save_chat_history,

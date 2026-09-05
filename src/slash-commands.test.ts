@@ -13,7 +13,12 @@ describe('filterSlashCommands', () => {
     expect(filterSlashCommands('/sta').map((entry) => entry.command)).toEqual(['/status']);
     expect(filterSlashCommands('/set').map((entry) => entry.command)).toEqual(['/settings']);
     expect(filterSlashCommands('/mod').map((entry) => entry.command)).toEqual(['/models']);
+    expect(filterSlashCommands('/mem').map((entry) => entry.command)).toEqual(['/memory']);
     expect(filterSlashCommands('/ext').map((entry) => entry.command)).toEqual(['/extensions']);
+  });
+
+  it('keeps both commands a shared "/m" prefix matches', () => {
+    expect(filterSlashCommands('/m').map((entry) => entry.command)).toEqual(['/memory', '/models']);
   });
 
   it('keeps every command a shared prefix still matches', () => {

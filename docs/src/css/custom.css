@@ -83,6 +83,25 @@
   letter-spacing: -0.025em;
 }
 
+html.blog-list-page h1,
+html.blog-list-page h2,
+html.blog-list-page h3,
+html.blog-list-page h4 {
+  color: var(--ifm-heading-color);
+  letter-spacing: -0.025em;
+}
+
+html.blog-list-page h1 a,
+html.blog-list-page h2 a,
+html.blog-list-page h3 a,
+html.blog-list-page h4 a,
+html.blog-list-page h1 a:hover,
+html.blog-list-page h2 a:hover,
+html.blog-list-page h3 a:hover,
+html.blog-list-page h4 a:hover {
+  color: inherit;
+}
+
 .plugin-creation-intro {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr);

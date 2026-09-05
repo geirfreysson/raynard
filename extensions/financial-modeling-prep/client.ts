@@ -49,6 +49,20 @@ export type Quote = FmpRecord & {
   timestamp?: number;
 };
 
+export type HistoricalPriceEod = FmpRecord & {
+  symbol?: string;
+  date?: string;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  adjClose?: number;
+  volume?: number;
+  change?: number;
+  changePercent?: number;
+  vwap?: number;
+};
+
 export type StatementRow = FmpRecord & {
   symbol?: string;
   date?: string;
@@ -152,6 +166,31 @@ export type PeerRecord = FmpRecord & {
   mktCap?: number;
 };
 
+export type ScreenerRecord = FmpRecord & {
+  symbol?: string;
+  companyName?: string;
+  marketCap?: number;
+  sector?: string;
+  industry?: string;
+  beta?: number;
+  price?: number;
+  lastAnnualDividend?: number;
+  volume?: number;
+  exchange?: string;
+  exchangeShortName?: string;
+  country?: string;
+  isEtf?: boolean;
+  isFund?: boolean;
+  isActivelyTrading?: boolean;
+};
+
+export type HistoricalMetricRecord = FmpRecord & {
+  symbol?: string;
+  date?: string;
+  fiscalYear?: string | number;
+  period?: string;
+};
+
 const endpoint = (path: string) => `${FMP_BASE_URL}/${path}`;
 const authQuery = (apiKey: string, query: Record<string, QueryValue> = {}) => ({
   ...query,
@@ -184,6 +223,12 @@ export const fetchQuote = (symbol: string, apiKey: string) =>
     label: 'FMP stock quote'
   });
 
+export const fetchHistoricalPrices = (symbol: string, apiKey: string) =>
+  apiGet<HistoricalPriceEod[]>(endpoint('historical-price-eod/full'), {
+    query: authQuery(apiKey, { symbol }),
+    label: 'FMP historical end-of-day prices'
+  });
+
 export const fetchKeyMetricsTtm = (symbol: string, apiKey: string) =>
   apiGet<FmpRecord[]>(endpoint('key-metrics-ttm'), {
     query: authQuery(apiKey, { symbol }),
@@ -194,6 +239,31 @@ export const fetchRatiosTtm = (symbol: string, apiKey: string) =>
   apiGet<FmpRecord[]>(endpoint('ratios-ttm'), {
     query: authQuery(apiKey, { symbol }),
     label: 'FMP TTM financial ratios'
+  });
+
+type HistoricalMetricArgs = {
+  symbol: string;
+  period: 'annual' | 'quarter';
+  limit: number;
+  apiKey: string;
+};
+
+export const fetchKeyMetrics = ({ symbol, period, limit, apiKey }: HistoricalMetricArgs) =>
+  apiGet<HistoricalMetricRecord[]>(endpoint('key-metrics'), {
+    query: authQuery(apiKey, { symbol, period, limit }),
+    label: 'FMP historical key metrics'
+  });
+
+export const fetchRatios = ({ symbol, period, limit, apiKey }: HistoricalMetricArgs) =>
+  apiGet<HistoricalMetricRecord[]>(endpoint('ratios'), {
+    query: authQuery(apiKey, { symbol, period, limit }),
+    label: 'FMP historical financial ratios'
+  });
+
+export const fetchEnterpriseValues = ({ symbol, period, limit, apiKey }: HistoricalMetricArgs) =>
+  apiGet<HistoricalMetricRecord[]>(endpoint('enterprise-values'), {
+    query: authQuery(apiKey, { symbol, period, limit }),
+    label: 'FMP historical enterprise values'
   });
 
 export const fetchFinancialScores = (symbol: string, apiKey: string) =>
@@ -274,4 +344,13 @@ export const fetchStockPeers = (symbol: string, apiKey: string) =>
   apiGet<PeerRecord[]>(endpoint('stock-peers'), {
     query: authQuery(apiKey, { symbol }),
     label: 'FMP stock peers'
+  });
+
+// The screener takes a wide, sparse filter set, so the caller passes an already
+// validated query rather than a fixed positional signature; empty values are
+// dropped by buildQuery and never reach FMP.
+export const fetchCompanyScreener = (query: Record<string, QueryValue>, apiKey: string) =>
+  apiGet<ScreenerRecord[]>(endpoint('company-screener'), {
+    query: authQuery(apiKey, query),
+    label: 'FMP company screener'
   });

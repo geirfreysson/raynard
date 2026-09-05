@@ -6,6 +6,7 @@ import {
   decodeExtensionRecommendation,
   type ExtensionRecommendation
 } from './extension-recommendation';
+import { decodeMemoryChangeRequest, type MemoryChangeRequest } from './memory';
 
 export type { AgentCredentialRequest };
 
@@ -58,6 +59,7 @@ export type StreamPayload = {
     | 'scheduled_task_request'
     | 'credential_request'
     | 'extension_recommendation'
+    | 'memory_change_request'
     | 'steering_applied'
     | 'done'
     | 'retry'
@@ -182,6 +184,7 @@ export type AgentStreamHandlers = {
   onScheduledTaskRequest?: (request: ScheduledTaskRequest) => void;
   onCredentialRequest?: (request: AgentCredentialRequest) => void;
   onExtensionRecommendation?: (recommendation: ExtensionRecommendation) => void;
+  onMemoryChangeRequest?: (request: MemoryChangeRequest) => void;
   /**
    * A message the user typed mid-run has just been injected into the agent's
    * transcript. The answer so far is final; everything after it is a new
@@ -433,6 +436,11 @@ export function applyStreamPayload(
   if (payload.event_type === 'extension_recommendation') {
     const recommendation = decodeExtensionRecommendation(payload.result);
     if (recommendation) handlers.onExtensionRecommendation?.(recommendation);
+  }
+  if (payload.event_type === 'memory_change_request') {
+    // Also travels in the generic `result` field, same as credential_request.
+    const request = decodeMemoryChangeRequest(payload.result);
+    if (request) handlers.onMemoryChangeRequest?.(request);
   }
   if (payload.event_type === 'steering_applied') {
     const steered = payload.text?.trim() || '';

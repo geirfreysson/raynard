@@ -105,6 +105,27 @@ function clickLegend(container: HTMLElement, label: string): void {
   });
 }
 
+function chartViewButton(container: HTMLElement, label: string): HTMLButtonElement {
+  const buttons = [
+    ...container.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Chart view"] button')
+  ];
+  const match = buttons.find((button) => button.textContent?.trim() === label);
+  if (!match) throw new Error(`no chart view button for ${label}`);
+  return match;
+}
+
+function clickChartView(container: HTMLElement, label: string): void {
+  act(() => {
+    chartViewButton(container, label).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+function barXCoordinates(container: HTMLElement): number[] {
+  return [...container.querySelectorAll('.recharts-bar-rectangle .recharts-rectangle')].map(
+    (bar) => Number(bar.getAttribute('d')?.match(/^M\s*([\d.-]+)/)?.[1])
+  );
+}
+
 // ResponsiveContainer picks up its size in an effect, so the tree needs a flush
 // after render before the plotted series exist.
 async function mount(source: string): Promise<{ container: HTMLElement; root: Root }> {
@@ -131,6 +152,7 @@ describe('ChartBlock', () => {
     const legend = container.querySelector<HTMLElement>('.recharts-legend-wrapper');
     expect(legend?.style.top).not.toBe('');
     expect(legend?.style.bottom).toBe('');
+    expect(legend?.style.paddingBottom).toBe('12px');
     expect(container.textContent).toContain('GDP per person employed');
     expect(container.innerHTML).toContain('--chart-1');
     expect(container.innerHTML).toContain('--chart-2');
@@ -202,6 +224,39 @@ describe('ChartBlock', () => {
       'hsl(var(--chart-1))'
     ]);
     expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(0);
+    expect(container.querySelector('[role="group"][aria-label="Chart view"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('switches a multi-series bar chart between grouped, stacked, and line views', async () => {
+    const { container, root } = await mount(
+      JSON.stringify({
+        type: 'bar',
+        x: 'country',
+        series: [{ key: 'gdp', label: 'GDP' }, { key: 'debt', label: 'Debt' }],
+        rows: [
+          { country: 'UK', gdp: 12, debt: 4 },
+          { country: 'Germany', gdp: 18, debt: 6 }
+        ]
+      })
+    );
+
+    expect(chartViewButton(container, 'Grouped').getAttribute('aria-pressed')).toBe('true');
+    expect(new Set(barXCoordinates(container)).size).toBe(4);
+
+    clickChartView(container, 'Stacked');
+    expect(chartViewButton(container, 'Stacked').getAttribute('aria-pressed')).toBe('true');
+    expect(new Set(barXCoordinates(container)).size).toBe(2);
+
+    clickChartView(container, 'Lines');
+    expect(chartViewButton(container, 'Lines').getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelectorAll('.recharts-bar-rectangle')).toHaveLength(0);
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(2);
+
+    clickChartView(container, 'Grouped');
+    expect(container.querySelectorAll('.recharts-line-curve')).toHaveLength(0);
+    expect(new Set(barXCoordinates(container)).size).toBe(4);
 
     act(() => root.unmount());
   });

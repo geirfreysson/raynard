@@ -77,6 +77,8 @@ export function resolveRuntimeTarget(args = process.argv.slice(2), environment =
 }
 
 export const RUNTIME_SCRIPTS = [
+  'bookmark-title-core.mjs',
+  'bookmark-title-sidecar.mjs',
   'builder-compaction.mjs',
   'main-agent-core.mjs',
   'main-agent-sidecar.mjs',

@@ -357,12 +357,29 @@ textarea {
   gap: 6px;
 }
 
+/* A bookmark row is split into two click targets: the title (rename) and the
+   rest (open). Both share the row's hover highlight. */
 .bookmark-row {
   width: 100%;
   min-width: 0;
   padding: 9px 8px;
-  border: 0;
   border-radius: 7px;
+  display: grid;
+  gap: 4px;
+  transition: background 120ms ease;
+}
+
+.bookmark-row:hover,
+.bookmark-row:focus-within {
+  background: #eeeeee;
+}
+
+.bookmark-row-title-button,
+.bookmark-row-open {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
   background: transparent;
   color: inherit;
   display: grid;
@@ -371,10 +388,35 @@ textarea {
   cursor: pointer;
 }
 
-.bookmark-row:hover,
-.bookmark-row:focus-visible {
-  background: #eeeeee;
-  outline: none;
+.bookmark-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bookmark-row-naming-spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 45%, transparent 55%);
+  border-top-color: var(--accent);
+  animation: boot-spin 0.75s linear infinite;
+}
+
+.bookmark-row-title-input {
+  width: 100%;
+  min-width: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: #ffffff;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .bookmark-row-prompt,
@@ -1840,6 +1882,34 @@ textarea:focus {
   align-self: flex-start;
   border-left-width: 0;
   background: transparent;
+}
+
+/* A bookmark @-mention's saved content, collapsed to a small clickable marker
+   in the sender's own bubble. The full text is still what was actually sent —
+   this only changes what the bubble displays. */
+.bookmark-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 2px 2px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-family-sans);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.bookmark-ref-chip:hover,
+.bookmark-ref-chip:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
 }
 
 .message-actions {
@@ -3701,6 +3771,13 @@ button.models-advanced-link:focus-visible {
   display: none;
 }
 
+/* The agent's propose_memory_change confirmation reuses .capability-confirmation
+   and .capability-actions wholesale, so it looks identical to every other
+   in-chat confirmation (build request, scheduled task, credential prompt). */
+.memory-change-confirmation {
+  margin-top: 12px;
+}
+
 .models-provider-row {
   width: 100%;
   min-height: 62px;
@@ -4814,6 +4891,56 @@ button.models-advanced-link:focus-visible {
   display: grid;
   align-content: start;
   gap: 22px;
+}
+
+/* `/memory` — a read-only view; there is no edit/delete control here, only
+   what the agent has already proposed and the user confirmed in-chat. */
+.memory-view {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.memory-view h2 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.memory-view-empty {
+  color: var(--text-muted);
+}
+
+.memory-view-group h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.memory-view-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-view-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #fbfbfb;
+}
+
+.memory-view-item p {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.memory-view-item-meta {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .settings-header {

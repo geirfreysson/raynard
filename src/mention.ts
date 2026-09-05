@@ -1,8 +1,8 @@
 // "@" reference autocomplete: detect an @token being typed and offer the
-// installed plugins, their tools, and their result cards so the user can drop an
-// exact identifier into the message (which also avoids the agent guessing names).
+// installed plugins and saved bookmarks so the user can drop an exact
+// identifier into the message (which also avoids the agent guessing names).
 
-export type MentionKind = 'plugin' | 'tool' | 'card';
+export type MentionKind = 'plugin' | 'bookmark';
 
 export type MentionItem = {
   kind: MentionKind;
@@ -23,14 +23,10 @@ export type MentionPlugin = {
   id?: string;
   name?: string;
   directory?: string;
-  tools?: Array<{
-    name?: string;
-    description?: string;
-    card: { name: { singular: string; plural: string } };
-  }>;
+  tools?: Array<{ name?: string; description?: string }>;
 };
 
-function isReferenceTokenChar(char: string): boolean {
+export function isReferenceTokenChar(char: string): boolean {
   if (!char) return false;
   return /[a-zA-Z0-9._/-]/.test(char);
 }
@@ -71,7 +67,7 @@ function pluginSlug(plugin: MentionPlugin): string {
   return String(plugin.id || '').replace(/^raynard\.generated\./, '');
 }
 
-/** Flatten installed plugins into plugin / tool / card reference items. */
+/** Flatten installed plugins into plugin reference items. */
 export function buildMentionItems(plugins: MentionPlugin[]): MentionItem[] {
   const items: MentionItem[] = [];
   for (const plugin of Array.isArray(plugins) ? plugins : []) {
@@ -85,25 +81,6 @@ export function buildMentionItems(plugins: MentionPlugin[]): MentionItem[] {
         label: displayName || slug,
         description: `plugin · ${slug} · ${tools.length} tool${tools.length === 1 ? '' : 's'}`,
         insertText: slug
-      });
-    }
-    for (const tool of tools) {
-      const toolName = String(tool?.name || '').trim();
-      if (!toolName) continue;
-      items.push({
-        kind: 'tool',
-        match: toolName.toLowerCase(),
-        label: toolName,
-        description: `tool · ${displayName || slug}`,
-        insertText: toolName
-      });
-      const singular = tool.card.name.singular.trim();
-      items.push({
-        kind: 'card',
-        match: `${singular} card ${toolName}`.toLowerCase(),
-        label: `${singular} card`,
-        description: `card · ${toolName}`,
-        insertText: `${singular} card`
       });
     }
   }

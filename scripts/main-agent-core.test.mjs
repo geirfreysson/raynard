@@ -9,6 +9,7 @@ import {
   createDirectAnswerTool,
   createGeneratedPluginTools,
   createExtensionRecommendationTool,
+  createMemoryChangeTool,
   createModel,
   createPresentChartTool,
   createScheduledTaskTool,
@@ -152,6 +153,26 @@ describe('main agent core', () => {
     expect(prompt).toContain('openweathermap ("Openweathermap") — UNFINISHED BUILD');
     expect(prompt).toMatch(/pass its exact slug so the build resumes in place/i);
     expect(prompt).toMatch(/never pick a new or suffixed name/i);
+  });
+
+  it('renders one discrete, id-prefixed bullet per memory entry, never merged into a paragraph', () => {
+    const prompt = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      toolNames: ['wb_fetch_observations'],
+      memories: [
+        { id: 'mem-1', scope: 'global', content: 'Prefers concise answers.' },
+        { id: 'mem-2', scope: 'world-bank-data360', scopeLabel: 'World Bank Data360', content: 'Tracks Iceland GDP per capita.' }
+      ]
+    });
+
+    expect(prompt).toContain('- [id:mem-1][Global] Prefers concise answers.');
+    expect(prompt).toContain('- [id:mem-2][World Bank Data360] Tracks Iceland GDP per capita.');
+    expect(prompt).toMatch(/propose_memory_change/);
+  });
+
+  it('falls back to a "no memory entries yet" line when there are none', () => {
+    const prompt = buildMainAgentSystemPrompt({ mode: 'explore', toolNames: [] });
+    expect(prompt).toContain('(No memory entries yet.)');
   });
 
   it('sets strict Explore and Build boundaries in the system prompt', () => {
@@ -1084,6 +1105,88 @@ describe('main agent core', () => {
       auth: { required: false }
     });
     expect(emitted[1].auth).toBeUndefined();
+  });
+});
+
+describe('createMemoryChangeTool', () => {
+  const toolPluginIndex = {
+    wb_fetch_observations: { slug: 'world-bank-data360', name: 'World Bank Data360' }
+  };
+
+  it('resolves relatedTool to the owning plugin scope and label', async () => {
+    const proposals = [];
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, (request) => proposals.push(request));
+
+    const result = await tool.execute('mem-1', {
+      action: 'create',
+      content: 'The user tracks Icelandic GDP per capita every quarter.',
+      relatedTool: 'wb_fetch_observations'
+    });
+
+    expect(tool.name).toBe('propose_memory_change');
+    expect(result.details.type).toBe('memory-change-request');
+    expect(proposals).toEqual([
+      {
+        action: 'create',
+        memoryId: undefined,
+        content: 'The user tracks Icelandic GDP per capita every quarter.',
+        scope: 'world-bank-data360',
+        scopeLabel: 'World Bank Data360'
+      }
+    ]);
+  });
+
+  it('falls back to global when relatedTool is omitted or unknown', async () => {
+    const proposals = [];
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, (request) => proposals.push(request));
+
+    await tool.execute('mem-1', { action: 'create', content: 'Prefers concise answers.' });
+    await tool.execute('mem-2', {
+      action: 'create',
+      content: 'Prefers metric units.',
+      relatedTool: 'not_a_real_tool'
+    });
+
+    expect(proposals[0]).toMatchObject({ scope: 'global', scopeLabel: '' });
+    expect(proposals[1]).toMatchObject({ scope: 'global', scopeLabel: '' });
+  });
+
+  it('rejects a create with empty content without proposing anything', async () => {
+    const proposals = [];
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, (request) => proposals.push(request));
+
+    const result = await tool.execute('mem-1', { action: 'create', content: '   ' });
+
+    expect(proposals).toHaveLength(0);
+    expect(result.details.type).toBe('memory-change-request-rejected');
+    expect(result.details.reason).toBe('missing-content');
+  });
+
+  it('rejects an update/delete with no memoryId without proposing anything', async () => {
+    const proposals = [];
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, (request) => proposals.push(request));
+
+    const updateResult = await tool.execute('mem-1', { action: 'update', content: 'New content.' });
+    const deleteResult = await tool.execute('mem-2', { action: 'delete' });
+
+    expect(proposals).toHaveLength(0);
+    expect(updateResult.details.reason).toBe('missing-memory-id');
+    expect(deleteResult.details.reason).toBe('missing-memory-id');
+  });
+
+  it('never terminates the turn, unlike request_scheduled_task', async () => {
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, () => {});
+    const result = await tool.execute('mem-1', { action: 'create', content: 'A fact.' });
+    expect(result.terminate).toBeUndefined();
+  });
+
+  it('describes the action argument as a plain string, not a literal union', () => {
+    // Per the request_scheduled_task lesson: Type.Union([Type.Literal(...)])
+    // renders as anyOf/const, which some providers never surface to the model.
+    const tool = createMemoryChangeTool(Type, toolPluginIndex, () => {});
+    const schema = JSON.stringify(tool.parameters);
+    expect(schema).not.toContain('"const"');
+    expect(tool.parameters.properties.action.type).toBe('string');
   });
 });
 

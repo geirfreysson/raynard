@@ -10,12 +10,27 @@
       },
       {
         "name": "fmp_company_overview",
-        "description": "Get a compact current company and valuation snapshot from FMP for one exact ticker. It combines profile, quote, TTM key metrics, TTM ratios, and financial scores to answer price, market cap, trailing P/E, EV/EBITDA, P/S, P/FCF, P/B, margins, ROE, ROIC, leverage, liquidity, Altman Z, and Piotroski questions. TTM ratios update with filings while price-based fields may move with the market. For forward P/E and analyst expectations use fmp_analyst_outlook; for trends use fmp_company_financials.",
+        "description": "Get a compact current company and valuation snapshot from FMP for one exact ticker. It combines profile, quote, TTM key metrics, TTM ratios, and financial scores to answer price, market cap, trailing P/E, EV/EBITDA, P/S, P/FCF, P/B, margins, ROE, ROIC, leverage, liquidity, Altman Z, and Piotroski questions. TTM ratios update with filings while price-based fields may move with the market. For forward P/E and analyst expectations use fmp_analyst_outlook; for historical valuation multiples and market cap use fmp_valuation_history; for financial-statement trends use fmp_company_financials.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_key_metrics_ttm",
+        "description": "Get current trailing-twelve-month company statistics for one exact ticker from FMP’s non-historical key-metrics-ttm endpoint. This tool makes exactly one API request and does not fetch a quote, profile, ratios, financial scores, or price history. It returns market cap, enterprise-value multiples, earnings and free-cash-flow yields, returns on capital, liquidity, leverage, working capital, and cash-flow measures. Use this focused tool when the broader fmp_company_overview is unavailable under the configured FMP subscription; it does not provide the current share price or trailing P/E.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_price_history",
+        "description": "Get structured historical end-of-day closing prices and volume from FMP for one exact ticker. range defaults to 3M and supports 1D, 5D, 1M, 3M, 6M, or 1Y, mapped to the latest 1, 5, 22, 66, 132, or 252 trading sessions. Returns chronological chart-ready points plus range change, high/low closes, and 20/50-session moving averages computed from the full available history. Use this for recent stock movement and performance questions. If the user asks for a plot or chart, call present_chart after this tool using data.points with date on the x-axis and close on the y-axis.",
         "hasCard": true
       },
       {
         "name": "fmp_company_financials",
-        "description": "Get aligned multi-period FMP income statement, balance sheet, and cash-flow fundamentals for one ticker. Returns revenue, operating income, net income, diluted EPS, operating cash flow, capex/free cash flow, cash, debt, and current ratio. period defaults to annual; quarter returns sequential reported quarters. limit defaults to 5 and is capped at 10 to keep model context bounded. Use this for growth, margins, cash generation, debt, liquidity, and trend questions; use filings only for disclosure-level detail.",
+        "description": "Get aligned historical FMP income statement, balance sheet, and cash-flow fundamentals for one ticker. Returns revenue, operating income, net income, diluted EPS, operating cash flow, capex/free cash flow, cash, debt, and current ratio. period defaults to annual; quarter returns sequential reported quarters. For a request such as “back to 2011,” set start_year=2011; optional end_year is inclusive. When no year range is given, limit defaults to the 5 most recent periods and supports up to 40. Use this for growth, margins, cash generation, debt, liquidity, and trend questions; use fmp_valuation_history for historical market cap and valuation multiples.",
+        "hasCard": true
+      },
+      {
+        "name": "fmp_valuation_history",
+        "description": "Get historical FMP valuation and capital-efficiency metrics for one ticker from the key-metrics, ratios, and enterprise-values series. Returns fiscal-period market cap, enterprise value, P/E, P/S, P/B, P/FCF, EV/EBITDA, free-cash-flow yield, ROE, and ROIC. period defaults to annual. For a request such as “from 2011” or “back to 2011,” set start_year=2011; optional end_year is inclusive. When no year range is given, limit defaults to 10 recent periods and supports up to 40. Use fmp_company_overview only for current TTM valuation.",
         "hasCard": true
       },
       {
@@ -25,25 +40,30 @@
       },
       {
         "name": "fmp_company_segments",
-        "description": "Get FMP revenue mix by product/business and geography for one ticker. period defaults to annual; quarter requests quarterly segmentation where the company reports it. period_limit defaults to 2 and caps at 5; within each period, segments are sorted largest first and include revenue plus share of that endpoint’s reported total. Use this for concentration, mix shift, regional exposure, and business-segment questions.",
+        "description": "Get historical FMP revenue mix by product/business and geography for one ticker. period defaults to annual; quarter requests quarterly segmentation where the company reports it. For a request such as “back to 2011,” set start_year=2011; optional end_year is inclusive. When no year range is given, period_limit defaults to the 2 most recent periods and supports up to 40. Within each period, segments are sorted largest first and include revenue plus share of that endpoint’s reported total. Use this for concentration, mix shift, regional exposure, and business-segment questions.",
         "hasCard": true
       },
       {
         "name": "fmp_stock_peers",
         "description": "Get FMP’s peer-company list for one exact ticker, including peer symbols, names, current prices, and market caps when supplied. FMP chooses peers using sector, market-cap, and exchange similarity; this is a discovery list, not a valuation comparison. limit defaults to 8 and caps at 15. Follow with fmp_company_overview or fmp_company_financials on selected symbols for evidence-based comparison.",
         "hasCard": true
+      },
+      {
+        "name": "fmp_company_screener",
+        "description": "Screen FMP’s equity universe for candidate tickers by sector, industry, exchange, country, and inclusive market-cap, price, dividend, beta, volume, and average-volume ranges, plus ETF, fund, and actively-trading flags. Every filter is optional and rows return in FMP’s own order rather than ranked by any single metric. limit defaults to 25 and caps at 100; the card holds every matched row while the model-visible text lists the first 20. Use this for discovery when no ticker is known yet, then call fmp_company_overview or fmp_company_financials on a selected symbol—matching a filter is not an investment recommendation.",
+        "hasCard": true
       }
     ]
   },
-  "description": "Research public companies with Financial Modeling Prep market activity, valuation ratios, financial statements, analyst estimates and price targets, revenue segments, and peer discovery.",
+  "description": "Research public companies with Financial Modeling Prep current and historical valuation ratios, historical prices, financial statements, analyst estimates and price targets, revenue segments, market activity, screening, and peer discovery.",
   "homepage": "https://site.financialmodelingprep.com/developer/docs",
   "icon": "database",
   "id": "raynard.catalog.financial-modeling-prep",
   "name": "Financial Modeling Prep",
   "samplePrompts": [
-    "How expensive is Apple on P/E, EV/EBITDA, and free-cash-flow yield?",
-    "Show Nvidia's analyst revenue and EPS estimates with implied forward P/E.",
-    "How has Microsoft's revenue, free cash flow, cash, and debt changed over five years?"
+    "Show Apple's annual market cap, P/E, and EV/EBITDA from 2011 onward.",
+    "Break down Apple's annual product revenue from 2011 onward.",
+    "Find US technology stocks with a market cap over $10B and beta under 1.2."
   ],
   "sdkVersion": 1,
   "sourceUrls": [
@@ -60,7 +80,7 @@
     "valuation",
     "api"
   ],
-  "version": "0.1.0",
+  "version": "0.4.0",
   "auth": {
     "credentials": [
       {

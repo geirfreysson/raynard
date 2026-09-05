@@ -28,3 +28,40 @@ export function normalizeStoredCharts(charts: unknown): ChartSpec[] {
   }
   return normalized;
 }
+
+export type ChartPlacement = { spec: ChartSpec; offset: number };
+
+/**
+ * Split a message's present_chart results into ones anchored to a position in
+ * its text — where the model had written to when it called present_chart for
+ * that chart — and ones that must render after everything else. A chart falls
+ * back to "trailing" when it has no recorded offset (a message saved before
+ * `chartOffsets` existed) or when the offset is at or past the end of the
+ * current text (e.g. still streaming past it).
+ *
+ * An anchor snaps forward to the next line break so a chart never lands
+ * mid-sentence, mid-list-item, or mid-table-row that the model was still
+ * writing when it called the tool. Anchored entries come back sorted by
+ * offset, in the order they should be inserted into the text.
+ */
+export function planChartPlacement(
+  text: string,
+  charts: ChartSpec[],
+  chartOffsets: number[] | undefined
+): { anchored: ChartPlacement[]; trailing: ChartSpec[] } {
+  const anchored: ChartPlacement[] = [];
+  const trailing: ChartSpec[] = [];
+
+  charts.forEach((spec, index) => {
+    const raw = chartOffsets?.[index];
+    if (typeof raw !== 'number' || raw < 0 || raw >= text.length) {
+      trailing.push(spec);
+      return;
+    }
+    const lineBreak = text.indexOf('\n', raw);
+    anchored.push({ spec, offset: lineBreak === -1 ? text.length : lineBreak + 1 });
+  });
+
+  anchored.sort((a, b) => a.offset - b.offset);
+  return { anchored, trailing };
+}

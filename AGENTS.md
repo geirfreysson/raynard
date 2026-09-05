@@ -651,7 +651,10 @@ secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY_BASE64`,
     repository history
   - create or update `release-draft.md`; its first line must be exactly
     `# Raynard v<version>`, and its contents must describe the actual shipped
-    changes rather than a generic template
+    changes rather than a generic template. Release notes cover the app only:
+    describe changes under `src/`, `src-tauri/`, `scripts/`, and `extensions/`,
+    and leave out `docs/` changes (homepage copy, screenshots, blog posts,
+    docs-site infrastructure) even when they landed in the same diff range
   - run `npm run release:validate -- v<version>`, `npm test -- --run`,
     `npm run build`, `cargo test --manifest-path src-tauri/Cargo.toml --lib`, and
     `cargo check --manifest-path src-tauri/Cargo.toml`

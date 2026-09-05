@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bookmarkLabel,
   bookmarkMessageKey,
   bookmarkPreview,
   canBookmarkMessage,
   promptForAssistant
 } from './bookmarks';
+
+describe('bookmarkLabel', () => {
+  it('prefers the model-written title', () => {
+    expect(bookmarkLabel({ title: 'Apple FY2024 margins', prompt: 'What are Apple margins?' })).toBe(
+      'Apple FY2024 margins'
+    );
+  });
+
+  it('falls back to the prompt when naming failed or predates titles', () => {
+    const prompt = 'What are Apple margins?';
+    expect(bookmarkLabel({ title: '', prompt })).toBe(prompt);
+    expect(bookmarkLabel({ title: '   ', prompt })).toBe(prompt);
+    expect(bookmarkLabel({ prompt })).toBe(prompt);
+  });
+});
 
 describe('bookmarks', () => {
   it('only offers bookmarks on completed answer messages', () => {

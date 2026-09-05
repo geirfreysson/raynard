@@ -58,7 +58,10 @@ const config = {
           sidebarPath: './sidebars.js',
           routeBasePath: 'docs',
         },
-        blog: false,
+        blog: {
+          routeBasePath: 'blog',
+          showReadingTime: true,
+        },
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -93,6 +96,11 @@ const config = {
             position: 'right',
           },
           {
+            to: '/blog',
+            label: 'Blog',
+            position: 'right',
+          },
+          {
             to: '/docs/getting-started',
             label: 'Download',
             position: 'right',
@@ -117,6 +125,12 @@ const config = {
             items: [
               {label: 'Generated plugins', to: '/docs/plugins'},
               {label: 'Development', to: '/docs/development'},
+            ],
+          },
+          {
+            title: 'Blog',
+            items: [
+              {label: 'Latest posts', to: '/blog'},
             ],
           },
         ],

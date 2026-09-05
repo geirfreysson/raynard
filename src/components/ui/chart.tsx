@@ -46,6 +46,7 @@ const LINE_STROKE_WIDTH = 2;
 const HIGHLIGHTED_LINE_STROKE_WIDTH = 4;
 const SECONDARY_LINE_OPACITY = 0.65;
 const LINE_DOT_RADIUS = 3;
+type MultiSeriesBarView = 'grouped' | 'stacked' | 'line';
 
 /**
  * Paint for one series: full palette color, or muted when a highlight excludes
@@ -159,6 +160,12 @@ function ChartData({ spec }: { spec: ChartSpec }) {
 
 function ChartFigure({ spec }: { spec: ChartSpec }) {
   const showLegend = spec.series.length > 1;
+  const canChangeBarView = spec.type === 'bar' && showLegend;
+  const defaultBarView: MultiSeriesBarView = spec.stacked ? 'stacked' : 'grouped';
+  const [barView, setBarView] = React.useState<MultiSeriesBarView>(defaultBarView);
+  React.useEffect(() => setBarView(defaultBarView), [spec]);
+  const renderedType = canChangeBarView && barView === 'line' ? 'line' : spec.type;
+  const stacked = canChangeBarView && barView === 'stacked';
   // Clicking a legend entry drops that series from the plot. Recharts' `hide`
   // does the rest: the shape is not drawn, the series leaves the tooltip
   // payload, and the axis domain is recomputed without it.
@@ -244,7 +251,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
       // Kept mounted so a hidden series' yAxisId still resolves; just not drawn
       // once every series it scales has been switched off.
       hide={leftSeries.length > 0 && visibleLeftSeries.length === 0}
-      domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
+      domain={renderedType === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatLeftTick}
       label={
@@ -260,7 +267,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
       orientation="right"
       {...axisProps}
       hide={visibleRightSeries.length === 0}
-      domain={spec.type === 'line' ? ['auto', 'auto'] : undefined}
+      domain={renderedType === 'line' ? ['auto', 'auto'] : undefined}
       width={64}
       tickFormatter={formatRightTick}
       label={
@@ -286,7 +293,7 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
   const legend = showLegend ? (
     <Legend
       verticalAlign="top"
-      wrapperStyle={{ fontSize: 12, cursor: 'pointer' }}
+      wrapperStyle={{ fontSize: 12, cursor: 'pointer', paddingBottom: 12 }}
       // Recharts greys an entry whose series is hidden; point it at the theme
       // rather than its hard-coded #ccc, which is invisible in dark mode.
       inactiveColor={MUTED_COLOR}
@@ -327,85 +334,113 @@ function ChartFigure({ spec }: { spec: ChartSpec }) {
   ));
 
   return (
-    <ResponsiveContainer width="100%" height={CHART_HEIGHT + ticks.height}>
-      {spec.type === 'bar' ? (
-        <BarChart {...common}>
-          {grid}
-          {xAxis}
-          {leftYAxis}
-          {rightYAxis}
-          {tooltip}
-          {legend}
-          {spec.series.map((series, i) => {
-            const paint = seriesPaint(i, series.key, highlight);
-            // Per-row fills need Cells; a single `fill` cannot vary by category.
-            const perCategory = highlight.categories.size > 0;
+    <div className="flex flex-col gap-2">
+      {canChangeBarView && (
+        <div className="flex justify-end" role="group" aria-label="Chart view">
+          {(['grouped', 'stacked', 'line'] as const).map((view) => {
+            const disabled = view === 'stacked' && rightSeries.length > 0;
+            const label =
+              view === 'grouped' ? 'Grouped' : view === 'stacked' ? 'Stacked' : 'Lines';
             return (
-              <Bar
-                key={series.key}
-                dataKey={series.key}
-                yAxisId={series.axis ?? 'left'}
-                name={series.label}
-                fill={paint.color}
-                fillOpacity={paint.opacity}
-                hide={hidden.has(series.key)}
-                stackId={spec.stacked ? 'stack' : undefined}
-                radius={[3, 3, 0, 0]}
-                isAnimationActive={ANIMATE}
+              <button
+                key={view}
+                type="button"
+                aria-pressed={barView === view}
+                disabled={disabled}
+                title={disabled ? 'Series on different axes cannot be stacked' : undefined}
+                onClick={() => setBarView(view)}
+                className={`border px-2.5 py-1 text-xs transition-colors first:rounded-l-md last:rounded-r-md disabled:cursor-not-allowed disabled:opacity-40 ${
+                  barView === view
+                    ? 'border-foreground/20 bg-secondary text-secondary-foreground'
+                    : 'border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground'
+                }`}
               >
-                {perCategory &&
-                  spec.rows.map((row, r) => {
-                    const lit = highlight.categories.has(String(row[spec.x] ?? ''));
-                    return (
-                      <Cell
-                        key={r}
-                        fill={lit ? seriesColor(i) : MUTED_COLOR}
-                        fillOpacity={lit ? 1 : MUTED_OPACITY}
-                      />
-                    );
-                  })}
-              </Bar>
+                {label}
+              </button>
             );
           })}
-        </BarChart>
-      ) : (
-        <LineChart {...common}>
-          {grid}
-          {xAxis}
-          {leftYAxis}
-          {rightYAxis}
-          {tooltip}
-          {legend}
-          {categoryMarkers}
-          {spec.series.map((series, i) => {
-            const paint = lineSeriesPaint(i, series.key, highlight);
-            return (
-              <Line
-                key={series.key}
-                type="monotone"
-                dataKey={series.key}
-                yAxisId={series.axis ?? 'left'}
-                name={series.label}
-                stroke={paint.color}
-                strokeOpacity={paint.opacity}
-                strokeWidth={paint.width}
-                hide={hidden.has(series.key)}
-                dot={{
-                  r: LINE_DOT_RADIUS,
-                  fill: paint.color,
-                  fillOpacity: paint.opacity,
-                  stroke: paint.color,
-                  strokeOpacity: paint.opacity,
-                  strokeWidth: 1
-                }}
-                connectNulls
-                isAnimationActive={ANIMATE}
-              />
-            );
-          })}
-        </LineChart>
+        </div>
       )}
-    </ResponsiveContainer>
+      <ResponsiveContainer width="100%" height={CHART_HEIGHT + ticks.height}>
+        {renderedType === 'bar' ? (
+          <BarChart {...common}>
+            {grid}
+            {xAxis}
+            {leftYAxis}
+            {rightYAxis}
+            {tooltip}
+            {legend}
+            {spec.series.map((series, i) => {
+              const paint = seriesPaint(i, series.key, highlight);
+              // Per-row fills need Cells; a single `fill` cannot vary by category.
+              const perCategory = highlight.categories.size > 0;
+              return (
+                <Bar
+                  key={series.key}
+                  dataKey={series.key}
+                  yAxisId={series.axis ?? 'left'}
+                  name={series.label}
+                  fill={paint.color}
+                  fillOpacity={paint.opacity}
+                  hide={hidden.has(series.key)}
+                  stackId={stacked ? 'stack' : undefined}
+                  radius={[3, 3, 0, 0]}
+                  isAnimationActive={ANIMATE}
+                >
+                  {perCategory &&
+                    spec.rows.map((row, r) => {
+                      const lit = highlight.categories.has(String(row[spec.x] ?? ''));
+                      return (
+                        <Cell
+                          key={r}
+                          fill={lit ? seriesColor(i) : MUTED_COLOR}
+                          fillOpacity={lit ? 1 : MUTED_OPACITY}
+                        />
+                      );
+                    })}
+                </Bar>
+              );
+            })}
+          </BarChart>
+        ) : (
+          <LineChart {...common}>
+            {grid}
+            {xAxis}
+            {leftYAxis}
+            {rightYAxis}
+            {tooltip}
+            {legend}
+            {categoryMarkers}
+            {spec.series.map((series, i) => {
+              const paint = lineSeriesPaint(i, series.key, highlight);
+              return (
+                <Line
+                  key={series.key}
+                  type="monotone"
+                  dataKey={series.key}
+                  yAxisId={series.axis ?? 'left'}
+                  name={series.label}
+                  stroke={paint.color}
+                  strokeOpacity={paint.opacity}
+                  strokeWidth={paint.width}
+                  hide={hidden.has(series.key)}
+                  dot={{
+                    r: LINE_DOT_RADIUS,
+                    fill: paint.color,
+                    fillOpacity: paint.opacity,
+                    stroke: paint.color,
+                    strokeOpacity: paint.opacity,
+                    strokeWidth: 1
+                  }}
+                  connectNulls
+                  isAnimationActive={ANIMATE}
+                />
+              );
+            })}
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+    </div>
   );
 }
 

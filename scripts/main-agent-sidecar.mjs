@@ -11,6 +11,7 @@ import {
   createScheduledTaskTool,
   createDirectAnswerTool,
   createExtensionRecommendationTool,
+  createMemoryChangeTool,
   createPresentChartTool,
   createGeneratedPluginTools,
   createModel,
@@ -203,6 +204,22 @@ const installedPlugins = (Array.isArray(request.plugins) ? request.plugins : [])
   })
   .filter((plugin) => plugin.slug);
 
+// Exact installed tool name -> the plugin that owns it, so a memory the agent
+// ties to a tool it just used is scoped to that plugin's stable slug without
+// the model ever having to know or guess a slug itself.
+const toolPluginIndex = {};
+for (const plugin of Array.isArray(request.plugins) ? request.plugins : []) {
+  const dir = String(plugin.directory || '');
+  const slug =
+    dir.split('/').filter(Boolean).pop() ||
+    String(plugin.id || '').replace(/^raynard\.generated\./, '');
+  if (!slug) continue;
+  const name = String(plugin.name || slug);
+  for (const tool of Array.isArray(plugin.tools) ? plugin.tools : []) {
+    if (tool?.name) toolPluginIndex[tool.name] = { slug, name };
+  }
+}
+
 let buildRequest = null;
 let directAnswer = null;
 let extensionRecommendation = null;
@@ -231,6 +248,13 @@ const extensionRecommendationTool = createExtensionRecommendationTool(
   }
 );
 const presentChartTool = createPresentChartTool(Type);
+let memoryChangeRequest = null;
+const memoryChangeTool = createMemoryChangeTool(Type, toolPluginIndex, (nextRequest) => {
+  memoryChangeRequest = nextRequest;
+  // Reuses the generic `result` field so no Rust stream change is needed —
+  // the same trick already used for credential_request/extension_recommendation.
+  emit({ type: 'memory_change_request', result: nextRequest });
+});
 const scheduledTaskTool = request.scheduledExecution
   ? null
   : createScheduledTaskTool(
@@ -250,6 +274,7 @@ const scheduledTaskTool = request.scheduledExecution
 const tools = [
   ...generatedTools,
   presentChartTool,
+  memoryChangeTool,
   availableExtensionSearchTool,
   extensionRecommendationTool,
   buildRequestTool,
@@ -277,7 +302,8 @@ const agent = new Agent({
         ...(request.schedulerContext || {}),
         chats: request.chats,
         currentChatId: request.currentChatId
-      }
+      },
+      memories: request.memories
     }),
     model: agentModel,
     thinkingLevel: defaultThinkingLevel('explore'),
