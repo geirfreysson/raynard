@@ -75,3 +75,6 @@ use an installed extension when one matches the request.
 
 Use **Stop** to cancel the current answer. Other chats can continue working in
 the background.
+
+To chat from your phone while Raynard is running, follow the
+[Telegram setup guide](/docs/telegram).

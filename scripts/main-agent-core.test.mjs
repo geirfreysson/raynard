@@ -212,6 +212,25 @@ describe('main agent core', () => {
     expect(execution).toMatch(/never create another scheduled task/i);
   });
 
+  it('keeps Telegram turns useful while excluding desktop confirmation flows', () => {
+    const prompt = buildMainAgentSystemPrompt({
+      mode: 'explore',
+      executionSurface: 'telegram',
+      toolNames: ['oecd_data'],
+      memories: [{ id: 'mem-1', scope: 'global', content: 'Prefers concise answers.' }]
+    });
+
+    expect(prompt).toMatch(/answering the paired owner through Telegram/i);
+    expect(prompt).toContain('one or more installed API tools');
+    expect(prompt).toContain('open this Telegram chat in Raynard');
+    expect(prompt).toMatch(/cite with a Markdown link/i);
+    expect(prompt).toMatch(/cannot open Raynard's citation modal/i);
+    expect(prompt).toContain('[id:mem-1][Global] Prefers concise answers.');
+    expect(prompt).not.toContain('request_plugin_build');
+    expect(prompt).not.toContain('request_scheduled_task');
+    expect(prompt).not.toContain('propose_memory_change');
+  });
+
   it('normalizes a quarterly scheduling request into a terminating draft', async () => {
     const requests = [];
     const tool = createScheduledTaskTool(Type, (request) => requests.push(request), {

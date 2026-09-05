@@ -43,10 +43,17 @@ import {
 } from './scheduled-task-view';
 import {
   applyAppUpdateState,
+  applyTelegramChannelState,
   renderSettingsView,
   updateNeedsAttention,
   type AppUpdateState
 } from './settings-view';
+import {
+  telegramReplyChunks,
+  type TelegramChannelState,
+  type TelegramDeliveryResult,
+  type TelegramInboundEvent
+} from './telegram-channel';
 import { createCoalescedSaveQueue } from './chat-persistence';
 import type { ExtensionRecommendation } from './extension-recommendation';
 import {
@@ -321,6 +328,10 @@ type StoredChatMessage = {
   memoryChangeRequest?: MemoryChangeRequest;
   /** Set once the user acts on `memoryChangeRequest`, so a reload shows the resolved state, not stale buttons. */
   memoryChangeOutcome?: 'saved' | 'discarded';
+  /** Sanitized origin metadata for an externally initiated turn. */
+  externalChannel?: 'telegram';
+  externalEventId?: string;
+  externalSender?: string;
 };
 
 type StoredCredentialRequest = {
@@ -912,6 +923,15 @@ configureResultArtifactLoader(resultArtifactLoader);
 let appMode: AppMode = loadAppMode();
 let modelProviders: ModelProvider[] = [];
 let llmEnvStatus: LlmEnvStatus | null = null;
+let telegramChannelState: TelegramChannelState = {
+  status: 'disconnected',
+  configured: false,
+  enabled: false,
+  bot: null,
+  owner: null,
+  pairingRequests: [],
+  pendingCount: 0
+};
 let mainViewRevision = 0;
 let initialExtensionsLoaded = false;
 let extensionOnboardingPending = true;
@@ -945,6 +965,7 @@ void refreshGeneratedPlugins();
 void refreshScheduledTasks();
 void refreshBookmarkMentionIndex();
 void refreshMemoryRows();
+void refreshTelegramChannelState();
 syncModeControls();
 
 // Shared answers. The subscription drains anything the OS delivered before the
@@ -964,6 +985,16 @@ void invoke('subscribe_scheduled_tasks', { onWake: scheduledWakeChannel }).catch
   // An older host has no scheduler. The sidebar commands will surface that
   // mismatch if the user opens it.
 });
+
+const telegramEventChannel = new Channel<{ kind: string }>((event) => {
+  void refreshTelegramChannelState();
+  if (event.kind === 'inbound') void drainTelegramInbound();
+});
+void invoke('subscribe_telegram_channel', { onEvent: telegramEventChannel })
+  .then(() => void drainTelegramInbound())
+  .catch(() => {
+    // An older host simply has no Telegram channel yet.
+  });
 
 introForm?.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -1811,7 +1842,10 @@ async function openSettingsPage() {
 
   let state: AppUpdateState;
   try {
-    state = await invoke<AppUpdateState>('get_app_update_state');
+    [state, telegramChannelState] = await Promise.all([
+      invoke<AppUpdateState>('get_app_update_state'),
+      invoke<TelegramChannelState>('get_telegram_channel_state')
+    ]);
   } catch (error) {
     console.error('Could not read the update state:', getErrorMessage(error));
     return;
@@ -1835,9 +1869,18 @@ async function openSettingsPage() {
       install: () => invoke<AppUpdateState>('install_app_update'),
       openExternal: async (url: string) => {
         await invoke('open_external_url', { url });
-      }
+      },
+      connectTelegram: (token: string) =>
+        invoke<TelegramChannelState>('save_telegram_bot_token', { token }),
+      approveTelegram: (requestId: string) =>
+        invoke<TelegramChannelState>('approve_telegram_pairing', { requestId }),
+      rejectTelegram: (requestId: string) =>
+        invoke<TelegramChannelState>('reject_telegram_pairing', { requestId }),
+      forgetTelegramOwner: () => invoke<TelegramChannelState>('forget_telegram_owner'),
+      disconnectTelegram: () => invoke<TelegramChannelState>('disconnect_telegram_channel')
     },
-    state
+    state,
+    telegramChannelState
   );
 
   shell?.classList.add('plugin-view');
@@ -1847,6 +1890,17 @@ async function openSettingsPage() {
   chatForm?.classList.add('is-hidden');
   document.querySelector<HTMLElement>('.intro-stage')?.classList.add('is-hidden');
   settingsToggle?.setAttribute('aria-pressed', 'true');
+}
+
+async function refreshTelegramChannelState() {
+  try {
+    telegramChannelState = await invoke<TelegramChannelState>('get_telegram_channel_state');
+    applyTelegramChannelState(telegramChannelState);
+    if (telegramChannelState.pendingCount > 0) void drainTelegramInbound();
+  } catch {
+    // Settings will show an actionable error if the user opens it against an
+    // incompatible or unavailable host.
+  }
 }
 
 /**
@@ -4853,6 +4907,270 @@ async function runScheduledExecution(execution: ScheduledExecution) {
   }
 }
 
+let telegramRunnerActive = false;
+let telegramRetryTimer: number | undefined;
+
+async function telegramChatSnapshot(event: TelegramInboundEvent): Promise<{
+  meta: ChatMeta;
+  stored: StoredChatMessage[];
+}> {
+  if (event.localChatId) {
+    try {
+      const chat = await invoke<ChatHistoryPayload>('read_chat_history', {
+        chatId: event.localChatId
+      });
+      return {
+        meta: {
+          chatId: chat.chatId,
+          name: chat.name,
+          createdAt: chat.createdAt,
+          updatedAt: chat.updatedAt,
+          unread: chat.unread,
+          activeBuildPlugin: chat.activeBuildPlugin
+        },
+        stored: chat.messages
+      };
+    } catch {
+      // A deleted bound chat naturally starts a replacement below.
+    }
+  }
+  const chatId = createSessionId();
+  const meta = createChatMeta(chatId, event.sender.name);
+  meta.name = `Telegram · ${event.sender.name}`;
+  return { meta, stored: [] };
+}
+
+function scheduleTelegramRetry() {
+  if (telegramRetryTimer !== undefined) return;
+  telegramRetryTimer = window.setTimeout(() => {
+    telegramRetryTimer = undefined;
+    void drainTelegramInbound();
+  }, 1200);
+}
+
+async function finishTelegramEvent(
+  event: TelegramInboundEvent,
+  localChatId: string,
+  answer: string
+) {
+  await invoke<TelegramDeliveryResult>('complete_telegram_inbound', {
+    eventId: event.id,
+    localChatId,
+    replyChunks: telegramReplyChunks(answer)
+  });
+  await refreshTelegramChannelState();
+}
+
+async function drainTelegramInbound() {
+  if (telegramRunnerActive) return;
+  telegramRunnerActive = true;
+  let claimed: TelegramInboundEvent | null = null;
+  try {
+    claimed = await invoke<TelegramInboundEvent | null>('claim_telegram_inbound');
+    if (!claimed) return;
+
+    const snapshot = await telegramChatSnapshot(claimed);
+    const destinationChatId = snapshot.meta.chatId;
+    if (chatRuns.has(destinationChatId)) {
+      await invoke('release_telegram_inbound', {
+        eventId: claimed.id,
+        error: 'The destination chat is busy.'
+      });
+      scheduleTelegramRetry();
+      return;
+    }
+
+    const refreshVisible = () => {
+      if (activeSessionId !== destinationChatId) return;
+      bindChatState(snapshot.meta, snapshot.stored);
+      renderStoredTranscript();
+      syncRunControls();
+    };
+
+    if (claimed.kind === 'newChat') {
+      const userRecord: StoredChatMessage = {
+        role: 'user',
+        text: '/new',
+        timestamp: claimed.receivedAt,
+        externalChannel: 'telegram',
+        externalEventId: claimed.id,
+        externalSender: claimed.sender.name
+      };
+      const answer = 'Started a new Raynard chat.';
+      const assistantRecord: StoredChatMessage = {
+        role: 'assistant',
+        text: answer,
+        timestamp: Date.now(),
+        status: 'completed',
+        externalChannel: 'telegram',
+        externalEventId: claimed.id,
+        externalSender: claimed.sender.name
+      };
+      snapshot.meta.unread = activeSessionId !== destinationChatId || !document.hasFocus();
+      snapshot.stored.push(userRecord, assistantRecord);
+      await persistChatSnapshot(snapshot.meta, snapshot.stored);
+      refreshVisible();
+      await finishTelegramEvent(claimed, destinationChatId, answer);
+      return;
+    }
+
+    const existingUser = snapshot.stored.find(
+      (message) => message.role === 'user' && message.externalEventId === claimed!.id
+    );
+    const existingAnswer = snapshot.stored.find(
+      (message) =>
+        message.role === 'assistant' &&
+        message.externalEventId === claimed!.id &&
+        message.status === 'completed'
+    );
+    if (existingUser && existingAnswer) {
+      await finishTelegramEvent(claimed, destinationChatId, existingAnswer.text);
+      return;
+    }
+    for (const message of snapshot.stored) {
+      if (
+        message.role === 'assistant' &&
+        message.externalEventId === claimed.id &&
+        message.status === 'running'
+      ) {
+        message.status = 'error';
+        message.error = 'Interrupted when Raynard stopped.';
+        message.text = message.text === 'Thinking…' ? message.error : message.text;
+      }
+    }
+
+    const userRecord: StoredChatMessage = existingUser || {
+      role: 'user',
+      text: claimed.text,
+      timestamp: claimed.receivedAt,
+      externalChannel: 'telegram',
+      externalEventId: claimed.id,
+      externalSender: claimed.sender.name
+    };
+    const assistantRecord: StoredChatMessage = {
+      role: 'assistant',
+      text: 'Thinking…',
+      timestamp: Date.now(),
+      status: 'running',
+      externalChannel: 'telegram',
+      externalEventId: claimed.id,
+      externalSender: claimed.sender.name
+    };
+    if (!existingUser) snapshot.stored.push(userRecord);
+    snapshot.stored.push(assistantRecord);
+    const modelMessages = snapshot.stored
+      .slice(0, -1)
+      .filter((message) => !message.modeStatus)
+      .map((message) => ({ role: message.role, content: message.text }));
+    const run = chatRuns.begin(
+      destinationChatId,
+      'telegram',
+      snapshot.meta,
+      snapshot.stored,
+      mainViewRevision
+    );
+    if (!run) throw new Error('The Telegram chat is already running.');
+    snapshot.meta.unread = activeSessionId !== destinationChatId || !document.hasFocus();
+    await persistChatSnapshot(snapshot.meta, snapshot.stored);
+    refreshVisible();
+    void invoke('send_telegram_typing', { eventId: claimed.id });
+    const typingTimer = window.setInterval(() => {
+      void invoke('send_telegram_typing', { eventId: claimed!.id });
+    }, 4000);
+    let streamed = '';
+    let thinking = '';
+    let credentialRequest: CredentialRequest | undefined;
+    try {
+      const reply = await runMainAgentStream(
+        modelMessages,
+        'explore',
+        {
+          onStreamId: (streamId) => {
+            chatRuns.setStreamId(destinationChatId, run.id, streamId);
+            syncRunControls();
+          },
+          onDelta: (delta) => {
+            streamed += delta;
+            assistantRecord.text = streamed || 'Thinking…';
+            refreshVisible();
+          },
+          onThinkingDelta: (delta) => {
+            thinking += delta;
+            assistantRecord.thinking = thinking.trim() || undefined;
+          },
+          onToolResult: (toolCall) => {
+            const chart = extractPresentedChart(toolCall.result);
+            if (chart) {
+              (assistantRecord.charts ??= []).push(chart);
+              (assistantRecord.chartOffsets ??= []).push(streamed.length);
+            }
+            const pluginName = pluginNameForTool(toolCall.toolName);
+            const card = extractResultCard(toolCall, pluginName);
+            let cardIndex: number | undefined;
+            if (card) cardIndex = (assistantRecord.cards ??= []).push(card) - 1;
+            const source = extractToolSource(toolCall.result, toolCall.toolName, pluginName);
+            if (source && cardIndex !== undefined) source.cardIndex = cardIndex;
+            if (source) (assistantRecord.sources ??= []).push(source);
+            persistChatSnapshotQuietly(snapshot.meta, snapshot.stored);
+            refreshVisible();
+          },
+          onCredentialRequest: (request) => {
+            credentialRequest = request;
+          }
+        },
+        destinationChatId,
+        false,
+        'telegram'
+      );
+      const answer = credentialRequest
+        ? `Open this chat in Raynard to add the required ${credentialRequest.pluginName} credential.`
+        : reply.buildRequest || reply.scheduledTaskRequest || reply.extensionRecommendation
+          ? 'Open this chat in Raynard to review the requested action.'
+          : reply.content || streamed || 'The model returned an empty response.';
+      assistantRecord.text = answer;
+      assistantRecord.provider = reply.provider;
+      assistantRecord.model = reply.model;
+      assistantRecord.usage = reply.usage;
+      assistantRecord.thinking = thinking.trim() || undefined;
+      assistantRecord.status = 'completed';
+      assistantRecord.error = undefined;
+      assistantRecord.timestamp = Date.now();
+      await persistChatSnapshot(snapshot.meta, snapshot.stored);
+      await refreshChatHistory();
+      refreshVisible();
+      await finishTelegramEvent(claimed, destinationChatId, answer);
+    } catch (error) {
+      const detail = getErrorMessage(error);
+      const answer = `Raynard could not complete that request: ${detail}`;
+      assistantRecord.text = answer;
+      assistantRecord.error = detail;
+      assistantRecord.status = 'error';
+      assistantRecord.timestamp = Date.now();
+      await persistChatSnapshot(snapshot.meta, snapshot.stored);
+      refreshVisible();
+      await finishTelegramEvent(claimed, destinationChatId, answer);
+    } finally {
+      window.clearInterval(typingTimer);
+      chatRuns.finish(destinationChatId, run.id);
+      syncRunControls();
+      renderChatHistory();
+    }
+  } catch (error) {
+    if (claimed) {
+      await invoke('release_telegram_inbound', {
+        eventId: claimed.id,
+        error: getErrorMessage(error)
+      }).catch(() => undefined);
+      scheduleTelegramRetry();
+    }
+  } finally {
+    telegramRunnerActive = false;
+    if (claimed && telegramRetryTimer === undefined) {
+      window.setTimeout(() => void drainTelegramInbound(), 0);
+    }
+  }
+}
+
 async function loadChatBookmarks(chatId: string) {
   const entries = await invoke<StoredBookmark[]>('list_chat_bookmarks', { chatId });
   return new Map(entries.map((entry) => [entry.messageKey, entry]));
@@ -4910,7 +5228,7 @@ function renderChatHistory() {
         <span class="chat-history-title-text">${escapeHtml(chat.name)}</span>
         ${chat.unread ? '<span class="chat-history-unread-dot" title="Unread scheduled task result"></span>' : ''}
       </span>
-      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : running.kind === 'scheduled' ? 'Scheduled task' : 'Thinking'}` : ''}</span>
+      <span class="chat-history-meta">${formatChatDate(chat.updatedAt)} · ${chat.messageCount} messages${running ? ` · ${running.kind === 'builder' ? 'Building' : running.kind === 'scheduled' ? 'Scheduled task' : running.kind === 'telegram' ? 'Telegram' : 'Thinking'}` : ''}</span>
     `;
     openButton.addEventListener('click', () => void openSavedChat(chat.chatId));
     row.appendChild(openButton);
@@ -5292,6 +5610,14 @@ function renderStoredMessage(message: StoredChatMessage) {
     const origin = document.createElement('p');
     origin.className = 'scheduled-message-origin';
     origin.textContent = `Scheduled · ${message.scheduledTaskName}`;
+    article.prepend(origin);
+  }
+  if (message.externalChannel === 'telegram') {
+    const origin = document.createElement('p');
+    origin.className = 'scheduled-message-origin';
+    origin.textContent = message.externalSender
+      ? `Telegram · ${message.externalSender}`
+      : 'Telegram';
     article.prepend(origin);
   }
   if (message.role === 'assistant' && message.builderRun) {
@@ -6303,10 +6629,9 @@ async function startAgentTurn(content: string) {
 function syncRunControls() {
   const run = chatRuns.get(activeSessionId);
   const visible = Boolean(run);
-  // The composer stays live through an agent run: typing into it is how the
-  // agent is steered. A builder run has no steering channel, so it keeps the
-  // old lock.
-  if (chatInput) chatInput.disabled = run?.kind === 'builder' || run?.kind === 'scheduled';
+  // Only an interactive desktop agent has a steering channel. Builder,
+  // scheduled, and Telegram runs keep the composer locked until they finish.
+  if (chatInput) chatInput.disabled = Boolean(run && run.kind !== 'agent');
   renderPendingQueue();
   if (!stopStreamButton) return;
   stopStreamButton.classList.toggle('is-hidden', !visible);

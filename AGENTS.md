@@ -19,8 +19,12 @@ generated API plugins.
 - `src-tauri/src/scheduled_tasks.rs`: persisted recurring schedules, due-task
   claiming, calendar/time-zone calculation, completion, and interrupted-run
   recovery.
+- `src-tauri/src/telegram.rs`: Bot API polling, owner pairing, durable inbound
+  delivery, and outbound reply retries for the Telegram channel.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
+- `src/telegram-channel.ts`: Telegram state wording and plain-text reply
+  chunking shared by Settings and the remote runner.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
 - `src/extension-rename.ts`: display-name normalization and collision rules for renaming a locally authored extension.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
@@ -153,9 +157,12 @@ generated API plugins.
   while it is the active provider. API keys are stored through the OS keychain.
 - A gear pinned to the foot of the sidebar rail (or `/settings`) opens Settings
   in the shared detail section, beside plugin and scheduled-task screens. It
-  holds the installed version and App updates. When a background check finds a
-  release, the gear carries a dot — the app has no toast surface, so that dot is
-  the only ambient signal.
+  holds the installed version, Messaging, and App updates. Messaging can connect
+  one BotFather Telegram bot, approve one private-chat owner, replace or remove
+  the token, and forget the paired owner. Telegram accepts text DMs only and is
+  available only while Raynard is running. When a background update check finds
+  a release, the gear carries a dot — the app has no toast surface, so that dot
+  is the only ambient signal.
 
 ## Agent Architecture
 

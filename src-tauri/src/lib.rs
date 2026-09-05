@@ -1,6 +1,7 @@
 mod app_updates;
 mod extension_contribution;
 mod scheduled_tasks;
+mod telegram;
 
 use app_updates::{
     check_for_app_update, download_app_update, get_app_update_state, install_app_update,
@@ -29,6 +30,7 @@ use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
 const KEYRING_SERVICE: &str = "ai.raynard";
+const TELEGRAM_BOT_TOKEN_ACCOUNT: &str = "channel:telegram:bot-token";
 const INLINE_RESULT_DATA_LIMIT_BYTES: usize = 128 * 1024;
 const CHAT_HISTORY_INDEX_VERSION: u32 = 2;
 static CHAT_HISTORY_INDEX_LOCK: Mutex<()> = Mutex::new(());
@@ -248,6 +250,12 @@ struct StoredChatMessage {
     scheduled_task_name: Option<String>,
     #[serde(rename = "scheduledExecutionId", default)]
     scheduled_execution_id: Option<String>,
+    #[serde(rename = "externalChannel", default)]
+    external_channel: Option<String>,
+    #[serde(rename = "externalEventId", default)]
+    external_event_id: Option<String>,
+    #[serde(rename = "externalSender", default)]
+    external_sender: Option<String>,
     /// Token counts for the turn that produced this message
     /// ({ input, output, cacheRead, cacheWrite, totalTokens, contextTokens,
     /// contextWindow }). Counts only — never text, ids, or headers.
@@ -662,6 +670,172 @@ fn scheduled_tasks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
     Ok(dir.join("scheduled-tasks").join("tasks.json"))
+}
+
+fn telegram_state_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(dir.join("messaging"))
+}
+
+#[tauri::command]
+fn get_telegram_channel_state(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+) -> Result<telegram::TelegramChannelState, String> {
+    let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+    telegram::get_state(&telegram_state_dir(&app)?, &state, !token.is_empty())
+}
+
+#[tauri::command]
+fn subscribe_telegram_channel(
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    on_event: Channel<telegram::TelegramChannelEvent>,
+) -> Result<(), String> {
+    telegram::subscribe(&state, on_event)
+}
+
+#[tauri::command]
+async fn save_telegram_bot_token(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    token: String,
+) -> Result<telegram::TelegramChannelState, String> {
+    let token = token.trim().to_string();
+    if token.is_empty() || token.len() > 512 {
+        return Err("Paste the bot token issued by BotFather.".to_string());
+    }
+    let bot = telegram::validate_token(&token).await?;
+    telegram::prepare_polling(&token).await?;
+    write_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT, &token).map_err(|error| {
+        format!("Could not store the Telegram token in the OS keychain: {error}")
+    })?;
+    let root = telegram_state_dir(&app)?;
+    if let Err(error) = telegram::configure(&root, &state, bot) {
+        let _ = delete_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+        return Err(error);
+    }
+    telegram::start_poller(root.clone(), &state, token);
+    telegram::get_state(&root, &state, true)
+}
+
+#[tauri::command]
+fn disconnect_telegram_channel(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+) -> Result<telegram::TelegramChannelState, String> {
+    let root = telegram_state_dir(&app)?;
+    telegram::disconnect(&root, &state)?;
+    delete_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT)
+        .map_err(|error| format!("Could not remove the Telegram token: {error}"))?;
+    telegram::get_state(&root, &state, false)
+}
+
+#[tauri::command]
+async fn approve_telegram_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    request_id: String,
+) -> Result<telegram::TelegramChannelState, String> {
+    let root = telegram_state_dir(&app)?;
+    let request = telegram::approve_pairing(&root, &state, request_id.trim())?;
+    let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+    if !token.is_empty() {
+        telegram::send_pairing_approved(&token, request.chat_id).await;
+    }
+    telegram::get_state(&root, &state, !token.is_empty())
+}
+
+#[tauri::command]
+fn reject_telegram_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    request_id: String,
+) -> Result<telegram::TelegramChannelState, String> {
+    let root = telegram_state_dir(&app)?;
+    telegram::reject_pairing(&root, &state, request_id.trim())?;
+    let configured = !read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT).is_empty();
+    telegram::get_state(&root, &state, configured)
+}
+
+#[tauri::command]
+fn forget_telegram_owner(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+) -> Result<telegram::TelegramChannelState, String> {
+    let root = telegram_state_dir(&app)?;
+    telegram::forget_owner(&root, &state)?;
+    let configured = !read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT).is_empty();
+    telegram::get_state(&root, &state, configured)
+}
+
+#[tauri::command]
+fn claim_telegram_inbound(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+) -> Result<Option<telegram::TelegramInboundEvent>, String> {
+    telegram::claim_next(&telegram_state_dir(&app)?, &state)
+}
+
+#[tauri::command]
+fn release_telegram_inbound(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    event_id: String,
+    error: Option<String>,
+) -> Result<(), String> {
+    telegram::release_event(&telegram_state_dir(&app)?, &state, event_id.trim(), error)
+}
+
+#[tauri::command]
+async fn send_telegram_typing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    event_id: String,
+) -> Result<(), String> {
+    let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+    if token.is_empty() {
+        return Err("Telegram is disconnected.".to_string());
+    }
+    telegram::send_typing(&telegram_state_dir(&app)?, &state, &token, event_id.trim()).await
+}
+
+#[tauri::command]
+async fn complete_telegram_inbound(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, telegram::TelegramRuntimeState>,
+    event_id: String,
+    local_chat_id: String,
+    reply_chunks: Vec<String>,
+) -> Result<telegram::TelegramDeliveryResult, String> {
+    let chunks = reply_chunks
+        .into_iter()
+        .map(|chunk| chunk.trim().to_string())
+        .filter(|chunk| !chunk.is_empty())
+        .collect::<Vec<_>>();
+    if chunks.is_empty() || chunks.iter().any(|chunk| chunk.chars().count() > 4000) {
+        return Err("Telegram replies must contain 1-4000 characters per chunk.".to_string());
+    }
+    let root = telegram_state_dir(&app)?;
+    telegram::record_answer(
+        &root,
+        &state,
+        event_id.trim(),
+        &normalize_chat_id(&local_chat_id),
+        chunks,
+    )?;
+    let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+    if token.is_empty() {
+        return Ok(telegram::TelegramDeliveryResult {
+            delivered: false,
+            error: Some(
+                "Telegram is disconnected; the reply will retry after reconnecting.".to_string(),
+            ),
+        });
+    }
+    telegram::deliver_event(&root, &state, &token, event_id.trim()).await
 }
 
 #[tauri::command]
@@ -3282,6 +3456,7 @@ async fn run_main_agent_stream(
     messages: Vec<ChatMessage>,
     mode: String,
     scheduled_execution: Option<bool>,
+    execution_surface: Option<String>,
     scheduler_context: Option<Value>,
 ) -> Result<MainAgentReply, String> {
     let mut config = resolve_model_config(Some(&app))?;
@@ -3357,6 +3532,7 @@ async fn run_main_agent_stream(
         // after the model calls its on-demand missing-capability search tool.
         "availableExtensions": available_extensions,
         "scheduledExecution": scheduled_execution.unwrap_or(false),
+        "executionSurface": execution_surface.unwrap_or_else(|| if scheduled_execution.unwrap_or(false) { "scheduled".to_string() } else { "desktop".to_string() }),
         "schedulerContext": scheduler_context.unwrap_or_else(|| json!({ "timeZone": "UTC" })),
         "chats": chats.iter().take(100).map(|chat| json!({ "id": chat.chat_id, "name": chat.name })).collect::<Vec<_>>(),
         "currentChatId": chat_id
@@ -5954,6 +6130,9 @@ fn normalize_stored_messages(messages: Vec<StoredChatMessage>) -> Vec<StoredChat
                 scheduled_task_id: message.scheduled_task_id,
                 scheduled_task_name: message.scheduled_task_name,
                 scheduled_execution_id: message.scheduled_execution_id,
+                external_channel: message.external_channel,
+                external_event_id: message.external_event_id,
+                external_sender: message.external_sender,
                 usage: message.usage,
             })
         })
@@ -7435,6 +7614,9 @@ mod tests {
             scheduled_task_id: None,
             scheduled_task_name: None,
             scheduled_execution_id: None,
+            external_channel: None,
+            external_event_id: None,
+            external_sender: None,
             usage: None,
         }];
 
@@ -8428,6 +8610,9 @@ mod tests {
             scheduled_task_id: None,
             scheduled_task_name: None,
             scheduled_execution_id: None,
+            external_channel: None,
+            external_event_id: None,
+            external_sender: None,
             usage: None,
         }]);
 
@@ -8675,6 +8860,9 @@ mod tests {
             scheduled_task_id: None,
             scheduled_task_name: None,
             scheduled_execution_id: None,
+            external_channel: None,
+            external_event_id: None,
+            external_sender: None,
             usage: Some(usage.clone()),
         }]);
 
@@ -8707,6 +8895,9 @@ mod tests {
             scheduled_task_id: None,
             scheduled_task_name: None,
             scheduled_execution_id: None,
+            external_channel: None,
+            external_event_id: None,
+            external_sender: None,
             usage: None,
         }]);
 
@@ -8991,6 +9182,9 @@ mod tests {
                 scheduled_task_id: None,
                 scheduled_task_name: None,
                 scheduled_execution_id: None,
+                external_channel: None,
+                external_event_id: None,
+                external_sender: None,
                 usage: None,
             },
             StoredChatMessage {
@@ -9016,6 +9210,9 @@ mod tests {
                 scheduled_task_id: None,
                 scheduled_task_name: None,
                 scheduled_execution_id: None,
+                external_channel: None,
+                external_event_id: None,
+                external_sender: None,
                 usage: None,
             },
         ]);
@@ -9046,6 +9243,7 @@ pub fn run() {
         .manage(BookmarkStoreState::default())
         .manage(MemoryStoreState::default())
         .manage(ScheduledTaskWakeState::default())
+        .manage(telegram::TelegramRuntimeState::default())
         .manage(PendingDeepLinks::default())
         .manage(AppUpdateStore::default())
         .plugin(tauri_plugin_deep_link::init())
@@ -9080,6 +9278,21 @@ pub fn run() {
 
             app_updates::spawn_background_checks(app.handle());
 
+            let telegram_token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+            if !telegram_token.is_empty() {
+                let telegram_runtime = app.state::<telegram::TelegramRuntimeState>();
+                if telegram::get_state(&telegram_state_dir(app.handle())?, &telegram_runtime, true)
+                    .map(|state| state.enabled)
+                    .unwrap_or(false)
+                {
+                    telegram::start_poller(
+                        telegram_state_dir(app.handle())?,
+                        &telegram_runtime,
+                        telegram_token,
+                    );
+                }
+            }
+
             // A cold launch has already consumed its URL by the time the plugin
             // is up, so it is read back explicitly; everything after arrives
             // through `on_open_url`. Both land in the same buffer.
@@ -9104,11 +9317,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             append_agent_turn_log,
+            approve_telegram_pairing,
             assign_scheduled_task_chat,
             cancel_model_chat_stream,
             check_for_app_update,
             claim_scheduled_task,
             complete_scheduled_task,
+            complete_telegram_inbound,
             create_scheduled_task,
             steer_main_agent_stream,
             clear_generated_plugin_cache,
@@ -9118,10 +9333,12 @@ pub fn run() {
             delete_chat_history,
             delete_generated_plugin,
             delete_scheduled_task,
+            disconnect_telegram_channel,
             save_plugin_credential,
             delete_plugin_credential,
             execute_generated_plugin_tool,
             get_app_update_state,
+            get_telegram_channel_state,
             get_generated_plugin_cache_settings,
             get_plugin_scaffold_status,
             load_llm_env_status,
@@ -9148,12 +9365,15 @@ pub fn run() {
             read_result_artifact,
             read_provider_quota,
             read_usage_totals,
+            reject_telegram_pairing,
+            release_telegram_inbound,
             prepare_extension_contribution,
             run_main_agent_stream,
             run_plugin_builder_stream,
             run_provider_oauth_login,
             save_bookmark,
             save_memory,
+            save_telegram_bot_token,
             name_bookmark,
             run_model_chat,
             run_model_chat_stream,
@@ -9164,11 +9384,15 @@ pub fn run() {
             set_active_model_provider,
             set_active_provider,
             set_scheduled_task_enabled,
+            send_telegram_typing,
             sign_out_provider,
             submit_provider_oauth_code,
             subscribe_app_updates,
             subscribe_deep_links,
             subscribe_scheduled_tasks,
+            subscribe_telegram_channel,
+            claim_telegram_inbound,
+            forget_telegram_owner,
             update_scheduled_task
         ])
         .run(tauri::generate_context!())

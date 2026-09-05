@@ -221,7 +221,10 @@ export async function runMainAgentStream(
   mode: 'explore' | 'build',
   handlers: AgentStreamHandlers = {},
   chatId?: string,
-  scheduledExecution = false
+  scheduledExecution = false,
+  executionSurface: 'desktop' | 'scheduled' | 'telegram' = scheduledExecution
+    ? 'scheduled'
+    : 'desktop'
 ): Promise<AgentReply> {
   const streamId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -259,6 +262,7 @@ export async function runMainAgentStream(
     mode,
     chatId,
     scheduledExecution,
+    executionSurface,
     schedulerContext: {
       localDateTime: new Date().toISOString(),
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'

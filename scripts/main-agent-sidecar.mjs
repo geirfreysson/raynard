@@ -224,6 +224,8 @@ let buildRequest = null;
 let directAnswer = null;
 let extensionRecommendation = null;
 let scheduledTaskRequest = null;
+const executionSurface = request.executionSurface === 'telegram' ? 'telegram' : request.scheduledExecution ? 'scheduled' : 'desktop';
+const isTelegramExecution = executionSurface === 'telegram';
 const buildRequestTool = createBuildRequestTool(
   Type,
   (nextRequest) => {
@@ -274,11 +276,11 @@ const scheduledTaskTool = request.scheduledExecution
 const tools = [
   ...generatedTools,
   presentChartTool,
-  memoryChangeTool,
-  availableExtensionSearchTool,
-  extensionRecommendationTool,
-  buildRequestTool,
-  ...(scheduledTaskTool ? [scheduledTaskTool] : []),
+  ...(!isTelegramExecution ? [memoryChangeTool] : []),
+  ...(!isTelegramExecution ? [availableExtensionSearchTool] : []),
+  ...(!isTelegramExecution ? [extensionRecommendationTool] : []),
+  ...(!isTelegramExecution ? [buildRequestTool] : []),
+  ...(!isTelegramExecution && scheduledTaskTool ? [scheduledTaskTool] : []),
   directAnswerTool
 ];
 const internalToolNames = new Set([
@@ -303,7 +305,8 @@ const agent = new Agent({
         chats: request.chats,
         currentChatId: request.currentChatId
       },
-      memories: request.memories
+      memories: request.memories,
+      executionSurface
     }),
     model: agentModel,
     thinkingLevel: defaultThinkingLevel('explore'),

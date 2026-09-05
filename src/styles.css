@@ -5024,6 +5024,95 @@ button.models-advanced-link:focus-visible {
   padding-top: 2px;
 }
 
+.settings-channel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-channel-name {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.settings-channel-pill {
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.settings-channel-pill.is-connected {
+  border-color: rgba(45, 125, 80, 0.3);
+  color: #2d7d50;
+}
+
+.settings-channel-pill.is-error {
+  border-color: rgba(160, 55, 43, 0.3);
+  color: var(--accent);
+}
+
+.settings-telegram-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-telegram-token {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+}
+
+.settings-telegram-token:focus {
+  border-color: rgba(160, 55, 43, 0.45);
+  outline: none;
+}
+
+.settings-pairing-request {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+}
+
+.settings-pairing-identity {
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+}
+
+.settings-secondary-button {
+  border: 0;
+  padding: 6px 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-secondary-button:hover,
+.settings-secondary-button:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.settings-secondary-button.is-danger:hover,
+.settings-secondary-button.is-danger:focus-visible {
+  color: var(--accent);
+}
+
 .settings-update-action {
   border: 1px solid rgba(160, 55, 43, 0.26);
   border-radius: 8px;

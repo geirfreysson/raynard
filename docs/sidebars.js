@@ -6,6 +6,7 @@ const sidebars = {
     'intro',
     'getting-started',
     'chat-and-models',
+    'telegram',
     'scheduled-tasks',
     'powered-by-pi',
     'plugins',

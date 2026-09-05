@@ -1,4 +1,4 @@
-export type ChatRunKind = 'agent' | 'builder' | 'scheduled';
+export type ChatRunKind = 'agent' | 'builder' | 'scheduled' | 'telegram';
 
 export type QueuedRunMessage = {
   text: string;

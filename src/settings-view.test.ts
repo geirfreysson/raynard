@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyAppUpdateState,
+  applyTelegramChannelState,
   closeSettingsView,
   manualDownloadUrl,
   renderSettingsView,
@@ -10,6 +11,7 @@ import {
   type AppUpdateState,
   type SettingsViewDeps
 } from './settings-view';
+import type { TelegramChannelState } from './telegram-channel';
 
 function state(overrides: Partial<AppUpdateState> = {}): AppUpdateState {
   return {
@@ -21,32 +23,62 @@ function state(overrides: Partial<AppUpdateState> = {}): AppUpdateState {
 }
 
 function deps(overrides: Partial<SettingsViewDeps> = {}): SettingsViewDeps {
+  const telegram = telegramState();
   return {
     check: vi.fn(async () => state({ status: 'upToDate' })),
     download: vi.fn(async () => state({ status: 'downloaded', availableVersion: '0.5.0' })),
     install: vi.fn(async () => state({ status: 'installing' })),
     openExternal: vi.fn(async () => undefined),
+    connectTelegram: vi.fn(async (): Promise<TelegramChannelState> => ({
+      ...telegram,
+      configured: true,
+      status: 'awaitingPairing'
+    })),
+    approveTelegram: vi.fn(async (): Promise<TelegramChannelState> => ({
+      ...telegram,
+      status: 'connected'
+    })),
+    rejectTelegram: vi.fn(async () => telegram),
+    forgetTelegramOwner: vi.fn(async () => telegram),
+    disconnectTelegram: vi.fn(async () => telegram),
+    ...overrides
+  };
+}
+
+function telegramState(overrides: Partial<TelegramChannelState> = {}): TelegramChannelState {
+  return {
+    status: 'disconnected',
+    configured: false,
+    enabled: false,
+    bot: null,
+    owner: null,
+    pairingRequests: [],
+    pendingCount: 0,
     ...overrides
   };
 }
 
 /** Mirrors main.ts: the page is a child of the shared detail section. */
-function mount(initial: AppUpdateState, api: SettingsViewDeps = deps()) {
+function mount(
+  initial: AppUpdateState,
+  api: SettingsViewDeps = deps(),
+  telegram: TelegramChannelState = telegramState()
+) {
   const detail = document.createElement('section');
   detail.id = 'pluginDetailView';
   document.body.appendChild(detail);
   const host = document.createElement('div');
   detail.appendChild(host);
-  renderSettingsView(host, api, initial);
+  renderSettingsView(host, api, initial, telegram);
   return host;
 }
 
 function button(host: HTMLElement) {
-  return host.querySelector<HTMLButtonElement>('.settings-update-action');
+  return host.querySelector<HTMLButtonElement>('.settings-updates .settings-update-action');
 }
 
 function statusText(host: HTMLElement) {
-  return host.querySelector('.settings-status-line')?.textContent || '';
+  return host.querySelector('.settings-updates .settings-status-line')?.textContent || '';
 }
 
 beforeEach(() => {
@@ -111,6 +143,60 @@ describe('the settings page', () => {
     expect(host.querySelector('.settings-row-value')?.textContent).toBe('0.4.0');
   });
 
+  it('connects a BotFather token without rendering it back', async () => {
+    const api = deps();
+    const host = mount(state(), api);
+    const input = host.querySelector<HTMLInputElement>('.settings-telegram-token')!;
+    input.value = '123:secret';
+    host.querySelector<HTMLFormElement>('.settings-telegram-form')?.requestSubmit();
+    await vi.waitFor(() => expect(api.connectTelegram).toHaveBeenCalledWith('123:secret'));
+    expect(host.textContent).not.toContain('123:secret');
+  });
+
+  it('shows and approves a numeric Telegram pairing request', () => {
+    const api = deps();
+    const host = mount(
+      state(),
+      api,
+      telegramState({
+        status: 'awaitingPairing',
+        configured: true,
+        enabled: true,
+        pairingRequests: [
+          {
+            id: 'pair-1',
+            userId: 42,
+            chatId: 42,
+            username: 'ada',
+            name: 'Ada',
+            createdAt: 1,
+            expiresAt: 2
+          }
+        ]
+      })
+    );
+    expect(host.textContent).toContain('Ada · @ada · 42');
+    [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((entry) => entry.textContent === 'Approve')
+      ?.click();
+    expect(api.approveTelegram).toHaveBeenCalledWith('pair-1');
+  });
+
+  it('repaints Telegram state pushed by the host', () => {
+    const host = mount(state());
+    applyTelegramChannelState(
+      telegramState({
+        status: 'connected',
+        configured: true,
+        enabled: true,
+        bot: { id: 1, username: 'raynard_bot', name: 'Raynard' },
+        owner: { userId: 42, username: 'ada', name: 'Ada', approvedAt: 1 }
+      })
+    );
+    expect(host.textContent).toContain('@raynard_bot is connected');
+    expect(host.textContent).toContain('Ada · @ada · 42');
+  });
+
   it('offers a check when idle and paints what the check returns', async () => {
     const api = deps();
     const host = mount(state(), api);
@@ -146,7 +232,7 @@ describe('the settings page', () => {
     const meter = host.querySelector('.status-meter');
     expect(meter?.getAttribute('aria-valuenow')).toBe('62');
     expect(host.querySelector<HTMLElement>('.status-meter-fill')?.style.width).toBe('62%');
-    expect(host.querySelector('.settings-status-detail')?.textContent).toBe('62%');
+    expect(host.querySelector('.settings-updates .settings-status-detail')?.textContent).toBe('62%');
     expect(button(host)?.disabled).toBe(true);
   });
 

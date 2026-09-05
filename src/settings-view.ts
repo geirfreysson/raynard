@@ -10,6 +10,10 @@
 // pushes a new state through `applyAppUpdateState` and the page re-paints.
 
 import { DOWNLOADS } from './share/config';
+import {
+  telegramStatusLine,
+  type TelegramChannelState
+} from './telegram-channel';
 
 /** Mirrors the Rust `AppUpdateStatus`. */
 export type AppUpdateStatus =
@@ -42,6 +46,11 @@ export type SettingsViewDeps = {
   download: () => Promise<AppUpdateState>;
   install: () => Promise<AppUpdateState>;
   openExternal: (url: string) => Promise<void>;
+  connectTelegram: (token: string) => Promise<TelegramChannelState>;
+  approveTelegram: (requestId: string) => Promise<TelegramChannelState>;
+  rejectTelegram: (requestId: string) => Promise<TelegramChannelState>;
+  forgetTelegramOwner: () => Promise<TelegramChannelState>;
+  disconnectTelegram: () => Promise<TelegramChannelState>;
 };
 
 /** Where "Release notes" goes. Rendered as an ordinary link. */
@@ -52,6 +61,7 @@ type Action = { label: string; run: () => void } | null;
 let host: HTMLElement | null = null;
 let deps: SettingsViewDeps | null = null;
 let current: AppUpdateState | null = null;
+let telegramCurrent: TelegramChannelState | null = null;
 // Bumped on every action. A slow check that resolves after the user has already
 // pressed something else must not overwrite the newer state.
 let generation = 0;
@@ -125,6 +135,24 @@ function drive(action: () => Promise<AppUpdateState>) {
     });
 }
 
+function driveTelegram(action: () => Promise<TelegramChannelState>) {
+  generation += 1;
+  const started = generation;
+  void action()
+    .then((state) => {
+      if (generation !== started) return;
+      applyTelegramChannelState(state);
+    })
+    .catch((error) => {
+      if (generation !== started || !telegramCurrent) return;
+      applyTelegramChannelState({
+        ...telegramCurrent,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+}
+
 /**
  * The primary button, or null where there is nothing useful to press.
  *
@@ -153,7 +181,7 @@ function primaryAction(state: AppUpdateState, api: SettingsViewDeps): Action {
 }
 
 function renderUpdateSection(state: AppUpdateState, api: SettingsViewDeps): HTMLElement {
-  const section = el('section', 'settings-section');
+  const section = el('section', 'settings-section settings-updates');
   section.appendChild(el('h3', 'settings-section-title', 'App updates'));
 
   const line = el('p', 'settings-status-line', updateStatusLine(state));
@@ -215,6 +243,102 @@ function renderAboutSection(state: AppUpdateState): HTMLElement {
   return section;
 }
 
+function telegramOwnerLabel(state: TelegramChannelState): string | null {
+  if (!state.owner) return null;
+  const username = state.owner.username ? ` · @${state.owner.username}` : '';
+  return `${state.owner.name}${username} · ${state.owner.userId}`;
+}
+
+function renderTelegramSection(state: TelegramChannelState, api: SettingsViewDeps): HTMLElement {
+  const section = el('section', 'settings-section settings-telegram');
+  section.appendChild(el('h3', 'settings-section-title', 'Messaging'));
+  const heading = el('div', 'settings-channel-heading');
+  heading.append(
+    el('strong', 'settings-channel-name', 'Telegram'),
+    el('span', `settings-channel-pill is-${state.status}`, state.status === 'awaitingPairing' ? 'Pair account' : state.status)
+  );
+  section.appendChild(heading);
+
+  const line = el('p', 'settings-status-line', telegramStatusLine(state));
+  line.setAttribute('aria-live', 'polite');
+  section.appendChild(line);
+  section.appendChild(
+    el('p', 'settings-status-detail', 'Text DMs only. Quitting Raynard stops Telegram replies.')
+  );
+
+  const owner = telegramOwnerLabel(state);
+  if (owner) {
+    const row = el('div', 'settings-row');
+    row.append(el('span', 'settings-row-label', 'Paired account'), el('span', 'settings-row-value', owner));
+    section.appendChild(row);
+  }
+
+  for (const request of state.pairingRequests || []) {
+    const requestRow = el('div', 'settings-pairing-request');
+    const identity = request.username
+      ? `${request.name} · @${request.username} · ${request.userId}`
+      : `${request.name} · ${request.userId}`;
+    requestRow.appendChild(el('span', 'settings-pairing-identity', identity));
+    const actions = el('div', 'settings-actions');
+    const approve = document.createElement('button');
+    approve.type = 'button';
+    approve.className = 'settings-update-action';
+    approve.textContent = 'Approve';
+    approve.addEventListener('click', () => driveTelegram(() => api.approveTelegram(request.id)));
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'settings-secondary-button';
+    reject.textContent = 'Reject';
+    reject.addEventListener('click', () => driveTelegram(() => api.rejectTelegram(request.id)));
+    actions.append(approve, reject);
+    requestRow.appendChild(actions);
+    section.appendChild(requestRow);
+  }
+
+  const form = document.createElement('form');
+  form.className = 'settings-telegram-form';
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.className = 'settings-telegram-token';
+  input.placeholder = state.configured ? 'New BotFather token' : 'BotFather token';
+  input.autocomplete = 'off';
+  input.setAttribute('aria-label', state.configured ? 'Replacement Telegram bot token' : 'Telegram bot token');
+  const connect = document.createElement('button');
+  connect.type = 'submit';
+  connect.className = 'settings-update-action';
+  connect.textContent = state.configured ? 'Replace bot' : 'Connect bot';
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const token = input.value.trim();
+    if (!token) return;
+    input.disabled = true;
+    connect.disabled = true;
+    driveTelegram(() => api.connectTelegram(token));
+  });
+  form.append(input, connect);
+  section.appendChild(form);
+
+  if (state.configured) {
+    const actions = el('div', 'settings-actions');
+    if (state.owner) {
+      const forget = document.createElement('button');
+      forget.type = 'button';
+      forget.className = 'settings-secondary-button';
+      forget.textContent = 'Forget paired account';
+      forget.addEventListener('click', () => driveTelegram(api.forgetTelegramOwner));
+      actions.appendChild(forget);
+    }
+    const disconnect = document.createElement('button');
+    disconnect.type = 'button';
+    disconnect.className = 'settings-secondary-button is-danger';
+    disconnect.textContent = 'Disconnect bot';
+    disconnect.addEventListener('click', () => driveTelegram(api.disconnectTelegram));
+    actions.appendChild(disconnect);
+    section.appendChild(actions);
+  }
+  return section;
+}
+
 /**
  * Paints `state` into the page, if the page is open.
  *
@@ -230,7 +354,18 @@ export function applyAppUpdateState(state: AppUpdateState): void {
   // scheduled task replaces it wholesale. Losing the document is the signal
   // that this page is gone — no teardown call to keep in sync.
   if (host && !host.isConnected) host = null;
-  if (!host || !deps) return;
+  paintSettings();
+}
+
+export function applyTelegramChannelState(state: TelegramChannelState): void {
+  telegramCurrent = state;
+  generation += 1;
+  paintSettings();
+}
+
+function paintSettings(): void {
+  if (host && !host.isConnected) host = null;
+  if (!host || !deps || !current || !telegramCurrent) return;
   host.replaceChildren();
 
   const header = el('header', 'settings-header');
@@ -238,7 +373,11 @@ export function applyAppUpdateState(state: AppUpdateState): void {
   host.appendChild(header);
 
   const body = el('div', 'settings-body');
-  body.append(renderAboutSection(state), renderUpdateSection(state, deps));
+  body.append(
+    renderAboutSection(current),
+    renderTelegramSection(telegramCurrent, deps),
+    renderUpdateSection(current, deps)
+  );
   host.appendChild(body);
 }
 
@@ -251,10 +390,12 @@ export function applyAppUpdateState(state: AppUpdateState): void {
 export function renderSettingsView(
   element: HTMLElement,
   api: SettingsViewDeps,
-  state: AppUpdateState
+  state: AppUpdateState,
+  telegramState: TelegramChannelState
 ): void {
   host = element;
   deps = api;
+  telegramCurrent = telegramState;
   applyAppUpdateState(state);
 }
 
