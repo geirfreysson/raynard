@@ -178,5 +178,11 @@ From the user's point of view, the flow is simple: ask a question, let Explore
 use the tools it has, and approve a Build pass only when Raynard needs to create
 or improve an extension.
 
+## Other inspirations
+
+Pi is the agent engine at the center of Raynard, but Raynard's design also
+draws on ideas from other open-source projects: OpenCode, OpenClaw, and
+Superset.
+
 Next, see [how to create a generated plugin](./plugins.md) or learn more about
 [Explore and Build model roles](./chat-and-models.md).
