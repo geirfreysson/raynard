@@ -12,7 +12,12 @@ describe('Telegram answer formatting', () => {
   it('renders safe rich text and preserves intentional non-source links', () => {
     expect(telegramReply('## **Answer**\nUse `code` or see [the guide](https://example.com). <script>')).toEqual({
       parseMode: 'HTML',
-      chunks: ['<b>Answer</b>\n\nUse <code>code</code> or see <a href="https://example.com">the guide</a>. &lt;script&gt;']
+      chunks: ['<b>Answer</b>\n\nUse <code>code</code> or see <a href="https://example.com">the guide</a>. &lt;script&gt;'],
+      parts: [{
+        kind: 'text',
+        text: '<b>Answer</b>\n\nUse <code>code</code> or see <a href="https://example.com">the guide</a>. &lt;script&gt;',
+        parseMode: 'HTML'
+      }]
     });
   });
 
@@ -36,6 +41,47 @@ describe('Telegram answer formatting', () => {
     expect(sent).toContain('Second tranche');
     expect(sent).not.toContain('financialmodelingprep');
     expect(sent).not.toContain('(1)');
+    expect(reply.parts).toEqual([
+      { kind: 'text', text: '<b>Entry strategy</b>', parseMode: 'HTML' },
+      expect.objectContaining({
+        kind: 'rich',
+        html: expect.stringContaining('<table bordered striped compact>'),
+        fallbackText: expect.stringContaining('<b>Tranche:</b> First tranche')
+      })
+    ]);
+  });
+
+  it('keeps wide tables as labelled records instead of squeezing them into a native table', () => {
+    const reply = telegramReply([
+      '| Company | Price | P/E | P/FCF |', '|---|---|---|---|',
+      '| Adobe | $266 | 15.2x | 10.0x |'
+    ].join('\n'));
+
+    expect(reply.parts).toEqual([{
+      kind: 'text',
+      text: '<b>Company:</b> Adobe\n<b>Price:</b> $266\n<b>P/E:</b> 15.2x\n<b>P/FCF:</b> 10.0x',
+      parseMode: 'HTML'
+    }]);
+  });
+
+  it('keeps literal bullets as a readable list instead of joining them into a paragraph', () => {
+    const reply = telegramReply([
+      'Matched: Active markets show probabilities ≥94%.', '',
+      '• Adobe (ADBE): 96.5% beat probability. Price $266.51, trailing P/E 15.2x.',
+      '• American Eagle (AEO): 95.9% beat probability. Price $17.39, trailing P/E 10.5x.'
+    ].join('\n'));
+
+    expect(reply.chunks).toEqual([
+      'Matched: Active markets show probabilities ≥94%.\n\n' +
+      '• Adobe (ADBE): 96.5% beat probability. Price $266.51, trailing P/E 15.2x.\n\n' +
+      '• American Eagle (AEO): 95.9% beat probability. Price $17.39, trailing P/E 10.5x.'
+    ]);
+  });
+
+  it('adds visual separation between ordinary Markdown list items too', () => {
+    expect(telegramReply('- First item\n- Second item').chunks).toEqual([
+      '• First item\n\n• Second item'
+    ]);
   });
 
   it('chunks on Unicode-safe boundaries and balances formatting tags', () => {

@@ -814,32 +814,45 @@ fn normalize_telegram_parse_mode(parse_mode: Option<String>) -> Result<Option<St
     }
 }
 
+fn normalize_telegram_delivery_parts(
+    delivery_parts: Option<Vec<telegram::TelegramDeliveryPart>>,
+    legacy_chunks: Option<Vec<String>>,
+    legacy_parse_mode: Option<String>,
+) -> Result<Vec<telegram::TelegramDeliveryPart>, String> {
+    if let Some(parts) = delivery_parts {
+        return telegram::normalize_delivery_parts(parts);
+    }
+    let parse_mode = normalize_telegram_parse_mode(legacy_parse_mode)?;
+    telegram::normalize_delivery_parts(
+        legacy_chunks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|text| telegram::TelegramDeliveryPart::Text {
+                text,
+                parse_mode: parse_mode.clone(),
+            })
+            .collect(),
+    )
+}
+
 #[tauri::command]
 async fn complete_telegram_inbound(
     app: tauri::AppHandle,
     state: tauri::State<'_, telegram::TelegramRuntimeState>,
     event_id: String,
     local_chat_id: String,
-    reply_chunks: Vec<String>,
+    reply_chunks: Option<Vec<String>>,
     parse_mode: Option<String>,
+    delivery_parts: Option<Vec<telegram::TelegramDeliveryPart>>,
 ) -> Result<telegram::TelegramDeliveryResult, String> {
-    let chunks = reply_chunks
-        .into_iter()
-        .map(|chunk| chunk.trim().to_string())
-        .filter(|chunk| !chunk.is_empty())
-        .collect::<Vec<_>>();
-    if chunks.is_empty() || chunks.iter().any(|chunk| chunk.chars().count() > 4000) {
-        return Err("Telegram replies must contain 1-4000 characters per chunk.".to_string());
-    }
-    let parse_mode = normalize_telegram_parse_mode(parse_mode)?;
+    let parts = normalize_telegram_delivery_parts(delivery_parts, reply_chunks, parse_mode)?;
     let root = telegram_state_dir(&app)?;
     telegram::record_answer(
         &root,
         &state,
         event_id.trim(),
         &normalize_chat_id(&local_chat_id),
-        chunks,
-        parse_mode,
+        parts,
     )?;
     let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
     if token.is_empty() {
@@ -1068,8 +1081,8 @@ async fn complete_scheduled_task(
     condition_result: Option<String>,
     delivery_message_chunks: Option<Vec<String>>,
     delivery_parse_mode: Option<String>,
+    delivery_parts: Option<Vec<telegram::TelegramDeliveryPart>>,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
-    let delivery_parse_mode = normalize_telegram_parse_mode(delivery_parse_mode)?;
     let task_before = {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
@@ -1106,17 +1119,15 @@ async fn complete_scheduled_task(
     };
 
     if should_deliver && task_before.delivery_channel == "telegram" {
-        let chunks = delivery_message_chunks
-            .unwrap_or_default()
-            .into_iter()
-            .map(|chunk| chunk.trim().to_string())
-            .filter(|chunk| !chunk.is_empty())
-            .collect::<Vec<_>>();
+        let parts = normalize_telegram_delivery_parts(
+            delivery_parts,
+            delivery_message_chunks,
+            delivery_parse_mode,
+        );
         let recipient = task_before.telegram_recipient.as_ref();
-        if chunks.is_empty() || chunks.iter().any(|chunk| chunk.chars().count() > 4_000) {
+        if let Err(parts_error) = &parts {
             delivery_status = Some("blocked".to_string());
-            delivery_error =
-                Some("The Telegram alert did not contain valid message text.".to_string());
+            delivery_error = Some(parts_error.clone());
         } else if let Some(recipient) = recipient {
             let now = now_millis();
             let retry_cap = now.saturating_add(24 * 60 * 60 * 1_000);
@@ -1132,8 +1143,7 @@ async fn complete_scheduled_task(
                 &task_id,
                 &execution_id,
                 recipient.user_id,
-                chunks,
-                delivery_parse_mode,
+                parts.expect("validated above"),
                 expires_at,
             ) {
                 Ok(delivery) => {

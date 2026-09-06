@@ -55,7 +55,18 @@ export type TelegramInboundEvent = {
 
 export type TelegramDeliveryResult = { delivered: boolean; error?: string | null };
 
-export type TelegramFormattedReply = { chunks: string[]; parseMode: 'HTML' };
+export type TelegramDeliveryPart =
+  | { kind: 'text'; text: string; parseMode: 'HTML' }
+  | { kind: 'rich'; html: string; fallbackText: string; fallbackParseMode: 'HTML' }
+  | { kind: 'photo'; dataBase64: string; filename: string };
+
+export type TelegramFormattedReply = {
+  /** Text-only rendering retained for compatibility and deterministic tests. */
+  chunks: string[];
+  parseMode: 'HTML';
+  /** Ordered durable units sent through sendMessage/sendRichMessage/sendPhoto. */
+  parts: TelegramDeliveryPart[];
+};
 
 export function telegramStatusLine(state: TelegramChannelState): string {
   const bot = state.bot?.username ? `@${state.bot.username}` : state.bot?.name || 'Telegram bot';
@@ -163,18 +174,52 @@ function isTableDivider(line: string): boolean {
   return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
+type TelegramListItem = { marker: string; text: string };
+
+/** Models often emit a literal bullet instead of Markdown's -, * or +. */
+function telegramListItem(line: string): TelegramListItem | null {
+  const bullet = String(line || '').trim().match(/^[-*+•]\s+(.+)$/);
+  if (bullet) return { marker: '•', text: bullet[1] };
+  const number = String(line || '').trim().match(/^(\d+)\.\s+(.+)$/);
+  return number ? { marker: `${number[1]}.`, text: number[2] } : null;
+}
+
 function isBlockStart(lines: string[], index: number): boolean {
   const line = lines[index]?.trim() || '';
   return (
     !line || /^```/.test(line) || /^#{1,6}\s+/.test(line) || /^>\s?/.test(line) ||
-    /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line) || /^-{3,}$/.test(line) ||
+    telegramListItem(line) !== null || /^-{3,}$/.test(line) ||
     (splitTableRow(line).length >= 2 && isTableDivider(lines[index + 1] || ''))
   );
 }
 
-function renderTelegramBlocks(markdown: string): string[] {
+type TelegramTextBlock = { kind: 'text'; html: string };
+type TelegramTableBlock = { kind: 'table'; html: string; fallbackText: string };
+type TelegramBlock = TelegramTextBlock | TelegramTableBlock;
+
+const MAX_NATIVE_TABLE_COLUMNS = 3;
+const MAX_NATIVE_TABLE_ROWS = 8;
+
+function tableFallback(headers: string[], rows: string[][]): string {
+  return rows.map((cells) => headers.map((header, cellIndex) => {
+    const label = header || `Column ${cellIndex + 1}`;
+    return `<b>${renderInline(label)}:</b> ${renderInline(cells[cellIndex] || '—')}`;
+  }).join('\n')).join('\n\n');
+}
+
+function nativeTableHtml(headers: string[], rows: string[][]): string {
+  const heading = `<tr>${headers.map((header, index) =>
+    `<th>${renderInline(header || `Column ${index + 1}`)}</th>`
+  ).join('')}</tr>`;
+  const body = rows.map((cells) =>
+    `<tr>${headers.map((_header, index) => `<td>${renderInline(cells[index] || '—')}</td>`).join('')}</tr>`
+  ).join('');
+  return `<table bordered striped compact>${heading}${body}</table>`;
+}
+
+function renderTelegramBlocks(markdown: string): TelegramBlock[] {
   const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
-  const blocks: string[] = [];
+  const blocks: TelegramBlock[] = [];
   let index = 0;
   while (index < lines.length) {
     const trimmed = lines[index].trim();
@@ -185,14 +230,14 @@ function renderTelegramBlocks(markdown: string): string[] {
       index += 1;
       while (index < lines.length && !/^\s*```/.test(lines[index])) code.push(lines[index++]);
       if (index < lines.length) index += 1;
-      blocks.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+      blocks.push({ kind: 'text', html: `<pre><code>${escapeHtml(code.join('\n'))}</code></pre>` });
       continue;
     }
 
     const heading = trimmed.match(/^#{1,6}\s+(.+)$/);
     if (heading) {
       const headingText = heading[1].replace(/^(?:\*\*([^*]+)\*\*|__([^_]+)__)$/, '$1$2');
-      blocks.push(`<b>${renderInline(headingText)}</b>`);
+      blocks.push({ kind: 'text', html: `<b>${renderInline(headingText)}</b>` });
       index += 1;
       continue;
     }
@@ -202,47 +247,58 @@ function renderTelegramBlocks(markdown: string): string[] {
       while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
         quote.push(lines[index++].replace(/^\s*>\s?/, ''));
       }
-      blocks.push(`<blockquote>${renderInline(quote.join('\n'))}</blockquote>`);
+      blocks.push({ kind: 'text', html: `<blockquote>${renderInline(quote.join('\n'))}</blockquote>` });
       continue;
     }
 
     const headers = splitTableRow(trimmed);
     if (headers.length >= 2 && isTableDivider(lines[index + 1] || '')) {
       index += 2;
-      const rows: string[] = [];
+      const rows: string[][] = [];
       while (index < lines.length) {
         const cells = splitTableRow(lines[index]);
         if (cells.length < 2) break;
-        rows.push(headers.map((header, cellIndex) => {
-          const label = header || `Column ${cellIndex + 1}`;
-          return `<b>${renderInline(label)}:</b> ${renderInline(cells[cellIndex] || '—')}`;
-        }).join('\n'));
+        rows.push(cells);
         index += 1;
       }
-      if (rows.length) blocks.push(rows.join('\n\n'));
+      if (rows.length) {
+        const fallbackText = tableFallback(headers, rows);
+        if (
+          headers.length <= MAX_NATIVE_TABLE_COLUMNS &&
+          rows.length <= MAX_NATIVE_TABLE_ROWS &&
+          charCount(fallbackText) <= 4000
+        ) {
+          blocks.push({
+            kind: 'table',
+            html: nativeTableHtml(headers, rows),
+            fallbackText
+          });
+        } else {
+          blocks.push({ kind: 'text', html: fallbackText });
+        }
+      }
       continue;
     }
 
-    const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
-    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
-    if (unordered || ordered) {
+    const firstListItem = telegramListItem(trimmed);
+    if (firstListItem) {
       const items: string[] = [];
       while (index < lines.length) {
-        const item = lines[index].trim();
-        const bullet = item.match(/^[-*+]\s+(.+)$/);
-        const number = item.match(/^(\d+)\.\s+(.+)$/);
-        if (!bullet && !number) break;
-        items.push(bullet ? `• ${renderInline(bullet[1])}` : `${number![1]}. ${renderInline(number![2])}`);
+        const item = telegramListItem(lines[index]);
+        if (!item) break;
+        items.push(`${item.marker} ${renderInline(item.text)}`);
         index += 1;
       }
-      blocks.push(items.join('\n'));
+      // Telegram has no <ul>/<li> HTML. Blank lines give long, wrapped items
+      // the same visual separation a browser list gets from its layout.
+      blocks.push({ kind: 'text', html: items.join('\n\n') });
       continue;
     }
 
     const paragraph = [trimmed];
     index += 1;
     while (index < lines.length && !isBlockStart(lines, index)) paragraph.push(lines[index++].trim());
-    blocks.push(renderInline(paragraph.join(' ')));
+    blocks.push({ kind: 'text', html: renderInline(paragraph.join(' ')) });
   }
   return blocks;
 }
@@ -301,10 +357,41 @@ function chunkTelegramHtml(blocks: string[], limit: number): string[] {
   return chunks;
 }
 
+function deliveryParts(blocks: TelegramBlock[], limit: number): TelegramDeliveryPart[] {
+  const parts: TelegramDeliveryPart[] = [];
+  let textBlocks: string[] = [];
+  const flushText = () => {
+    for (const text of chunkTelegramHtml(textBlocks, limit)) {
+      parts.push({ kind: 'text', text, parseMode: 'HTML' });
+    }
+    textBlocks = [];
+  };
+
+  for (const block of blocks) {
+    if (block.kind === 'text') {
+      textBlocks.push(block.html);
+      continue;
+    }
+    flushText();
+    parts.push({
+      kind: 'rich',
+      html: block.html,
+      fallbackText: block.fallbackText,
+      fallbackParseMode: 'HTML'
+    });
+  }
+  flushText();
+  return parts;
+}
+
 /** Format a model answer for Telegram's safe HTML subset. */
 export function telegramReply(markdown: string, sources: ChartSource[] = [], limit = 4000): TelegramFormattedReply {
   if (!Number.isInteger(limit) || limit < 32) throw new Error('Telegram chunk limit must be an integer of at least 32.');
   const clean = stripTelegramReferences(markdown, sources);
   const blocks = renderTelegramBlocks(clean || 'Raynard returned an empty response.');
-  return { chunks: chunkTelegramHtml(blocks, limit), parseMode: 'HTML' };
+  const chunks = chunkTelegramHtml(
+    blocks.map((block) => block.kind === 'text' ? block.html : block.fallbackText),
+    limit
+  );
+  return { chunks, parseMode: 'HTML', parts: deliveryParts(blocks, limit) };
 }

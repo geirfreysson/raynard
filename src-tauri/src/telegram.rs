@@ -1,4 +1,5 @@
-use reqwest::{Client, StatusCode};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use reqwest::{multipart, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -17,6 +18,10 @@ const PAIRING_TTL_MS: i64 = 60 * 60 * 1000;
 const COMPLETED_EVENT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const COMPLETED_EVENT_LIMIT: usize = 500;
 const TELEGRAM_API_ROOT: &str = "https://api.telegram.org";
+const TELEGRAM_TEXT_LIMIT: usize = 4_000;
+const TELEGRAM_RICH_TEXT_LIMIT: usize = 32_768;
+const TELEGRAM_PHOTO_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+const TELEGRAM_DELIVERY_PART_LIMIT: usize = 64;
 
 #[derive(Default, Clone)]
 pub struct TelegramRuntimeState {
@@ -78,6 +83,30 @@ pub enum TelegramInboundStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TelegramDeliveryPart {
+    Text {
+        text: String,
+        #[serde(default)]
+        parse_mode: Option<String>,
+    },
+    Rich {
+        html: String,
+        fallback_text: String,
+        #[serde(default)]
+        fallback_parse_mode: Option<String>,
+    },
+    Photo {
+        data_base64: String,
+        filename: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelegramInboundEvent {
     pub id: String,
@@ -95,6 +124,9 @@ pub struct TelegramInboundEvent {
     /** Absent on replies persisted before rich Telegram formatting shipped. */
     #[serde(default)]
     pub reply_parse_mode: Option<String>,
+    /** Preferred ordered delivery units; absent on older text-only replies. */
+    #[serde(default)]
+    pub reply_parts: Vec<TelegramDeliveryPart>,
     #[serde(default)]
     pub delivered_chunks: usize,
     #[serde(default)]
@@ -113,6 +145,9 @@ pub struct TelegramScheduledDelivery {
     /** Absent on queued deliveries created by an older Raynard build. */
     #[serde(default)]
     pub parse_mode: Option<String>,
+    /** Preferred ordered delivery units; absent on older text-only alerts. */
+    #[serde(default)]
+    pub parts: Vec<TelegramDeliveryPart>,
     pub delivered_chunks: usize,
     pub status: String,
     pub created_at: i64,
@@ -198,6 +233,127 @@ struct TelegramApiError {
 impl std::fmt::Display for TelegramApiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.description)
+    }
+}
+
+fn normalize_html_mode(value: Option<String>) -> Result<Option<String>, String> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(None),
+        Some(value) if value.eq_ignore_ascii_case("html") => Ok(Some("HTML".to_string())),
+        Some(_) => Err("Telegram delivery text supports only HTML parse mode.".to_string()),
+    }
+}
+
+fn safe_photo_filename(value: &str) -> String {
+    let trimmed = value.trim();
+    if !trimmed.is_empty()
+        && trimmed.len() <= 100
+        && trimmed.ends_with(".png")
+        && trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        trimmed.to_string()
+    } else {
+        "raynard-chart.png".to_string()
+    }
+}
+
+/** Validate untrusted renderer payloads before they become durable retries. */
+pub fn normalize_delivery_parts(
+    parts: Vec<TelegramDeliveryPart>,
+) -> Result<Vec<TelegramDeliveryPart>, String> {
+    if parts.is_empty() || parts.len() > TELEGRAM_DELIVERY_PART_LIMIT {
+        return Err("Telegram deliveries must contain 1-64 parts.".to_string());
+    }
+    let mut normalized = Vec::with_capacity(parts.len());
+    let mut has_readable_text = false;
+    for part in parts {
+        match part {
+            TelegramDeliveryPart::Text { text, parse_mode } => {
+                let text = text.trim().to_string();
+                if text.is_empty() || text.chars().count() > TELEGRAM_TEXT_LIMIT {
+                    return Err("Telegram text parts must contain 1-4000 characters.".to_string());
+                }
+                has_readable_text = true;
+                normalized.push(TelegramDeliveryPart::Text {
+                    text,
+                    parse_mode: normalize_html_mode(parse_mode)?,
+                });
+            }
+            TelegramDeliveryPart::Rich {
+                html,
+                fallback_text,
+                fallback_parse_mode,
+            } => {
+                let html = html.trim().to_string();
+                let fallback_text = fallback_text.trim().to_string();
+                if html.is_empty() || html.chars().count() > TELEGRAM_RICH_TEXT_LIMIT {
+                    return Err(
+                        "Telegram rich-message parts must contain 1-32768 characters.".to_string(),
+                    );
+                }
+                if fallback_text.is_empty() || fallback_text.chars().count() > TELEGRAM_TEXT_LIMIT {
+                    return Err(
+                        "Telegram rich-message fallbacks must contain 1-4000 characters."
+                            .to_string(),
+                    );
+                }
+                has_readable_text = true;
+                normalized.push(TelegramDeliveryPart::Rich {
+                    html,
+                    fallback_text,
+                    fallback_parse_mode: normalize_html_mode(fallback_parse_mode)?,
+                });
+            }
+            TelegramDeliveryPart::Photo {
+                data_base64,
+                filename,
+            } => {
+                if data_base64.len() > (TELEGRAM_PHOTO_LIMIT_BYTES * 4 / 3) + 4 {
+                    return Err("Telegram chart images must not exceed 10 MB.".to_string());
+                }
+                let bytes = BASE64
+                    .decode(data_base64.trim())
+                    .map_err(|_| "Telegram chart image data is not valid base64.".to_string())?;
+                if bytes.is_empty() || bytes.len() > TELEGRAM_PHOTO_LIMIT_BYTES {
+                    return Err("Telegram chart images must contain 1 byte to 10 MB.".to_string());
+                }
+                if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+                    return Err("Telegram chart images must be PNG files.".to_string());
+                }
+                normalized.push(TelegramDeliveryPart::Photo {
+                    data_base64: data_base64.trim().to_string(),
+                    filename: safe_photo_filename(&filename),
+                });
+            }
+        }
+    }
+    if !has_readable_text {
+        return Err("Telegram deliveries cannot contain images without readable text.".to_string());
+    }
+    Ok(normalized)
+}
+
+fn legacy_text_parts(chunks: &[String], parse_mode: Option<&str>) -> Vec<TelegramDeliveryPart> {
+    chunks
+        .iter()
+        .map(|text| TelegramDeliveryPart::Text {
+            text: text.clone(),
+            parse_mode: parse_mode.map(str::to_string),
+        })
+        .collect()
+}
+
+fn discard_delivered_photo_bytes(parts: &mut [TelegramDeliveryPart], delivered: usize) {
+    for part in parts.iter_mut().take(delivered) {
+        if let TelegramDeliveryPart::Photo { data_base64, .. } = part {
+            data_base64.clear();
+        }
     }
 }
 
@@ -438,6 +594,10 @@ async fn call_api(
             },
             retry_after: None,
         })?;
+    telegram_response(response).await
+}
+
+async fn telegram_response(response: reqwest::Response) -> Result<Value, TelegramApiError> {
     let status = response.status();
     let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
     if status.is_success() && body.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -454,6 +614,32 @@ async fn call_api(
             .pointer("/parameters/retry_after")
             .and_then(Value::as_u64),
     })
+}
+
+async fn call_multipart_api(
+    client: &Client,
+    token: &str,
+    method: &str,
+    form: multipart::Form,
+    timeout: Duration,
+) -> Result<Value, TelegramApiError> {
+    let url = format!("{TELEGRAM_API_ROOT}/bot{token}/{method}");
+    let response = client
+        .post(url)
+        .timeout(timeout)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| TelegramApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            description: if error.is_timeout() {
+                "The Telegram media upload timed out.".to_string()
+            } else {
+                "Could not reach Telegram for the media upload.".to_string()
+            },
+            retry_after: None,
+        })?;
+    telegram_response(response).await
 }
 
 pub async fn validate_token(token: &str) -> Result<TelegramBotIdentity, String> {
@@ -671,8 +857,7 @@ pub fn record_answer(
     runtime: &TelegramRuntimeState,
     event_id: &str,
     local_chat_id: &str,
-    reply_chunks: Vec<String>,
-    reply_parse_mode: Option<String>,
+    reply_parts: Vec<TelegramDeliveryPart>,
 ) -> Result<TelegramInboundEvent, String> {
     let _guard = runtime
         .store_lock
@@ -686,8 +871,9 @@ pub fn record_answer(
         .ok_or_else(|| "Telegram event not found.".to_string())?;
     event.status = TelegramInboundStatus::Answered;
     event.local_chat_id = Some(local_chat_id.to_string());
-    event.reply_chunks = reply_chunks;
-    event.reply_parse_mode = reply_parse_mode;
+    event.reply_chunks.clear();
+    event.reply_parse_mode = None;
+    event.reply_parts = reply_parts;
     event.delivered_chunks = 0;
     event.last_error = None;
     let answered = event.clone();
@@ -715,7 +901,13 @@ fn update_delivery_progress(
         .ok_or_else(|| "Telegram event not found.".to_string())?;
     event.delivered_chunks = delivered_chunks;
     event.last_error = error;
-    if event.delivered_chunks >= event.reply_chunks.len() {
+    discard_delivered_photo_bytes(&mut event.reply_parts, delivered_chunks);
+    let total = if event.reply_parts.is_empty() {
+        event.reply_chunks.len()
+    } else {
+        event.reply_parts.len()
+    };
+    if event.delivered_chunks >= total {
         event.status = TelegramInboundStatus::Delivered;
     }
     write_store(root, &store)
@@ -746,14 +938,103 @@ async fn send_text(
         .map(|_| ())
 }
 
+async fn send_rich_html(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    html: &str,
+) -> Result<(), TelegramApiError> {
+    call_api(
+        client,
+        token,
+        "sendRichMessage",
+        &json!({
+            "chat_id": chat_id,
+            "rich_message": { "html": html }
+        }),
+        Duration::from_secs(30),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn send_photo(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    data_base64: &str,
+    filename: &str,
+) -> Result<(), TelegramApiError> {
+    let bytes = BASE64.decode(data_base64).map_err(|_| TelegramApiError {
+        status: StatusCode::BAD_REQUEST,
+        description: "The queued Telegram chart image is invalid.".to_string(),
+        retry_after: None,
+    })?;
+    let photo = multipart::Part::bytes(bytes)
+        .file_name(filename.to_string())
+        .mime_str("image/png")
+        .map_err(|_| TelegramApiError {
+            status: StatusCode::BAD_REQUEST,
+            description: "The queued Telegram chart image has an invalid media type.".to_string(),
+            retry_after: None,
+        })?;
+    let form = multipart::Form::new()
+        .text("chat_id", chat_id.to_string())
+        .part("photo", photo);
+    call_multipart_api(client, token, "sendPhoto", form, Duration::from_secs(60))
+        .await
+        .map(|_| ())
+}
+
+async fn send_delivery_part(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    part: &TelegramDeliveryPart,
+) -> Result<(), TelegramApiError> {
+    match part {
+        TelegramDeliveryPart::Text { text, parse_mode } => {
+            send_text(client, token, chat_id, text, parse_mode.as_deref()).await
+        }
+        TelegramDeliveryPart::Rich {
+            html,
+            fallback_text,
+            fallback_parse_mode,
+        } => match send_rich_html(client, token, chat_id, html).await {
+            Ok(()) => Ok(()),
+            // Rich messages are new. An older or rejecting Telegram endpoint
+            // still receives the durable labelled-row representation.
+            Err(error)
+                if matches!(
+                    error.status,
+                    StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+                ) =>
+            {
+                send_text(
+                    client,
+                    token,
+                    chat_id,
+                    fallback_text,
+                    fallback_parse_mode.as_deref(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        },
+        TelegramDeliveryPart::Photo {
+            data_base64,
+            filename,
+        } => send_photo(client, token, chat_id, data_base64, filename).await,
+    }
+}
+
 pub fn enqueue_scheduled_delivery(
     root: &Path,
     runtime: &TelegramRuntimeState,
     task_id: &str,
     execution_id: &str,
     recipient_user_id: i64,
-    chunks: Vec<String>,
-    parse_mode: Option<String>,
+    parts: Vec<TelegramDeliveryPart>,
     expires_at: i64,
 ) -> Result<TelegramScheduledDelivery, String> {
     let _guard = runtime
@@ -781,8 +1062,9 @@ pub fn enqueue_scheduled_delivery(
         task_id: task_id.to_string(),
         execution_id: execution_id.to_string(),
         recipient_user_id,
-        chunks,
-        parse_mode,
+        chunks: Vec::new(),
+        parse_mode: None,
+        parts,
         delivered_chunks: 0,
         status: "queued".to_string(),
         created_at: now_millis(),
@@ -817,6 +1099,7 @@ fn update_scheduled_delivery_progress(
     delivery.delivered_chunks = delivered_chunks;
     delivery.status = status.to_string();
     delivery.last_error = error;
+    discard_delivered_photo_bytes(&mut delivery.parts, delivered_chunks);
     let result = delivery.clone();
     write_store(root, &store)?;
     drop(_guard);
@@ -890,17 +1173,14 @@ pub async fn deliver_scheduled_delivery(
         });
     }
     let client = Client::new();
+    let parts = if delivery.parts.is_empty() {
+        legacy_text_parts(&delivery.chunks, delivery.parse_mode.as_deref())
+    } else {
+        delivery.parts.clone()
+    };
     let mut delivered = delivery.delivered_chunks;
-    for chunk in delivery.chunks.iter().skip(delivered) {
-        match send_text(
-            &client,
-            token,
-            delivery.recipient_user_id,
-            chunk,
-            delivery.parse_mode.as_deref(),
-        )
-        .await
-        {
+    for part in parts.iter().skip(delivered) {
+        match send_delivery_part(&client, token, delivery.recipient_user_id, part).await {
             Ok(()) => {
                 delivered += 1;
                 update_scheduled_delivery_progress(
@@ -908,7 +1188,7 @@ pub async fn deliver_scheduled_delivery(
                     runtime,
                     delivery_id,
                     delivered,
-                    if delivered == delivery.chunks.len() {
+                    if delivered == parts.len() {
                         "sent"
                     } else {
                         "queued"
@@ -1020,17 +1300,14 @@ pub async fn deliver_event(
             .ok_or_else(|| "Telegram event not found.".to_string())?
     };
     let client = Client::new();
+    let parts = if event.reply_parts.is_empty() {
+        legacy_text_parts(&event.reply_chunks, event.reply_parse_mode.as_deref())
+    } else {
+        event.reply_parts.clone()
+    };
     let mut delivered = event.delivered_chunks;
-    for chunk in event.reply_chunks.iter().skip(delivered) {
-        match send_text(
-            &client,
-            token,
-            event.remote_chat_id,
-            chunk,
-            event.reply_parse_mode.as_deref(),
-        )
-        .await
-        {
+    for part in parts.iter().skip(delivered) {
+        match send_delivery_part(&client, token, event.remote_chat_id, part).await {
             Ok(()) => {
                 delivered += 1;
                 update_delivery_progress(root, runtime, event_id, delivered, None)?;
@@ -1143,6 +1420,7 @@ fn ingest_update(store: &mut TelegramStore, update: &Value, now: i64) -> Option<
         local_chat_id: None,
         reply_chunks: Vec::new(),
         reply_parse_mode: None,
+        reply_parts: Vec::new(),
         delivered_chunks: 0,
         attempts: 0,
         last_error: None,
@@ -1289,6 +1567,13 @@ async fn tokio_sleep(duration: Duration) {
 mod tests {
     use super::*;
 
+    fn text_part(text: &str) -> TelegramDeliveryPart {
+        TelegramDeliveryPart::Text {
+            text: text.to_string(),
+            parse_mode: Some("HTML".to_string()),
+        }
+    }
+
     fn update(update_id: i64, user_id: i64, text: &str) -> Value {
         json!({
             "update_id": update_id,
@@ -1337,6 +1622,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(event.reply_parse_mode, None);
+        assert!(event.reply_parts.is_empty());
 
         let delivery: TelegramScheduledDelivery = serde_json::from_value(json!({
             "id": "scheduled-execution-one",
@@ -1353,6 +1639,61 @@ mod tests {
         .unwrap();
 
         assert_eq!(delivery.parse_mode, None);
+        assert!(delivery.parts.is_empty());
+    }
+
+    #[test]
+    fn delivery_parts_require_text_and_validate_png_media() {
+        let png = BASE64.encode([0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0]);
+        let mut normalized = normalize_delivery_parts(vec![
+            text_part("Summary first"),
+            TelegramDeliveryPart::Photo {
+                data_base64: png.clone(),
+                filename: "chart.png".into(),
+            },
+        ])
+        .unwrap();
+        assert_eq!(normalized.len(), 2);
+        discard_delivered_photo_bytes(&mut normalized, 2);
+        assert!(matches!(
+            &normalized[1],
+            TelegramDeliveryPart::Photo { data_base64, .. } if data_base64.is_empty()
+        ));
+
+        assert!(normalize_delivery_parts(vec![TelegramDeliveryPart::Photo {
+            data_base64: png,
+            filename: "chart.png".into(),
+        }])
+        .unwrap_err()
+        .contains("without readable text"));
+        assert!(normalize_delivery_parts(vec![
+            text_part("Summary"),
+            TelegramDeliveryPart::Photo {
+                data_base64: BASE64.encode(b"not a png"),
+                filename: "chart.png".into(),
+            },
+        ])
+        .unwrap_err()
+        .contains("PNG"));
+    }
+
+    #[test]
+    fn rich_tables_keep_a_valid_labelled_fallback() {
+        let parts = normalize_delivery_parts(vec![TelegramDeliveryPart::Rich {
+            html: "<table><tr><th>Name</th></tr><tr><td>Adobe</td></tr></table>".into(),
+            fallback_text: "<b>Name:</b> Adobe".into(),
+            fallback_parse_mode: Some("html".into()),
+        }])
+        .unwrap();
+
+        assert!(matches!(
+            &parts[0],
+            TelegramDeliveryPart::Rich { fallback_parse_mode: Some(mode), .. } if mode == "HTML"
+        ));
+        let encoded = serde_json::to_value(&parts[0]).unwrap();
+        assert_eq!(encoded["kind"], "rich");
+        assert_eq!(encoded["fallbackText"], "<b>Name:</b> Adobe");
+        assert_eq!(encoded["fallbackParseMode"], "HTML");
     }
 
     #[test]
@@ -1458,15 +1799,16 @@ mod tests {
             &runtime,
             &new_event.id,
             "new-chat",
-            vec!["Started".into()],
-            Some("HTML".into()),
+            vec![text_part("Started")],
         )
         .unwrap();
 
-        assert_eq!(
-            read_store(&root).events[0].reply_parse_mode.as_deref(),
-            Some("HTML")
-        );
+        let recorded = read_store(&root);
+        assert!(recorded.events[0].reply_chunks.is_empty());
+        assert!(matches!(
+            &recorded.events[0].reply_parts[0],
+            TelegramDeliveryPart::Text { parse_mode: Some(mode), .. } if mode == "HTML"
+        ));
 
         let follow_up = claim_next(&root, &runtime).unwrap().unwrap();
         assert_eq!(follow_up.local_chat_id.as_deref(), Some("new-chat"));
@@ -1537,8 +1879,7 @@ mod tests {
             "task-one",
             "execution-one",
             42,
-            vec!["The condition matched.".into()],
-            Some("HTML".into()),
+            vec![text_part("The condition matched.")],
             now_millis() + 60_000,
         )
         .unwrap();
@@ -1548,24 +1889,26 @@ mod tests {
             "task-one",
             "execution-one",
             42,
-            vec!["A different retry body must not replace it.".into()],
-            None,
+            vec![text_part("A different retry body must not replace it.")],
             now_millis() + 60_000,
         )
         .unwrap();
 
         assert_eq!(first.id, duplicate.id);
         assert_eq!(read_store(&root).scheduled_deliveries.len(), 1);
-        assert_eq!(duplicate.chunks, vec!["The condition matched."]);
-        assert_eq!(duplicate.parse_mode.as_deref(), Some("HTML"));
+        assert!(duplicate.chunks.is_empty());
+        assert!(matches!(
+            &duplicate.parts[0],
+            TelegramDeliveryPart::Text { text, parse_mode: Some(mode) }
+                if text == "The condition matched." && mode == "HTML"
+        ));
         assert!(enqueue_scheduled_delivery(
             &root,
             &runtime,
             "task-one",
             "execution-two",
             7,
-            vec!["Wrong account".into()],
-            None,
+            vec![text_part("Wrong account")],
             now_millis() + 60_000,
         )
         .unwrap_err()
@@ -1596,6 +1939,7 @@ mod tests {
                 recipient_user_id: 42,
                 chunks: vec!["Alert".into()],
                 parse_mode: None,
+                parts: Vec::new(),
                 delivered_chunks: 0,
                 status: "queued".into(),
                 created_at: now_millis(),
@@ -1628,6 +1972,7 @@ mod tests {
                 recipient_user_id: 42,
                 chunks: vec!["Stale alert".into()],
                 parse_mode: None,
+                parts: Vec::new(),
                 delivered_chunks: 0,
                 status: "queued".into(),
                 created_at: 100,

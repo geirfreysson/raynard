@@ -229,6 +229,7 @@ describe('main agent core', () => {
     expect(prompt).toMatch(/exact \[\^n\] markers/i);
     expect(prompt).toMatch(/Telegram renderer removes them/i);
     expect(prompt).toMatch(/do not write Markdown source links/i);
+    expect(prompt).toMatch(/sent to Telegram as an image/i);
     expect(prompt).toContain('[id:mem-1][Global] Prefers concise answers.');
     expect(prompt).not.toContain('request_plugin_build');
     expect(prompt).not.toContain('request_scheduled_task');
@@ -320,6 +321,7 @@ describe('main agent core', () => {
     expect(prompt).toContain('"Apple is below USD 150"');
     expect(prompt).toMatch(/final and mandatory tool call is finish_scheduled_check/i);
     expect(prompt).toMatch(/Use outcome "matched" only/i);
+    expect(prompt).toMatch(/sends it as an image after the message/i);
     expect(prompt).not.toContain('request_plugin_build');
   });
 

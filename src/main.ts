@@ -53,9 +53,11 @@ import {
 import {
   telegramReply,
   type TelegramChannelState,
+  type TelegramDeliveryPart,
   type TelegramDeliveryResult,
   type TelegramInboundEvent
 } from './telegram-channel';
+import { telegramChartParts } from './telegram-media';
 import { createCoalescedSaveQueue } from './chat-persistence';
 import type { ExtensionRecommendation } from './extension-recommendation';
 import {
@@ -4863,6 +4865,7 @@ async function runScheduledExecution(execution: ScheduledExecution) {
   let conditionResult: 'matched' | 'notMatched' | 'indeterminate' | undefined;
   let deliveryMessage: string | undefined;
   let deliverySources: ChartSource[] = [];
+  let deliveryCharts: ChartSpec[] = [];
   try {
     const snapshot = await scheduledChatSnapshot(task);
     destinationChatId = snapshot.meta.chatId;
@@ -4940,6 +4943,7 @@ async function runScheduledExecution(execution: ScheduledExecution) {
             if (chart) {
               (assistantRecord.charts ??= []).push(chart);
               (assistantRecord.chartOffsets ??= []).push(streamed.length);
+              deliveryCharts = assistantRecord.charts;
             }
             const pluginName = pluginNameForTool(toolCall.toolName);
             const card = extractResultCard(toolCall, pluginName);
@@ -5016,6 +5020,14 @@ async function runScheduledExecution(execution: ScheduledExecution) {
     completionStatus = 'error';
     completionError = getErrorMessage(error);
   }
+  let deliveryParts: TelegramDeliveryPart[] | undefined;
+  if (completionStatus === 'completed' && task.deliveryChannel === 'telegram' && deliveryMessage) {
+    const formatted = telegramReply(deliveryMessage, deliverySources);
+    deliveryParts = [
+      ...formatted.parts,
+      ...await telegramChartParts(deliveryCharts, deliverySources)
+    ];
+  }
   await invoke('complete_scheduled_task', {
     taskId: task.id,
     executionId: execution.executionId,
@@ -5023,15 +5035,7 @@ async function runScheduledExecution(execution: ScheduledExecution) {
     error: completionError,
     destinationChatId,
     conditionResult,
-    ...(completionStatus === 'completed' && task.deliveryChannel === 'telegram' && deliveryMessage
-      ? (() => {
-          const formatted = telegramReply(deliveryMessage, deliverySources);
-          return {
-            deliveryMessageChunks: formatted.chunks,
-            deliveryParseMode: formatted.parseMode
-          };
-        })()
-      : {})
+    deliveryParts
   });
   if (destinationChatId === activeSessionId && document.hasFocus()) {
     await markChatRead(destinationChatId, true);
@@ -5083,14 +5087,15 @@ async function finishTelegramEvent(
   event: TelegramInboundEvent,
   localChatId: string,
   answer: string,
-  sources: ChartSource[] = []
+  sources: ChartSource[] = [],
+  charts: ChartSpec[] = []
 ) {
   const formatted = telegramReply(answer, sources);
+  const parts = [...formatted.parts, ...await telegramChartParts(charts, sources)];
   await invoke<TelegramDeliveryResult>('complete_telegram_inbound', {
     eventId: event.id,
     localChatId,
-    replyChunks: formatted.chunks,
-    parseMode: formatted.parseMode
+    deliveryParts: parts
   });
   await refreshTelegramChannelState();
 }
@@ -5277,7 +5282,13 @@ async function drainTelegramInbound() {
       await persistChatSnapshot(snapshot.meta, snapshot.stored);
       await refreshChatHistory();
       refreshVisible();
-      await finishTelegramEvent(claimed, destinationChatId, answer, assistantRecord.sources);
+      await finishTelegramEvent(
+        claimed,
+        destinationChatId,
+        answer,
+        assistantRecord.sources,
+        assistantRecord.charts
+      );
     } catch (error) {
       const detail = getErrorMessage(error);
       const answer = `Raynard could not complete that request: ${detail}`;

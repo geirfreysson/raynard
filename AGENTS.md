@@ -167,9 +167,13 @@ generated API plugins.
   holds the installed version, Messaging, and App updates. Messaging can connect
   one BotFather Telegram bot, approve one private-chat owner, replace or remove
   the token, and forget the paired owner. Telegram accepts text DMs only and is
-  available only while Raynard is running. Replies use Telegram-safe HTML,
-  reflow Markdown tables into labelled rows, and omit research links while the
-  saved desktop chat retains its citation records. When a background update
+  available only while Raynard is running. Replies use Telegram-safe HTML, keep
+  lists readable, render small narrow tables as native Telegram rich tables,
+  reflow wider tables into labelled rows, and attach charts as PNGs after a
+  standalone text summary. A rejected rich table falls back to its labelled
+  rows, and a failed chart upload never suppresses the text alert. Telegram
+  replies omit research links while the saved desktop chat retains its citation
+  records. When a background update
   check finds a release, the gear carries a dot — the app has no toast surface,
   so that dot is the only ambient signal.
 
@@ -328,11 +332,13 @@ background capability granted to generated plugins.
    non-match neither marks the chat unread nor emits a notification.
 8. Telegram tasks store the numeric paired recipient in the task. Matching
    output is put into a durable per-execution queue before Bot API delivery;
-   retries resume from the first unsent 4,000-character chunk and expire at the
+   that queue can carry 4,000-character safe-HTML chunks, native rich tables
+   with labelled-row fallbacks, and validated PNG charts after the text summary.
+   Retries resume from the first unsent part and expire at the
    earlier of the next run or 24 hours. Bot replacement, disconnect, or owner
-   removal blocks queued delivery instead of redirecting it. New deliveries
-   persist HTML parse mode beside their chunks; older queued plain-text records
-   deserialize without one and keep their original delivery semantics.
+   removal blocks queued delivery instead of redirecting it. Older queued
+   plain-text records deserialize without rich parts and keep their original
+   delivery semantics.
 9. A manual **Run now** does not advance the recurring occurrence. Startup
    clears abandoned execution IDs and marks those runs interrupted. The
    scheduler runs only while the Raynard process is alive. A task left due
