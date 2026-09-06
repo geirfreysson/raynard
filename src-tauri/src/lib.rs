@@ -9492,20 +9492,28 @@ pub fn run() {
 
             app_updates::spawn_background_checks(app.handle());
 
-            let telegram_token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
-            if !telegram_token.is_empty() {
-                let telegram_runtime = app.state::<telegram::TelegramRuntimeState>();
-                if telegram::get_state(&telegram_state_dir(app.handle())?, &telegram_runtime, true)
+            // Reading the keychain here can block on OS authorization (in `tauri
+            // dev`, the ACL is pinned to a code hash that changes on every
+            // rebuild, so "Always Allow" never carries over). That must not sit
+            // on the setup thread and delay the window's first paint, so the
+            // whole check runs on its own thread instead.
+            let telegram_handle = app.handle().clone();
+            thread::spawn(move || {
+                let telegram_token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+                if telegram_token.is_empty() {
+                    return;
+                }
+                let telegram_runtime = telegram_handle.state::<telegram::TelegramRuntimeState>();
+                let Ok(state_dir) = telegram_state_dir(&telegram_handle) else {
+                    return;
+                };
+                if telegram::get_state(&state_dir, &telegram_runtime, true)
                     .map(|state| state.enabled)
                     .unwrap_or(false)
                 {
-                    telegram::start_poller(
-                        telegram_state_dir(app.handle())?,
-                        &telegram_runtime,
-                        telegram_token,
-                    );
+                    telegram::start_poller(state_dir, &telegram_runtime, telegram_token);
                 }
-            }
+            });
 
             // A cold launch has already consumed its URL by the time the plugin
             // is up, so it is read back explicitly; everything after arrives
