@@ -802,7 +802,11 @@ const PRICE_RANGE_LIMITS = {
   '1M': 22,
   '3M': 66,
   '6M': 132,
-  '1Y': 252
+  '1Y': 252,
+  '2Y': 504,
+  '5Y': 1260,
+  '10Y': 2520,
+  MAX: Infinity
 } as const;
 
 type PriceRange = keyof typeof PRICE_RANGE_LIMITS;
@@ -810,7 +814,7 @@ type PriceRange = keyof typeof PRICE_RANGE_LIMITS;
 function normalizePriceRange(value: unknown): PriceRange {
   const range = String(value ?? '3M').trim().toUpperCase();
   if (!(range in PRICE_RANGE_LIMITS)) {
-    throw new Error('range must be one of 1D, 5D, 1M, 3M, 6M, or 1Y.');
+    throw new Error('range must be one of 1D, 5D, 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, or MAX.');
   }
   return range as PriceRange;
 }
@@ -1042,16 +1046,16 @@ export const tools = defineTools({
 
   fmp_price_history: {
     description:
-      'Get structured historical end-of-day closing prices and volume from FMP for one exact ticker. range defaults to 3M and supports 1D, 5D, 1M, 3M, 6M, or 1Y, mapped to the latest 1, 5, 22, 66, 132, or 252 trading sessions. Returns chronological chart-ready points plus range change, high/low closes, and 20/50-session moving averages computed from the full available history. Use this for recent stock movement and performance questions. If the user asks for a plot or chart, call present_chart after this tool using data.points with date on the x-axis and close on the y-axis.',
+      'Get structured historical end-of-day closing prices and volume from FMP for one exact ticker. range defaults to 3M and supports 1D, 5D, 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, or MAX (everything FMP returns), mapped to the latest 1, 5, 22, 66, 132, 252, 504, 1260, 2520, or all available trading sessions. Returns chronological chart-ready points plus range change, high/low closes, and 20/50-session moving averages computed from the full available history. Use this for recent stock movement and performance questions. If the user asks for a plot or chart, call present_chart after this tool using data.points with date on the x-axis and close on the y-axis.',
     parameters: {
       type: 'object',
       properties: {
         symbol: { type: 'string', description: 'Exact exchange ticker such as CRM, AAPL, or BRK.B.' },
         range: {
           type: 'string',
-          enum: ['1D', '5D', '1M', '3M', '6M', '1Y'],
+          enum: ['1D', '5D', '1M', '3M', '6M', '1Y', '2Y', '5Y', '10Y', 'MAX'],
           default: '3M',
-          description: 'Price-history window: 1D, 5D, 1M, 3M, 6M, or 1Y. Defaults to 3M.'
+          description: 'Price-history window: 1D, 5D, 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, or MAX. Defaults to 3M.'
         }
       },
       required: ['symbol'],
