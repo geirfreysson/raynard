@@ -1,26 +1,23 @@
-# Raynard v0.14.0
+# Raynard v0.15.0
 
-This release fixes a startup delay on the Telegram channel, formats Telegram
-replies more safely, and widens how much price history the Financial Modeling
-Prep extension can pull in one call.
+This release adds a weekdays schedule to recurring tasks and fixes a release
+pipeline bug that let real test failures slip through the Windows build
+unnoticed.
 
-## Faster startup
-
-The Telegram channel's keychain check and poller resume used to run
-synchronously during app setup, which could delay the window's first paint
-when OS keychain authorization added latency (most noticeably in `tauri dev`,
-where the ad-hoc signing ACL changes on every rebuild). That check now runs on
-a background thread instead, so it can no longer hold up startup.
-
-## Safer Telegram replies
-
-Telegram replies now use Telegram-safe HTML formatting with a persisted parse
-mode, so both live and durably queued scheduled deliveries render consistently
-and replies saved before this change keep their original plain-text delivery
-behavior.
-
-## Wider Financial Modeling Prep history
-
-`fmp_price_history`'s range option topped out at one year even though the
-underlying FMP endpoint already returns its full default history. It now
-offers 2Y/5Y/10Y/MAX buckets as well.
+- Scheduled tasks now support a **Weekdays** frequency (Monday through
+  Friday), shown next to Daily in the task editor's frequency picker. A
+  request like "every weekday" or "Monday to Friday" now maps directly to
+  this schedule instead of being approximated as Daily with a note explaining
+  the substitution.
+- Fixed the release workflow's Windows job silently ignoring test failures:
+  its "Run deterministic tests" step ran without an explicit shell, which
+  defaulted to PowerShell — PowerShell does not stop a multi-line script when
+  an earlier command fails, so a failing `npm test` was masked by the passing
+  `cargo test`/`cargo check` that ran after it. The step is now pinned to
+  `bash`, matching the macOS and Linux jobs, so a real test failure will fail
+  the build going forward.
+- Fixing that surfaced two genuine Windows-only test bugs, both corrected:
+  a catalog slug check that split a path on a literal forward slash (breaking
+  on Windows' backslash-separated paths), and a workspace-containment test
+  that compared resolved paths against hardcoded forward-slash strings
+  instead of the platform's own path resolution.
