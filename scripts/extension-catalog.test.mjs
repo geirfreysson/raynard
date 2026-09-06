@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { findUnpinnedTestHosts } from './plugin-builder-core.mjs';
@@ -60,7 +60,7 @@ describe('bundled extension catalog', () => {
     expect(directories.length).toBeGreaterThan(0);
 
     for (const directory of directories) {
-      const slug = directory.split('/').at(-1);
+      const slug = basename(directory);
       expect(slug).toMatch(slugPattern);
       expect(existsSync(join(directory, 'tools.ts'))).toBe(true);
       expect(existsSync(join(directory, 'README.md'))).toBe(true);
