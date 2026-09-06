@@ -263,7 +263,7 @@ export function buildMainAgentSystemPrompt({
       ? `You are in Build mode. Decide semantically whether the user is asking to add, create, change, or extend an API-backed capability, OR to change how an existing plugin presents its results (for example, adding result cards to specific tools). For an existing-plugin change, call request_plugin_build. For a new capability, call it only when a concrete API and official documentation URL are established; otherwise clarify the intended source with answer_without_api. Do not answer a build request with code, a tutorial, or a proposed file listing. Only the separate Pi coding agent may write plugin files, and it starts only after the user confirms the structured build request.`
       : `You are in Explore mode. Never write code or invoke the coding agent. Use installed tools when they can answer the request. If required API access is missing, do not guess or answer from general knowledge. Do not answer the inaccessible factual question. Offer Build mode only when a concrete, credible API source has been identified. Otherwise use answer_without_api to clarify where the information should come from, suggest plausible public APIs, or ask whether the user meant a relevant installed plugin. When the user asks to modify an existing plugin, including a result card's layout or appearance, you MUST call request_plugin_build; never claim that you changed files or completed the edit yourself.`;
   const schedulePolicy = scheduling?.enabled !== false
-    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling and notification language removed. Generate a concise name. A Raynard schedule is daily, weekly, monthly, quarterly, or yearly at one local clock time — there is no hourly, minute-level, or Monday-to-Friday schedule, so choose the closest and let the user adjust it. Only name and prompt are required: make ONE call with your best guess, omit any schedule field you are unsure of rather than inventing a value, and never call the tool again to discover which values it accepts. Default the history destination to a dedicated new chat unless the user explicitly identifies an existing chat. When the user says to notify, message, or alert them on Telegram, set deliveryChannel to telegram. Put an if/when clause in deliveryCondition rather than prompt. Use onMatch to notify on every matching check; use onTransition for wording such as "when it goes below", "when it becomes", or "alert me once", so it sends once and rearms after a non-match. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving, so an approximate draft is useful and a retry is not.`
+    ? `4. SCHEDULE: When the user asks for work to recur, your FIRST and ONLY tool call is request_scheduled_task. Do not perform the requested research now. Put only the work to perform in prompt, with scheduling and notification language removed. Generate a concise name. A Raynard schedule is daily, weekdays, weekly, monthly, quarterly, or yearly at one local clock time — there is no hourly or minute-level schedule, so choose the closest and let the user adjust it. Only name and prompt are required: make ONE call with your best guess, omit any schedule field you are unsure of rather than inventing a value, and never call the tool again to discover which values it accepts. Default the history destination to a dedicated new chat unless the user explicitly identifies an existing chat. When the user says to notify, message, or alert them on Telegram, set deliveryChannel to telegram. Put an if/when clause in deliveryCondition rather than prompt. Use onMatch to notify on every matching check; use onTransition for wording such as "when it goes below", "when it becomes", or "alert me once", so it sends once and rearms after a non-match. Default omitted clock/calendar fields from the supplied local context. The host always shows an editable confirmation before saving, so an approximate draft is useful and a retry is not.`
     : `4. SCHEDULE: This is already a scheduled execution. Perform the supplied prompt normally and never create another scheduled task.`;
   const scheduleFirstAction = scheduling?.enabled !== false
     ? 'request_scheduled_task for recurring work, '
@@ -420,10 +420,10 @@ ${memorySection}
 Available installed API tools: ${names}.`;
 }
 
-// The five schedules the Rust validator and the confirmation editor accept.
-// Anything the user asks for is mapped onto one of these; there is no hourly,
-// minute-level, or Monday-to-Friday schedule.
-export const SCHEDULE_FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+// The six schedules the Rust validator and the confirmation editor accept.
+// Anything the user asks for is mapped onto one of these; there is no hourly
+// or minute-level schedule.
+export const SCHEDULE_FREQUENCIES = ['daily', 'weekdays', 'weekly', 'monthly', 'quarterly', 'yearly'];
 
 // A model that guesses a value wrong gets this back verbatim. The previous
 // rejection said only "must be equal to constant", which named no legal value
@@ -435,7 +435,7 @@ export const SCHEDULED_TASK_ARGUMENT_HELP = [
   '{',
   '  "name": "Weekday X trends",              // required — short label',
   '  "prompt": "Report what is trending ...", // required — the work to do on each run',
-  '  "frequency": "daily",                    // optional — daily | weekly | monthly | quarterly | yearly',
+  '  "frequency": "daily",                    // optional — daily | weekdays | weekly | monthly | quarterly | yearly',
   '  "time": "07:00",                         // optional — local 24-hour HH:MM',
   '  "dayOfWeek": 1,                          // optional — weekly only, Monday=1 ... Sunday=7',
   '  "dayOfMonth": 15,                        // optional — monthly/quarterly/yearly only, 1-31',
@@ -458,8 +458,6 @@ export const MAX_SCHEDULED_TASK_REJECTIONS = 2;
 
 const NOTE_UNRECOGNIZED =
   'The requested repeat was not recognised, so this defaults to every day. Pick the schedule you want.';
-const NOTE_WEEKDAYS =
-  'Raynard cannot schedule Monday to Friday only. This runs every day instead — switch it to Weekly for a single weekday.';
 const NOTE_SUB_DAILY = 'Raynard’s shortest schedule is daily, so this runs once a day at the time below.';
 const NOTE_EVERY_OTHER_WEEK = 'Raynard cannot skip weeks, so this runs every week.';
 const NOTE_UNKNOWN_CHAT =
@@ -468,7 +466,7 @@ const NOTE_UNKNOWN_CHAT =
 // Ordered: the first match wins, so "weekdays" is caught before "week" and
 // "every 3 months" before "month".
 const FREQUENCY_PATTERNS = [
-  [/week ?day|work ?day|business day|mon(day)?\s*(-|–|to|through|thru)\s*fri(day)?/, 'daily', NOTE_WEEKDAYS],
+  [/week ?day|work ?day|business day|mon(day)?\s*(-|–|to|through|thru)\s*fri(day)?/, 'weekdays', ''],
   [/minute|hourly|hour|\d+\s*h\b/, 'daily', NOTE_SUB_DAILY],
   [/fortnight|bi[- ]?weekly|every other week|every 2 weeks|every two weeks/, 'weekly', NOTE_EVERY_OTHER_WEEK],
   [/quarter|every 3 months|every three months/, 'quarterly', ''],
@@ -619,7 +617,7 @@ export function createScheduledTaskTool(Type, onRequest, options = {}) {
     label: 'Request Scheduled Task',
     description: `Prepare recurring work for the user to confirm. Nothing is created until the user confirms it in an editable form, so one best-guess call is always better than a retry.
 
-Raynard runs a task daily, weekly, monthly, quarterly, or yearly at a single local clock time. There is no hourly, minute-level, or Monday-to-Friday schedule; pick the closest one and the user adjusts it.
+Raynard runs a task daily, weekdays, weekly, monthly, quarterly, or yearly at a single local clock time. There is no hourly or minute-level schedule; pick the closest one and the user adjusts it.
 
 The task always records every check in a Raynard history chat. deliveryChannel controls the notification separately. A conditional notification needs deliveryCondition and either onMatch (every matching run) or onTransition (once when the condition starts matching, rearmed by a non-match).
 
@@ -643,7 +641,7 @@ ${SCHEDULED_TASK_ARGUMENT_HELP}`,
       frequency: Type.Optional(
         Type.String({
           description:
-            'One of daily, weekly, monthly, quarterly, yearly. Omit it when the request does not map cleanly and the user will choose.'
+            'One of daily, weekdays, weekly, monthly, quarterly, yearly. Omit it when the request does not map cleanly and the user will choose.'
         })
       ),
       time: Type.Optional(

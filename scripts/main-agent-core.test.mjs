@@ -363,7 +363,7 @@ describe('main agent core', () => {
     expect(tool.parameters.properties.destinationType.description).toContain('existingChat');
     // The docstring has to carry the argument object itself, not a summary.
     expect(tool.description).toContain(SCHEDULED_TASK_ARGUMENT_HELP);
-    expect(tool.description).toMatch(/no hourly, minute-level, or Monday-to-Friday schedule/i);
+    expect(tool.description).toMatch(/no hourly or minute-level schedule/i);
   });
 
   it('turns every argument shape the failing chat tried into a confirmable draft', async () => {
@@ -389,11 +389,8 @@ describe('main agent core', () => {
   });
 
   it('says which schedule it substituted when the request cannot be expressed', () => {
-    // Mon-Fri is the actual request that started this; there is no such schedule.
-    expect(normalizeScheduleFrequency('weekday')).toEqual({
-      frequency: 'daily',
-      note: expect.stringMatching(/Monday to Friday/i)
-    });
+    // Mon-Fri is a real schedule now; it maps cleanly with no note to explain away.
+    expect(normalizeScheduleFrequency('weekday')).toEqual({ frequency: 'weekdays', note: '' });
     expect(normalizeScheduleFrequency('hourly').frequency).toBe('daily');
     expect(normalizeScheduleFrequency('hourly').note).toMatch(/shortest schedule is daily/i);
     expect(normalizeScheduleFrequency('fortnightly')).toEqual({
@@ -498,7 +495,7 @@ describe('main agent core', () => {
     });
 
     for (const frequency of SCHEDULE_FREQUENCIES) expect(enabled).toContain(frequency);
-    expect(enabled).toMatch(/no hourly, minute-level, or Monday-to-Friday schedule/i);
+    expect(enabled).toMatch(/no hourly or minute-level schedule/i);
     expect(enabled).toMatch(/never call the tool again to discover which values it accepts/i);
   });
 

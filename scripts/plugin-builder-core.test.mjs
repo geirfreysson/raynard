@@ -1,3 +1,4 @@
+import { resolve as resolvePath } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertBuilderTurnCompleted,
@@ -859,10 +860,14 @@ export type UnrelatedRuntimeType = { ignored: true };`;
     const root = '/data/generated-plugins/open-weather';
 
     it('accepts paths inside the plugin workspace', () => {
-      expect(resolveInsideRoot(root, 'tools.ts')).toBe(`${root}/tools.ts`);
-      expect(resolveInsideRoot(root, './nested/client.ts')).toBe(`${root}/nested/client.ts`);
-      expect(resolveInsideRoot(root, `${root}/README.md`)).toBe(`${root}/README.md`);
-      expect(resolveInsideRoot(root, '.')).toBe(root);
+      // resolveInsideRoot resolves through node:path's platform-native
+      // `resolve`, which prefixes a Windows drive letter; the expectations
+      // below must go through that same function rather than assuming POSIX
+      // forward slashes.
+      expect(resolveInsideRoot(root, 'tools.ts')).toBe(resolvePath(root, 'tools.ts'));
+      expect(resolveInsideRoot(root, './nested/client.ts')).toBe(resolvePath(root, './nested/client.ts'));
+      expect(resolveInsideRoot(root, `${root}/README.md`)).toBe(resolvePath(`${root}/README.md`));
+      expect(resolveInsideRoot(root, '.')).toBe(resolvePath(root));
     });
 
     it('rejects the sibling-plugin and filesystem escapes pi would otherwise allow', () => {

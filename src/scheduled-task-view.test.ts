@@ -42,6 +42,12 @@ describe('scheduleSentence', () => {
     );
   });
 
+  it('describes a weekdays schedule', () => {
+    expect(scheduleSentence({ frequency: 'weekdays', time: '08:00', timeZone: 'Europe/London' })).toBe(
+      'Every weekday at 08:00'
+    );
+  });
+
   it('names the weekday of a weekly schedule', () => {
     expect(
       scheduleSentence({ frequency: 'weekly', time: '09:30', timeZone: 'UTC', dayOfWeek: 3 })
@@ -82,6 +88,9 @@ describe('scheduleSentence', () => {
 describe('scheduleShorthand', () => {
   it('stays short for the sidebar', () => {
     expect(scheduleShorthand({ frequency: 'daily', time: '08:00', timeZone: 'UTC' })).toBe('Daily · 08:00');
+    expect(scheduleShorthand({ frequency: 'weekdays', time: '08:00', timeZone: 'UTC' })).toBe(
+      'Weekdays · 08:00'
+    );
     expect(
       scheduleShorthand({ frequency: 'weekly', time: '08:00', timeZone: 'UTC', dayOfWeek: 7 })
     ).toBe('Sun · 08:00');
@@ -91,6 +100,7 @@ describe('scheduleShorthand', () => {
 describe('calendarFieldsFor', () => {
   it('shows only the fields the backend validates', () => {
     expect(calendarFieldsFor('daily')).toEqual({ weekday: false, day: false, month: false });
+    expect(calendarFieldsFor('weekdays')).toEqual({ weekday: false, day: false, month: false });
     expect(calendarFieldsFor('weekly')).toEqual({ weekday: true, day: false, month: false });
     expect(calendarFieldsFor('monthly')).toEqual({ weekday: false, day: true, month: false });
     expect(calendarFieldsFor('quarterly')).toEqual({ weekday: false, day: true, month: true });

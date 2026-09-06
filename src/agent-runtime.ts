@@ -102,7 +102,7 @@ export type AgentBuildRequest = {
   targetTools?: string[];
 };
 
-export type ScheduledTaskFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';
+export type ScheduledTaskFrequency = 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
 export type ScheduledTaskRequest = {
   name: string;

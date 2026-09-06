@@ -428,6 +428,7 @@ jobs:
         run: npm run runtime:prepare:windows-x64
 
       - name: Run deterministic tests
+        shell: bash
         run: |
           npm test -- --run
           cargo test --manifest-path src-tauri/Cargo.toml --lib

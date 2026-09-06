@@ -116,8 +116,10 @@ generated API plugins.
   a bundled folder into app-local `generated-plugins`, where it becomes an
   ordinary, editable extension.
 - The timer icon opens Scheduled tasks. Recurring requests first render an
-  editable host confirmation; saving creates a daily, weekly, monthly,
-  quarterly, or yearly Explore task in the selected time zone. A task targets
+  editable host confirmation; saving creates a daily, weekdays, weekly,
+  monthly, quarterly, or yearly Explore task in the selected time zone.
+  Weekdays sits next to Daily in the frequency picker and runs Monday through
+  Friday only, with no separate day-of-week field. A task targets
   either a dedicated task chat or an existing chat and can be edited, paused,
   resumed, run immediately, or deleted from its detail screen. Run now does not
   move the recurring schedule. History and notification delivery are separate:
@@ -277,10 +279,10 @@ background capability granted to generated plugins.
    zone. It does not perform the requested research in that turn. Scheduling
    and delivery wording stays out of the execution prompt.
    Only `name` and `prompt` matter, and both are optional in the schema: the
-   tool repairs what it can (`weekday`, `every 3 months`, `7am`, `monday`,
-   `new_chat`) and defaults the rest, because the very next thing the user sees
-   is an editable form. A schedule it could not honour — Monday-to-Friday,
-   anything sub-daily, an unfindable destination chat — is substituted and
+   tool repairs what it can (`weekday` → `weekdays`, `every 3 months`, `7am`,
+   `monday`, `new_chat`) and defaults the rest, because the very next thing the
+   user sees is an editable form. A schedule it could not honour — anything
+   sub-daily, an unfindable destination chat — is substituted and
    explained in `scheduleNote`, which the confirmation renders above the form
    and `taskDraftFromForm` drops before the draft reaches Rust. The only call
    the tool refuses is one with neither a name nor a prompt; that refusal

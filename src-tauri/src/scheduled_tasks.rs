@@ -170,6 +170,7 @@ fn weekday_number(day: Weekday) -> u32 {
 fn date_matches(schedule: &TaskSchedule, date: NaiveDate) -> bool {
     match schedule.frequency.as_str() {
         "daily" => true,
+        "weekdays" => !matches!(date.weekday(), Weekday::Sat | Weekday::Sun),
         "weekly" => schedule.day_of_week == Some(weekday_number(date.weekday())),
         "monthly" => {
             let anchor = schedule.day_of_month.unwrap_or(1).clamp(1, 31);
@@ -208,7 +209,7 @@ fn resolve_local(tz: Tz, date: NaiveDate, hour: u32, minute: u32) -> Option<Date
 pub fn validate_schedule(schedule: &TaskSchedule) -> Result<(), String> {
     if !matches!(
         schedule.frequency.as_str(),
-        "daily" | "weekly" | "monthly" | "quarterly" | "yearly"
+        "daily" | "weekdays" | "weekly" | "monthly" | "quarterly" | "yearly"
     ) {
         return Err("Unsupported schedule frequency.".to_string());
     }
@@ -685,6 +686,16 @@ mod tests {
         let after = "2026-03-28T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let next = next_occurrence(&input, after).unwrap();
         assert_eq!(next.to_rfc3339(), "2026-03-29T08:00:00+00:00");
+    }
+
+    #[test]
+    fn weekdays_schedule_skips_the_weekend() {
+        let input = schedule("weekdays", "UTC");
+        // Friday 2026-01-02 09:00 UTC; the next occurrence should be Monday, not Saturday.
+        let friday = "2026-01-02T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let next = next_occurrence(&input, friday).unwrap();
+        assert_eq!(next.to_rfc3339(), "2026-01-05T09:00:00+00:00");
+        assert_eq!(next.weekday(), Weekday::Mon);
     }
 
     #[test]
