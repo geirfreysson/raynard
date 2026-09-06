@@ -92,6 +92,9 @@ pub struct TelegramInboundEvent {
     pub local_chat_id: Option<String>,
     #[serde(default)]
     pub reply_chunks: Vec<String>,
+    /** Absent on replies persisted before rich Telegram formatting shipped. */
+    #[serde(default)]
+    pub reply_parse_mode: Option<String>,
     #[serde(default)]
     pub delivered_chunks: usize,
     #[serde(default)]
@@ -107,6 +110,9 @@ pub struct TelegramScheduledDelivery {
     pub execution_id: String,
     pub recipient_user_id: i64,
     pub chunks: Vec<String>,
+    /** Absent on queued deliveries created by an older Raynard build. */
+    #[serde(default)]
+    pub parse_mode: Option<String>,
     pub delivered_chunks: usize,
     pub status: String,
     pub created_at: i64,
@@ -666,6 +672,7 @@ pub fn record_answer(
     event_id: &str,
     local_chat_id: &str,
     reply_chunks: Vec<String>,
+    reply_parse_mode: Option<String>,
 ) -> Result<TelegramInboundEvent, String> {
     let _guard = runtime
         .store_lock
@@ -680,6 +687,7 @@ pub fn record_answer(
     event.status = TelegramInboundStatus::Answered;
     event.local_chat_id = Some(local_chat_id.to_string());
     event.reply_chunks = reply_chunks;
+    event.reply_parse_mode = reply_parse_mode;
     event.delivered_chunks = 0;
     event.last_error = None;
     let answered = event.clone();
@@ -713,21 +721,29 @@ fn update_delivery_progress(
     write_store(root, &store)
 }
 
+fn send_message_body(chat_id: i64, text: &str, parse_mode: Option<&str>) -> Value {
+    let mut body = json!({
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": true
+    });
+    if let Some(parse_mode) = parse_mode {
+        body["parse_mode"] = json!(parse_mode);
+    }
+    body
+}
+
 async fn send_text(
     client: &Client,
     token: &str,
     chat_id: i64,
     text: &str,
+    parse_mode: Option<&str>,
 ) -> Result<(), TelegramApiError> {
-    call_api(
-        client,
-        token,
-        "sendMessage",
-        &json!({ "chat_id": chat_id, "text": text, "disable_web_page_preview": true }),
-        Duration::from_secs(30),
-    )
-    .await
-    .map(|_| ())
+    let body = send_message_body(chat_id, text, parse_mode);
+    call_api(client, token, "sendMessage", &body, Duration::from_secs(30))
+        .await
+        .map(|_| ())
 }
 
 pub fn enqueue_scheduled_delivery(
@@ -737,6 +753,7 @@ pub fn enqueue_scheduled_delivery(
     execution_id: &str,
     recipient_user_id: i64,
     chunks: Vec<String>,
+    parse_mode: Option<String>,
     expires_at: i64,
 ) -> Result<TelegramScheduledDelivery, String> {
     let _guard = runtime
@@ -765,6 +782,7 @@ pub fn enqueue_scheduled_delivery(
         execution_id: execution_id.to_string(),
         recipient_user_id,
         chunks,
+        parse_mode,
         delivered_chunks: 0,
         status: "queued".to_string(),
         created_at: now_millis(),
@@ -874,7 +892,15 @@ pub async fn deliver_scheduled_delivery(
     let client = Client::new();
     let mut delivered = delivery.delivered_chunks;
     for chunk in delivery.chunks.iter().skip(delivered) {
-        match send_text(&client, token, delivery.recipient_user_id, chunk).await {
+        match send_text(
+            &client,
+            token,
+            delivery.recipient_user_id,
+            chunk,
+            delivery.parse_mode.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 delivered += 1;
                 update_scheduled_delivery_progress(
@@ -941,6 +967,7 @@ pub async fn send_pairing_approved(token: &str, chat_id: i64) {
         token,
         chat_id,
         "Connected to Raynard. Send me a message, or /new to start a fresh Raynard chat.",
+        None,
     )
     .await;
 }
@@ -995,7 +1022,15 @@ pub async fn deliver_event(
     let client = Client::new();
     let mut delivered = event.delivered_chunks;
     for chunk in event.reply_chunks.iter().skip(delivered) {
-        match send_text(&client, token, event.remote_chat_id, chunk).await {
+        match send_text(
+            &client,
+            token,
+            event.remote_chat_id,
+            chunk,
+            event.reply_parse_mode.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 delivered += 1;
                 update_delivery_progress(root, runtime, event_id, delivered, None)?;
@@ -1107,6 +1142,7 @@ fn ingest_update(store: &mut TelegramStore, update: &Value, now: i64) -> Option<
         // is claimed.
         local_chat_id: None,
         reply_chunks: Vec::new(),
+        reply_parse_mode: None,
         delivered_chunks: 0,
         attempts: 0,
         last_error: None,
@@ -1211,7 +1247,7 @@ pub fn start_poller(root: PathBuf, runtime: &TelegramRuntimeState, token: String
                         };
                         notify(&runtime, "inbound");
                         if let Some((chat_id, reply)) = canned_reply {
-                            let _ = send_text(&client, &token, chat_id, &reply).await;
+                            let _ = send_text(&client, &token, chat_id, &reply, None).await;
                         }
                     }
                 }
@@ -1263,6 +1299,60 @@ mod tests {
                 "text": text
             }
         })
+    }
+
+    #[test]
+    fn send_message_body_adds_parse_mode_only_for_formatted_replies() {
+        let rich = send_message_body(42, "<b>Answer</b>", Some("HTML"));
+        assert_eq!(rich["parse_mode"], "HTML");
+        assert_eq!(rich["disable_web_page_preview"], true);
+
+        let plain = send_message_body(42, "Connected", None);
+        assert!(plain.get("parse_mode").is_none());
+    }
+
+    #[test]
+    fn persisted_legacy_deliveries_default_to_plain_text() {
+        let event: TelegramInboundEvent = serde_json::from_value(json!({
+            "id": "telegram-1",
+            "updateId": 1,
+            "messageId": 101,
+            "remoteChatId": 42,
+            "sender": {
+                "userId": 42,
+                "username": "ada",
+                "name": "Ada",
+                "approvedAt": 1
+            },
+            "text": "hello",
+            "receivedAt": 2,
+            "kind": "message",
+            "status": "answered",
+            "localChatId": "chat-one",
+            "replyChunks": ["Old <plain> text"],
+            "deliveredChunks": 0,
+            "attempts": 1,
+            "lastError": null
+        }))
+        .unwrap();
+
+        assert_eq!(event.reply_parse_mode, None);
+
+        let delivery: TelegramScheduledDelivery = serde_json::from_value(json!({
+            "id": "scheduled-execution-one",
+            "taskId": "task-one",
+            "executionId": "execution-one",
+            "recipientUserId": 42,
+            "chunks": ["Old scheduled <plain> text"],
+            "deliveredChunks": 0,
+            "status": "queued",
+            "createdAt": 1,
+            "expiresAt": 2,
+            "lastError": null
+        }))
+        .unwrap();
+
+        assert_eq!(delivery.parse_mode, None);
     }
 
     #[test]
@@ -1369,8 +1459,14 @@ mod tests {
             &new_event.id,
             "new-chat",
             vec!["Started".into()],
+            Some("HTML".into()),
         )
         .unwrap();
+
+        assert_eq!(
+            read_store(&root).events[0].reply_parse_mode.as_deref(),
+            Some("HTML")
+        );
 
         let follow_up = claim_next(&root, &runtime).unwrap().unwrap();
         assert_eq!(follow_up.local_chat_id.as_deref(), Some("new-chat"));
@@ -1442,6 +1538,7 @@ mod tests {
             "execution-one",
             42,
             vec!["The condition matched.".into()],
+            Some("HTML".into()),
             now_millis() + 60_000,
         )
         .unwrap();
@@ -1452,6 +1549,7 @@ mod tests {
             "execution-one",
             42,
             vec!["A different retry body must not replace it.".into()],
+            None,
             now_millis() + 60_000,
         )
         .unwrap();
@@ -1459,6 +1557,7 @@ mod tests {
         assert_eq!(first.id, duplicate.id);
         assert_eq!(read_store(&root).scheduled_deliveries.len(), 1);
         assert_eq!(duplicate.chunks, vec!["The condition matched."]);
+        assert_eq!(duplicate.parse_mode.as_deref(), Some("HTML"));
         assert!(enqueue_scheduled_delivery(
             &root,
             &runtime,
@@ -1466,6 +1565,7 @@ mod tests {
             "execution-two",
             7,
             vec!["Wrong account".into()],
+            None,
             now_millis() + 60_000,
         )
         .unwrap_err()
@@ -1495,6 +1595,7 @@ mod tests {
                 execution_id: "execution-one".into(),
                 recipient_user_id: 42,
                 chunks: vec!["Alert".into()],
+                parse_mode: None,
                 delivered_chunks: 0,
                 status: "queued".into(),
                 created_at: now_millis(),
@@ -1526,6 +1627,7 @@ mod tests {
                 execution_id: "execution-one".into(),
                 recipient_user_id: 42,
                 chunks: vec!["Stale alert".into()],
+                parse_mode: None,
                 delivered_chunks: 0,
                 status: "queued".into(),
                 created_at: 100,

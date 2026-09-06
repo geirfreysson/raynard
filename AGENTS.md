@@ -24,8 +24,9 @@ generated API plugins.
   for the Telegram channel.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
-- `src/telegram-channel.ts`: Telegram state wording and plain-text reply
-  chunking shared by Settings and the remote runner.
+- `src/telegram-channel.ts`: Telegram state wording, source-aware safe-HTML
+  rendering, table reflow, and reply chunking shared by Settings and the remote
+  runner.
 - `src/plugin-suggestions.ts`: selection of empty-chat prompts across installed plugins.
 - `src/extension-rename.ts`: display-name normalization and collision rules for renaming a locally authored extension.
 - `src/result-card/`: React host renderer, declarative card resolution, examples, and tests.
@@ -164,9 +165,11 @@ generated API plugins.
   holds the installed version, Messaging, and App updates. Messaging can connect
   one BotFather Telegram bot, approve one private-chat owner, replace or remove
   the token, and forget the paired owner. Telegram accepts text DMs only and is
-  available only while Raynard is running. When a background update check finds
-  a release, the gear carries a dot — the app has no toast surface, so that dot
-  is the only ambient signal.
+  available only while Raynard is running. Replies use Telegram-safe HTML,
+  reflow Markdown tables into labelled rows, and omit research links while the
+  saved desktop chat retains its citation records. When a background update
+  check finds a release, the gear carries a dot — the app has no toast surface,
+  so that dot is the only ambient signal.
 
 ## Agent Architecture
 
@@ -325,7 +328,9 @@ background capability granted to generated plugins.
    output is put into a durable per-execution queue before Bot API delivery;
    retries resume from the first unsent 4,000-character chunk and expire at the
    earlier of the next run or 24 hours. Bot replacement, disconnect, or owner
-   removal blocks queued delivery instead of redirecting it.
+   removal blocks queued delivery instead of redirecting it. New deliveries
+   persist HTML parse mode beside their chunks; older queued plain-text records
+   deserialize without one and keep their original delivery semantics.
 9. A manual **Run now** does not advance the recurring occurrence. Startup
    clears abandoned execution IDs and marks those runs interrupted. The
    scheduler runs only while the Raynard process is alive. A task left due

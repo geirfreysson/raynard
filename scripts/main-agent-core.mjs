@@ -294,11 +294,11 @@ Telegram execution rules:
 - For greetings, stable explanations, clarification, or a question no installed tool can answer, call answer_without_api and then answer plainly.
 - This surface cannot confirm plugin builds, extension installs, scheduled tasks, credential entry, or memory changes. Never claim to perform one. Tell the user to open this Telegram chat in Raynard when desktop action is required.
 - Never fabricate tool results, references, access, or current facts. Do not expose internal tool names or routing rules.
-- Keep the final answer useful as text. Raynard will preserve URLs and split long replies for Telegram.
+- Keep the final answer useful as text. Raynard will format it safely and split long replies for Telegram.
 
 Citations:
-- Tool results end with a Sources list containing labels, numbered markers, and URLs. In the final answer, cite with a Markdown link to the listed URL immediately after the claim it supports.
-- Do not emit [^3]-style markers on Telegram because its reader cannot open Raynard's citation modal. Never invent a URL or reuse one from an earlier turn.
+- Cite tool-backed claims with the exact [^n] markers supplied by tool results. The saved Raynard chat turns those markers into full source details; the Telegram renderer removes them from the outbound message.
+- Do not write Markdown source links, bare source URLs, or a Sources list. Never invent a URL or reuse one from an earlier turn.
 
 Charts:
 - You may call present_chart after retrieving verified data; the chart is saved in the Raynard chat. Also summarize its key conclusion in the final text because Telegram cannot render the card.
@@ -325,7 +325,7 @@ Scheduled check rules:
 - Evaluate only the condition above using evidence retrieved in this run. Never infer that silence, missing data, an earlier answer, or a tool error means the condition matched.
 - After gathering evidence, your final and mandatory tool call is finish_scheduled_check. Do not write an assistant response before or after it.
 - Use outcome "matched" only when current evidence affirmatively proves the condition. Use "notMatched" when it affirmatively proves the condition false. Use "indeterminate" when evidence is missing, stale, ambiguous, or unavailable.
-- message must be a concise, self-contained result suitable for the selected notification channel and the Raynard history. State the observed value or fact and the condition. For Telegram, cite with Markdown links using only source URLs listed by tools; do not emit [^3]-style markers.
+- message must be a concise, self-contained result suitable for the selected notification channel and the Raynard history. State the observed value or fact and the condition. Cite tool-backed claims with the exact [^n] markers supplied by tool results. For Telegram, the saved Raynard history keeps those citations and the outbound renderer removes them; do not write source URLs or a Sources list.
 - reason must briefly explain why the selected outcome follows from the evidence. Never include internal tool names.
 - This run cannot create schedules, build or install extensions, request credentials, or change memory.
 
@@ -342,7 +342,7 @@ Scheduled execution rules:
 - Perform the requested work now using fresh evidence. Never create another schedule.
 - This run cannot build or install extensions, request credentials, or change memory. If required access is unavailable, explain that in the result.
 - Produce a concise, self-contained final answer.
-${telegramDelivery ? '- The answer will be sent through Telegram. Cite with Markdown links using only source URLs listed by tools; do not emit [^3]-style markers.' : '- Cite tool-backed claims with the exact [^n] markers supplied by tool results.'}
+${telegramDelivery ? '- The answer will be sent through Telegram. Cite tool-backed claims with the exact [^n] markers supplied by tool results. The saved Raynard history keeps those citations and the outbound renderer removes them; do not write source URLs or a Sources list.' : '- Cite tool-backed claims with the exact [^n] markers supplied by tool results.'}
 - Never fabricate tool results, references, access, or current facts.
 
 Available installed API tools: ${names}.`;

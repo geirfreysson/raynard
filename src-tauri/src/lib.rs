@@ -802,6 +802,18 @@ async fn send_telegram_typing(
     telegram::send_typing(&telegram_state_dir(&app)?, &state, &token, event_id.trim()).await
 }
 
+fn normalize_telegram_parse_mode(parse_mode: Option<String>) -> Result<Option<String>, String> {
+    match parse_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(None),
+        Some(value) if value.eq_ignore_ascii_case("html") => Ok(Some("HTML".to_string())),
+        Some(_) => Err("Telegram replies support only HTML parse mode.".to_string()),
+    }
+}
+
 #[tauri::command]
 async fn complete_telegram_inbound(
     app: tauri::AppHandle,
@@ -809,6 +821,7 @@ async fn complete_telegram_inbound(
     event_id: String,
     local_chat_id: String,
     reply_chunks: Vec<String>,
+    parse_mode: Option<String>,
 ) -> Result<telegram::TelegramDeliveryResult, String> {
     let chunks = reply_chunks
         .into_iter()
@@ -818,6 +831,7 @@ async fn complete_telegram_inbound(
     if chunks.is_empty() || chunks.iter().any(|chunk| chunk.chars().count() > 4000) {
         return Err("Telegram replies must contain 1-4000 characters per chunk.".to_string());
     }
+    let parse_mode = normalize_telegram_parse_mode(parse_mode)?;
     let root = telegram_state_dir(&app)?;
     telegram::record_answer(
         &root,
@@ -825,6 +839,7 @@ async fn complete_telegram_inbound(
         event_id.trim(),
         &normalize_chat_id(&local_chat_id),
         chunks,
+        parse_mode,
     )?;
     let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
     if token.is_empty() {
@@ -1052,7 +1067,9 @@ async fn complete_scheduled_task(
     destination_chat_id: Option<String>,
     condition_result: Option<String>,
     delivery_message_chunks: Option<Vec<String>>,
+    delivery_parse_mode: Option<String>,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
+    let delivery_parse_mode = normalize_telegram_parse_mode(delivery_parse_mode)?;
     let task_before = {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
@@ -1116,6 +1133,7 @@ async fn complete_scheduled_task(
                 &execution_id,
                 recipient.user_id,
                 chunks,
+                delivery_parse_mode,
                 expires_at,
             ) {
                 Ok(delivery) => {

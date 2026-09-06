@@ -108,8 +108,9 @@ A task cannot be edited or deleted while it is running.
 
 A scheduled run uses Explore mode, your currently selected provider, and your
 installed extensions. Its full result, citations, and result cards are saved in
-the history chat. Telegram receives a concise plain-text version with source
-links; result cards remain in Raynard.
+the history chat. Telegram receives a concise, mobile-friendly rich-text version
+without research links; its tables are changed into stacked rows. Open the
+history chat in Raynard for citations, source details, result cards, and charts.
 
 Scheduled runs cannot approve extension development on your behalf. If a run
 needs a missing extension or a credential, open its destination chat and

@@ -75,9 +75,15 @@ Send an ordinary text message just as you would in Raynard:
 > Compare Iceland's latest inflation rate with the OECD average.
 
 Raynard shows a typing indicator while it works, uses relevant installed
-extensions, and replies with text and source links. Long answers may arrive as
-several consecutive Telegram messages. Requests are handled one at a time in
-the order they arrive.
+extensions, and replies with Telegram-safe rich text. Headings, emphasis, code,
+and intentional links are formatted using Telegram's supported HTML subset.
+Markdown tables are rearranged into labelled, stacked rows that remain readable
+on a phone. Long answers may arrive as several consecutive Telegram messages.
+Requests are handled one at a time in the order they arrive.
+
+Research citations and source URLs are omitted from the Telegram copy. They are
+still stored with the answer: open the same chat in Raynard to inspect its
+clickable citations, source details, result cards, and charts.
 
 The conversation is also saved locally as a Raynard chat named
 `Telegram · <your name>`. Open that chat on the desktop to inspect its complete
@@ -104,7 +110,7 @@ scheduled-task controls—are desktop commands and do not run through Telegram.
 | --- | --- | --- |
 | Explore questions | Uses the selected model and installed extensions | Full support |
 | Conversation history | Saved into a local Telegram-labelled chat | Full chat browser and search |
-| Sources | Plain-text links in the reply | Inline citations with source details |
+| Sources | Omitted; open the saved chat in Raynard | Inline citations with source details |
 | Result cards and charts | Receives a text summary; the full result stays in the desktop chat | Interactive cards and rendered charts |
 | Create or edit extensions | Asks you to open the desktop chat | Review, confirm, build, and test extensions |
 | Install catalog extensions | Desktop handoff only | Full catalog and installation flow |
