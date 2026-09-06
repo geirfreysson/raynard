@@ -34,6 +34,8 @@ import { filterChatsByName } from './chat-filter';
 import { latestChatTurnIso, orderChatsByUpdatedAt, upsertChatByUpdatedAt } from './chat-history';
 import {
   calendarFieldsFor,
+  deliveryStatusLabel,
+  notificationChannelLabel,
   relativeRunLabel,
   runStatusLabel,
   scheduleSentence,
@@ -399,6 +401,10 @@ type ScheduledTask = ScheduledTaskRequest & {
   lastStatus?: string;
   lastError?: string;
   activeExecutionId?: string;
+  lastConditionResult?: 'matched' | 'notMatched';
+  lastDeliveryStatus?: 'sent' | 'skipped' | 'alreadySent' | 'queued' | 'blocked' | 'indeterminate';
+  lastDeliveryError?: string;
+  lastDeliveryId?: string;
 };
 
 type ScheduledExecution = {
@@ -989,6 +995,7 @@ void invoke('subscribe_scheduled_tasks', { onWake: scheduledWakeChannel }).catch
 const telegramEventChannel = new Channel<{ kind: string }>((event) => {
   void refreshTelegramChannelState();
   if (event.kind === 'inbound') void drainTelegramInbound();
+  if (event.kind === 'delivery') void refreshScheduledTasks();
 });
 void invoke('subscribe_telegram_channel', { onEvent: telegramEventChannel })
   .then(() => void drainTelegramInbound())
@@ -4254,6 +4261,14 @@ function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest
   const data = new FormData(form);
   const frequency = String(data.get('frequency')) as ScheduledTaskRequest['schedule']['frequency'];
   const destination = String(data.get('destination'));
+  const deliveryChannel = String(data.get('deliveryChannel')) === 'telegram' ? 'telegram' : 'desktop';
+  const deliveryPolicy = String(data.get('deliveryPolicy')) as NonNullable<
+    ScheduledTaskRequest['deliveryPolicy']
+  >;
+  const normalizedDeliveryPolicy = ['always', 'onMatch', 'onTransition'].includes(deliveryPolicy)
+    ? deliveryPolicy
+    : 'always';
+  const pairedOwner = telegramChannelState.owner;
   const fields = calendarFieldsFor(frequency);
   return {
     name: String(data.get('name') || '').trim(),
@@ -4265,6 +4280,22 @@ function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest
           ? fallback.destinationChatId
           : undefined
         : destination,
+    deliveryChannel,
+    deliveryPolicy: normalizedDeliveryPolicy,
+    deliveryCondition:
+      normalizedDeliveryPolicy === 'always'
+        ? undefined
+        : String(data.get('deliveryCondition') || '').trim(),
+    telegramRecipient:
+      deliveryChannel === 'telegram'
+        ? pairedOwner
+          ? {
+              userId: pairedOwner.userId,
+              username: pairedOwner.username,
+              name: pairedOwner.name
+            }
+          : fallback.telegramRecipient
+        : undefined,
     schedule: {
       frequency,
       time: String(data.get('time') || ''),
@@ -4366,9 +4397,33 @@ function renderTaskEditor(
     </section>
 
     <section class="task-editor-section">
-      <h2 class="task-editor-heading">Destination</h2>
+      <h2 class="task-editor-heading">Notification</h2>
+      <div class="task-schedule-grid">
+        <label class="task-field">
+          <span class="task-field-label">Channel</span>
+          <select name="deliveryChannel"></select>
+        </label>
+        <label class="task-field">
+          <span class="task-field-label">Send</span>
+          <select name="deliveryPolicy">
+            <option value="always">After every run</option>
+            <option value="onMatch">Every time the condition matches</option>
+            <option value="onTransition">Once when the condition starts matching</option>
+          </select>
+        </label>
+      </div>
+      <label class="task-field" data-delivery-condition>
+        <span class="task-field-label">Condition</span>
+        <textarea name="deliveryCondition" rows="3" maxlength="1000" placeholder="Apple's current share price is below USD 150"></textarea>
+        <span class="task-field-hint">Every check is saved in Raynard. A notification is sent only when this condition applies.</span>
+      </label>
+      <p class="task-field-hint" data-delivery-hint></p>
+    </section>
+
+    <section class="task-editor-section">
+      <h2 class="task-editor-heading">History</h2>
       <label class="task-field">
-        <span class="task-field-label">Post results to</span>
+        <span class="task-field-label">Save every run to</span>
         <select name="destination"></select>
         <span class="task-field-hint">A dedicated chat is created on the first run and reused after that.</span>
       </label>
@@ -4385,6 +4440,9 @@ function renderTaskEditor(
   const name = form.elements.namedItem('name') as HTMLInputElement;
   const prompt = form.elements.namedItem('prompt') as HTMLTextAreaElement;
   const destination = form.elements.namedItem('destination') as HTMLSelectElement;
+  const deliveryChannel = form.elements.namedItem('deliveryChannel') as HTMLSelectElement;
+  const deliveryPolicy = form.elements.namedItem('deliveryPolicy') as HTMLSelectElement;
+  const deliveryCondition = form.elements.namedItem('deliveryCondition') as HTMLTextAreaElement;
   const frequency = form.elements.namedItem('frequency') as HTMLInputElement;
   const time = form.elements.namedItem('time') as HTMLInputElement;
   const weekday = form.elements.namedItem('dayOfWeek') as HTMLSelectElement;
@@ -4408,6 +4466,17 @@ function renderTaskEditor(
   }
   destination.value = draft.destinationType === 'existingChat' ? draft.destinationChatId || '' : 'newChat';
   if (!destination.value) destination.value = 'newChat';
+  deliveryChannel.add(new Option('Desktop notification', 'desktop'));
+  const recipient = telegramChannelState.owner || draft.telegramRecipient;
+  const telegramLabel = recipient
+    ? `Telegram · ${recipient.username ? `@${recipient.username}` : recipient.name}`
+    : 'Telegram · connect in Settings';
+  const telegramOption = new Option(telegramLabel, 'telegram');
+  if (!recipient && draft.deliveryChannel !== 'telegram') telegramOption.disabled = true;
+  deliveryChannel.add(telegramOption);
+  deliveryChannel.value = draft.deliveryChannel === 'telegram' ? 'telegram' : 'desktop';
+  deliveryPolicy.value = draft.deliveryPolicy || (draft.deliveryCondition ? 'onMatch' : 'always');
+  deliveryCondition.value = draft.deliveryCondition || '';
   frequency.value = draft.schedule.frequency;
   time.value = draft.schedule.time;
   weekday.value = String(draft.schedule.dayOfWeek || 1);
@@ -4418,6 +4487,8 @@ function renderTaskEditor(
   const discard = form.querySelector<HTMLButtonElement>('.task-editor-discard');
   const status = form.querySelector<HTMLElement>('.task-form-status');
   const summary = form.querySelector<HTMLElement>('.task-schedule-summary-text');
+  const conditionField = form.querySelector<HTMLElement>('[data-delivery-condition]');
+  const deliveryHint = form.querySelector<HTMLElement>('[data-delivery-hint]');
   if (save) save.textContent = options.submitLabel;
 
   const syncFields = () => {
@@ -4437,6 +4508,17 @@ function renderTaskEditor(
     if (summary) {
       const current = taskDraftFromForm(form, draft).schedule;
       summary.textContent = `${scheduleSentence(current)} · ${current.timeZone}`;
+    }
+    const conditional = deliveryPolicy.value !== 'always';
+    conditionField?.classList.toggle('is-hidden', !conditional);
+    deliveryCondition.required = conditional;
+    if (deliveryHint) {
+      deliveryHint.textContent =
+        deliveryChannel.value === 'telegram'
+          ? recipient
+            ? 'Qualifying results are sent to the paired Telegram account.'
+            : 'Connect and pair Telegram in Settings before saving this task.'
+          : 'Desktop notifications keep result details private; open Raynard to read the saved run.';
     }
   };
 
@@ -4629,7 +4711,7 @@ function openScheduledTask(task: ScheduledTask) {
     : undefined;
   stats.appendChild(
     taskStatTile(
-      'Destination',
+      'History',
       task.destinationType === 'newChat' ? 'Dedicated task chat' : destinationChat?.name || 'Selected chat',
       {
         text: task.destinationChatId
@@ -4637,6 +4719,22 @@ function openScheduledTask(task: ScheduledTask) {
           : 'A chat is created on the first run'
       }
     )
+  );
+  const delivery = deliveryStatusLabel(task.lastDeliveryStatus);
+  const policy = task.deliveryPolicy || (task.deliveryCondition ? 'onMatch' : 'always');
+  stats.appendChild(
+    taskStatTile('Notification', notificationChannelLabel(task), {
+      text: task.lastDeliveryError
+        ? `${delivery.label} · ${task.lastDeliveryError}`
+        : task.lastRunAt
+          ? delivery.label
+          : policy === 'always'
+            ? 'After every successful run'
+            : policy === 'onTransition'
+              ? 'Once when the condition starts matching'
+              : 'Every time the condition matches',
+      tone: task.lastRunAt ? delivery.tone : 'muted'
+    })
   );
   pluginDetailView.appendChild(stats);
 
@@ -4761,6 +4859,8 @@ async function runScheduledExecution(execution: ScheduledExecution) {
   let destinationChatId: string | undefined;
   let completionStatus = 'completed';
   let completionError: string | undefined;
+  let conditionResult: 'matched' | 'notMatched' | 'indeterminate' | undefined;
+  let deliveryMessage: string | undefined;
   try {
     const snapshot = await scheduledChatSnapshot(task);
     destinationChatId = snapshot.meta.chatId;
@@ -4857,15 +4957,31 @@ async function runScheduledExecution(execution: ScheduledExecution) {
           }
         },
         destinationChatId,
-        true
+        true,
+        'scheduled',
+        {
+          deliveryChannel: task.deliveryChannel || 'desktop',
+          deliveryPolicy: task.deliveryPolicy || (task.deliveryCondition ? 'onMatch' : 'always'),
+          deliveryCondition: task.deliveryCondition,
+          previousConditionResult: task.lastConditionResult
+        }
       );
-      if (credentialRequest) {
+      if (task.deliveryCondition) {
+        const decision = reply.scheduledCheckDecision;
+        if (!decision) {
+          throw new Error('The scheduled check ended without deciding whether its condition matched.');
+        }
+        conditionResult = decision.outcome;
+        deliveryMessage = decision.message;
+        assistantRecord.text = decision.message;
+      } else if (credentialRequest) {
         assistantRecord.credentialRequest = credentialRequest;
         assistantRecord.text = credentialPromptCopy(credentialRequest).title;
       } else if (reply.buildRequest) {
         assistantRecord.text = `This scheduled run needs approval to build ${reply.buildRequest.name}. Open the chat and ask again to review the plugin build.`;
       } else {
         assistantRecord.text = reply.content || streamed || 'The model returned an empty response.';
+        deliveryMessage = assistantRecord.text;
       }
       assistantRecord.extensionRecommendation = recommendation ?? reply.extensionRecommendation;
       assistantRecord.provider = reply.provider;
@@ -4900,7 +5016,12 @@ async function runScheduledExecution(execution: ScheduledExecution) {
     executionId: execution.executionId,
     status: completionStatus,
     error: completionError,
-    destinationChatId
+    destinationChatId,
+    conditionResult,
+    deliveryMessageChunks:
+      completionStatus === 'completed' && task.deliveryChannel === 'telegram' && deliveryMessage
+        ? telegramReplyChunks(deliveryMessage)
+        : undefined
   });
   if (destinationChatId === activeSessionId && document.hasFocus()) {
     await markChatRead(destinationChatId, true);
@@ -5689,7 +5810,8 @@ function renderScheduledTaskConfirmation(body: HTMLElement, record: StoredChatMe
     const frequency = request.schedule.frequency;
     const parts = [
       `${frequency[0].toUpperCase()}${frequency.slice(1)} at ${request.schedule.time}`,
-      request.destinationType === 'newChat' ? 'dedicated chat' : 'this chat'
+      request.destinationType === 'newChat' ? 'dedicated history chat' : 'this history chat',
+      request.deliveryChannel === 'telegram' ? 'Telegram notification' : 'desktop notification'
     ];
     if (created?.enabled) parts.push(`next ${formatChatDate(created.nextRunAt)}`);
     const summary = document.createElement('span');

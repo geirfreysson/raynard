@@ -856,15 +856,30 @@ fn subscribe_scheduled_tasks(
 #[tauri::command]
 async fn list_scheduled_tasks(
     app: tauri::AppHandle,
+    telegram_state: tauri::State<'_, telegram::TelegramRuntimeState>,
 ) -> Result<Vec<scheduled_tasks::ScheduledTask>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let store_app = app.clone();
+    let mut tasks = tauri::async_runtime::spawn_blocking(move || {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
             .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
-        scheduled_tasks::list(&scheduled_tasks_path(&app)?)
+        scheduled_tasks::list(&scheduled_tasks_path(&store_app)?)
     })
     .await
-    .map_err(|error| format!("Could not join scheduled-task listing: {error}"))?
+    .map_err(|error| format!("Could not join scheduled-task listing: {error}"))??;
+    let telegram_root = telegram_state_dir(&app)?;
+    for task in &mut tasks {
+        let Some(delivery_id) = task.last_delivery_id.as_deref() else {
+            continue;
+        };
+        if let Some(delivery) =
+            telegram::scheduled_delivery_status(&telegram_root, &telegram_state, delivery_id)
+        {
+            task.last_delivery_status = Some(delivery.status);
+            task.last_delivery_error = delivery.error;
+        }
+    }
+    Ok(tasks)
 }
 
 fn validate_task_destination(
@@ -886,11 +901,49 @@ fn normalize_task_destination(draft: &mut scheduled_tasks::ScheduledTaskDraft) {
     }
 }
 
+fn normalize_task_delivery(
+    draft: &mut scheduled_tasks::ScheduledTaskDraft,
+    telegram_owner: Option<telegram::TelegramOwner>,
+) -> Result<(), String> {
+    draft.delivery_channel = if draft
+        .delivery_channel
+        .trim()
+        .eq_ignore_ascii_case("telegram")
+    {
+        "telegram".to_string()
+    } else {
+        "desktop".to_string()
+    };
+    if draft.delivery_channel == "telegram" {
+        let owner = telegram_owner
+            .ok_or_else(|| "Connect and pair Telegram before saving this task.".to_string())?;
+        draft.telegram_recipient = Some(scheduled_tasks::TelegramRecipient {
+            user_id: owner.user_id,
+            username: owner.username,
+            name: owner.name,
+        });
+    } else {
+        draft.telegram_recipient = None;
+    }
+    if draft.delivery_policy == "always" {
+        draft.delivery_condition = None;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn create_scheduled_task(
     app: tauri::AppHandle,
+    telegram_state: tauri::State<'_, telegram::TelegramRuntimeState>,
     mut draft: scheduled_tasks::ScheduledTaskDraft,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
+    let telegram_owner = telegram::get_state(
+        &telegram_state_dir(&app)?,
+        &telegram_state,
+        !read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT).is_empty(),
+    )?
+    .owner;
+    normalize_task_delivery(&mut draft, telegram_owner)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
@@ -906,9 +959,17 @@ async fn create_scheduled_task(
 #[tauri::command]
 async fn update_scheduled_task(
     app: tauri::AppHandle,
+    telegram_state: tauri::State<'_, telegram::TelegramRuntimeState>,
     task_id: String,
     mut draft: scheduled_tasks::ScheduledTaskDraft,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
+    let telegram_owner = telegram::get_state(
+        &telegram_state_dir(&app)?,
+        &telegram_state,
+        !read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT).is_empty(),
+    )?
+    .owner;
+    normalize_task_delivery(&mut draft, telegram_owner)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
@@ -980,16 +1041,131 @@ async fn claim_scheduled_task(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named invoke arguments.
 async fn complete_scheduled_task(
     app: tauri::AppHandle,
+    telegram_state: tauri::State<'_, telegram::TelegramRuntimeState>,
     task_id: String,
     execution_id: String,
-    status: String,
-    error: Option<String>,
+    mut status: String,
+    mut error: Option<String>,
     destination_chat_id: Option<String>,
+    condition_result: Option<String>,
+    delivery_message_chunks: Option<Vec<String>>,
 ) -> Result<scheduled_tasks::ScheduledTask, String> {
+    let task_before = {
+        let _guard = SCHEDULED_TASK_LOCK
+            .lock()
+            .map_err(|_| "Could not lock scheduled tasks.".to_string())?;
+        scheduled_tasks::get(&scheduled_tasks_path(&app)?, &task_id)?
+    };
+    if task_before.active_execution_id.as_deref() != Some(execution_id.as_str()) {
+        return Err("That scheduled execution is no longer active.".to_string());
+    }
+    let condition_result = condition_result
+        .filter(|value| matches!(value.as_str(), "matched" | "notMatched" | "indeterminate"));
+    if status == "completed"
+        && task_before.delivery_condition.is_some()
+        && condition_result.is_none()
+    {
+        status = "error".to_string();
+        error = Some("The scheduled check did not produce a valid condition decision.".to_string());
+    }
+
+    let should_deliver = status == "completed"
+        && scheduled_tasks::should_deliver(&task_before, condition_result.as_deref());
+    let mut delivery_id = None;
+    let mut delivery_error = None;
+    let mut delivery_status = if status != "completed" {
+        Some("blocked".to_string())
+    } else if condition_result.as_deref() == Some("indeterminate") {
+        Some("indeterminate".to_string())
+    } else if should_deliver {
+        None
+    } else if condition_result.as_deref() == Some("matched") {
+        Some("alreadySent".to_string())
+    } else {
+        Some("skipped".to_string())
+    };
+
+    if should_deliver && task_before.delivery_channel == "telegram" {
+        let chunks = delivery_message_chunks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|chunk| chunk.trim().to_string())
+            .filter(|chunk| !chunk.is_empty())
+            .collect::<Vec<_>>();
+        let recipient = task_before.telegram_recipient.as_ref();
+        if chunks.is_empty() || chunks.iter().any(|chunk| chunk.chars().count() > 4_000) {
+            delivery_status = Some("blocked".to_string());
+            delivery_error =
+                Some("The Telegram alert did not contain valid message text.".to_string());
+        } else if let Some(recipient) = recipient {
+            let now = now_millis();
+            let retry_cap = now.saturating_add(24 * 60 * 60 * 1_000);
+            let next_run = chrono::DateTime::parse_from_rfc3339(&task_before.next_run_at)
+                .map(|value| value.timestamp_millis())
+                .ok()
+                .filter(|value| *value > now)
+                .unwrap_or(retry_cap);
+            let expires_at = next_run.min(retry_cap);
+            match telegram::enqueue_scheduled_delivery(
+                &telegram_state_dir(&app)?,
+                &telegram_state,
+                &task_id,
+                &execution_id,
+                recipient.user_id,
+                chunks,
+                expires_at,
+            ) {
+                Ok(delivery) => {
+                    delivery_id = Some(delivery.id.clone());
+                    let token = read_keychain_account(TELEGRAM_BOT_TOKEN_ACCOUNT);
+                    let delivered = if token.is_empty() {
+                        telegram::TelegramScheduledDeliveryResult {
+                            delivery_id: delivery.id,
+                            status: "queued".to_string(),
+                            error: Some("Telegram is disconnected.".to_string()),
+                        }
+                    } else {
+                        match telegram::deliver_scheduled_delivery(
+                            &telegram_state_dir(&app)?,
+                            &telegram_state,
+                            &token,
+                            &delivery.id,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(delivery_failure) => telegram::TelegramScheduledDeliveryResult {
+                                delivery_id: delivery.id,
+                                status: "queued".to_string(),
+                                error: Some(delivery_failure),
+                            },
+                        }
+                    };
+                    delivery_status = Some(delivered.status);
+                    delivery_error = delivered.error;
+                }
+                Err(delivery_failure) => {
+                    delivery_status = Some("blocked".to_string());
+                    delivery_error = Some(delivery_failure);
+                }
+            }
+        } else {
+            delivery_status = Some("blocked".to_string());
+            delivery_error = Some("This task has no Telegram recipient.".to_string());
+        }
+    } else if should_deliver {
+        delivery_status = Some("sent".to_string());
+    }
+
     let store_app = app.clone();
     let completion_status = status.clone();
+    let stored_condition_result = condition_result.clone();
+    let stored_delivery_status = delivery_status.clone();
+    let stored_delivery_error = delivery_error.clone();
+    let stored_delivery_id = delivery_id.clone();
     let completed = tauri::async_runtime::spawn_blocking(move || {
         let _guard = SCHEDULED_TASK_LOCK
             .lock()
@@ -998,39 +1174,57 @@ async fn complete_scheduled_task(
             &scheduled_tasks_path(&store_app)?,
             &task_id,
             &execution_id,
-            &status,
-            error,
-            destination_chat_id,
+            scheduled_tasks::ScheduledTaskCompletion {
+                status,
+                error,
+                destination_chat_id,
+                condition_result: stored_condition_result,
+                delivery_status: stored_delivery_status,
+                delivery_error: stored_delivery_error,
+                delivery_id: stored_delivery_id,
+            },
         )
     })
     .await
     .map_err(|error| format!("Could not join scheduled-task completion: {error}"))??;
 
-    if let Some(chat_id) = completed.destination_chat_id.clone() {
-        let unread_app = app.clone();
-        let unread_result = tauri::async_runtime::spawn_blocking(move || {
-            set_chat_history_unread_in(&chat_history_dir(&unread_app)?, &chat_id, true)
-        })
-        .await
-        .map_err(|error| format!("Could not join scheduled chat unread update: {error}"))
-        .and_then(|result| result.map(|_| ()));
-        if let Err(error) = unread_result {
-            eprintln!("Could not mark scheduled chat unread: {error}");
+    let needs_attention = completion_status != "completed"
+        || matches!(
+            delivery_status.as_deref(),
+            Some("blocked" | "indeterminate" | "queued")
+        );
+    let mark_unread = needs_attention || delivery_status.as_deref() == Some("sent");
+    if mark_unread {
+        if let Some(chat_id) = completed.destination_chat_id.clone() {
+            let unread_app = app.clone();
+            let unread_result = tauri::async_runtime::spawn_blocking(move || {
+                set_chat_history_unread_in(&chat_history_dir(&unread_app)?, &chat_id, true)
+            })
+            .await
+            .map_err(|error| format!("Could not join scheduled chat unread update: {error}"))
+            .and_then(|result| result.map(|_| ()));
+            if let Err(error) = unread_result {
+                eprintln!("Could not mark scheduled chat unread: {error}");
+            }
         }
     }
-    let body = if completion_status == "completed" {
-        "Scheduled task finished. Open Raynard to view the result."
-    } else {
-        "Scheduled task needs attention. Open Raynard for details."
-    };
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .title(&completed.name)
-        .body(body)
-        .show()
-    {
-        eprintln!("Could not show scheduled task notification: {error}");
+    let show_desktop_notification = needs_attention
+        || (completed.delivery_channel == "desktop" && delivery_status.as_deref() == Some("sent"));
+    if show_desktop_notification {
+        let body = if needs_attention {
+            "Scheduled task needs attention. Open Raynard for details."
+        } else {
+            "Scheduled task finished. Open Raynard to view the result."
+        };
+        if let Err(error) = app
+            .notification()
+            .builder()
+            .title(&completed.name)
+            .body(body)
+            .show()
+        {
+            eprintln!("Could not show scheduled task notification: {error}");
+        }
     }
 
     Ok(completed)
@@ -3457,6 +3651,7 @@ async fn run_main_agent_stream(
     mode: String,
     scheduled_execution: Option<bool>,
     execution_surface: Option<String>,
+    scheduled_run: Option<Value>,
     scheduler_context: Option<Value>,
 ) -> Result<MainAgentReply, String> {
     let mut config = resolve_model_config(Some(&app))?;
@@ -3533,6 +3728,7 @@ async fn run_main_agent_stream(
         "availableExtensions": available_extensions,
         "scheduledExecution": scheduled_execution.unwrap_or(false),
         "executionSurface": execution_surface.unwrap_or_else(|| if scheduled_execution.unwrap_or(false) { "scheduled".to_string() } else { "desktop".to_string() }),
+        "scheduledRun": scheduled_run,
         "schedulerContext": scheduler_context.unwrap_or_else(|| json!({ "timeZone": "UTC" })),
         "chats": chats.iter().take(100).map(|chat| json!({ "id": chat.chat_id, "name": chat.name })).collect::<Vec<_>>(),
         "currentChatId": chat_id

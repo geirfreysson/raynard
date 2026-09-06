@@ -146,3 +146,32 @@ export function runStatusLabel(status: string | undefined): { label: string; ton
       return { label: status ? frequencyLabel(status) : 'Unknown', tone: 'muted' };
   }
 }
+
+export function notificationChannelLabel(task: {
+  deliveryChannel?: string;
+  telegramRecipient?: { name: string; username?: string | null };
+}): string {
+  if (task.deliveryChannel !== 'telegram') return 'Desktop';
+  const recipient = task.telegramRecipient;
+  if (!recipient) return 'Telegram · not connected';
+  return `Telegram · ${recipient.username ? `@${recipient.username}` : recipient.name}`;
+}
+
+export function deliveryStatusLabel(status?: string): { label: string; tone: RunTone } {
+  switch (status) {
+    case 'sent':
+      return { label: 'Notification sent', tone: 'ok' };
+    case 'skipped':
+      return { label: 'Condition not met', tone: 'muted' };
+    case 'alreadySent':
+      return { label: 'Already notified', tone: 'muted' };
+    case 'queued':
+      return { label: 'Telegram delivery queued', tone: 'error' };
+    case 'blocked':
+      return { label: 'Notification failed', tone: 'error' };
+    case 'indeterminate':
+      return { label: 'Condition could not be determined', tone: 'error' };
+    default:
+      return { label: 'No delivery yet', tone: 'muted' };
+  }
+}

@@ -8,6 +8,7 @@ import {
   createAvailableExtensionSearchTool,
   defaultThinkingLevel,
   createBuildRequestTool,
+  createScheduledCheckDecisionTool,
   createScheduledTaskTool,
   createDirectAnswerTool,
   createExtensionRecommendationTool,
@@ -226,6 +227,7 @@ let extensionRecommendation = null;
 let scheduledTaskRequest = null;
 const executionSurface = request.executionSurface === 'telegram' ? 'telegram' : request.scheduledExecution ? 'scheduled' : 'desktop';
 const isTelegramExecution = executionSurface === 'telegram';
+const isScheduledExecution = executionSurface === 'scheduled';
 const buildRequestTool = createBuildRequestTool(
   Type,
   (nextRequest) => {
@@ -273,20 +275,34 @@ const scheduledTaskTool = request.scheduledExecution
         }
       }
     );
-const tools = [
-  ...generatedTools,
-  presentChartTool,
-  ...(!isTelegramExecution ? [memoryChangeTool] : []),
-  ...(!isTelegramExecution ? [availableExtensionSearchTool] : []),
-  ...(!isTelegramExecution ? [extensionRecommendationTool] : []),
-  ...(!isTelegramExecution ? [buildRequestTool] : []),
-  ...(!isTelegramExecution && scheduledTaskTool ? [scheduledTaskTool] : []),
-  directAnswerTool
-];
+let scheduledCheckDecision = null;
+const scheduledCheckTool =
+  isScheduledExecution && request.scheduledRun?.deliveryCondition
+    ? createScheduledCheckDecisionTool(Type, (decision) => {
+        scheduledCheckDecision = decision;
+      })
+    : null;
+const tools = isScheduledExecution
+  ? [
+      ...generatedTools,
+      presentChartTool,
+      ...(scheduledCheckTool ? [scheduledCheckTool] : [directAnswerTool])
+    ]
+  : [
+      ...generatedTools,
+      presentChartTool,
+      ...(!isTelegramExecution ? [memoryChangeTool] : []),
+      ...(!isTelegramExecution ? [availableExtensionSearchTool] : []),
+      ...(!isTelegramExecution ? [extensionRecommendationTool] : []),
+      ...(!isTelegramExecution ? [buildRequestTool] : []),
+      ...(!isTelegramExecution && scheduledTaskTool ? [scheduledTaskTool] : []),
+      directAnswerTool
+    ];
 const internalToolNames = new Set([
   availableExtensionSearchTool.name,
   extensionRecommendationTool.name,
-  directAnswerTool.name
+  directAnswerTool.name,
+  ...(scheduledCheckTool ? [scheduledCheckTool.name] : [])
 ]);
 
 // Built once so its resolved contextWindow — pi's catalog first, FALLBACK_LIMITS
@@ -306,7 +322,8 @@ const agent = new Agent({
         currentChatId: request.currentChatId
       },
       memories: request.memories,
-      executionSurface
+      executionSurface,
+      scheduledRun: request.scheduledRun
     }),
     model: agentModel,
     thinkingLevel: defaultThinkingLevel('explore'),
@@ -459,7 +476,7 @@ try {
   // answer a question the host has already replaced with something else. The
   // host hands the undelivered text back to the composer instead.
   const endsInACard = Boolean(
-    buildRequest || scheduledTaskRequest || credentialRequest || directAnswer || extensionRecommendation
+    buildRequest || scheduledTaskRequest || credentialRequest || directAnswer || extensionRecommendation || scheduledCheckDecision
   );
   // Otherwise a message queued between the loop's last steering poll and
   // agent_end would die with the process. continue() drains both queues itself
@@ -485,6 +502,7 @@ try {
     !scheduledTaskRequest &&
     !credentialRequest &&
     !extensionRecommendation &&
+    !scheduledCheckDecision &&
     (failed || !lastMessageHadText)
   ) {
     const reason =
@@ -513,10 +531,10 @@ try {
   }
   emit({
     type: 'done',
-    text: directAnswer || extensionRecommendation?.answer || finalText,
+    text: scheduledCheckDecision?.message || directAnswer || extensionRecommendation?.answer || finalText,
     buildRequest,
     scheduledTaskRequest,
-    result: extensionRecommendation || credentialRequest || undefined,
+    result: scheduledCheckDecision || extensionRecommendation || credentialRequest || undefined,
     stopReason: lastStopReason,
     usage: usageTotal.value()
   });

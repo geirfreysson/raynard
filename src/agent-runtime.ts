@@ -40,6 +40,7 @@ export type AgentReply = {
   model?: string;
   buildRequest?: AgentBuildRequest;
   scheduledTaskRequest?: ScheduledTaskRequest;
+  scheduledCheckDecision?: ScheduledCheckDecision;
   extensionRecommendation?: ExtensionRecommendation;
   usage?: TurnUsage;
 };
@@ -108,6 +109,14 @@ export type ScheduledTaskRequest = {
   prompt: string;
   destinationType: 'existingChat' | 'newChat';
   destinationChatId?: string;
+  deliveryChannel?: 'desktop' | 'telegram';
+  deliveryPolicy?: 'always' | 'onMatch' | 'onTransition';
+  deliveryCondition?: string;
+  telegramRecipient?: {
+    userId: number;
+    username?: string | null;
+    name: string;
+  };
   // Set when the tool could not honour the requested repeat exactly — an
   // unsupported cadence, or a destination chat it could not find. Shown above
   // the confirmation form and dropped before the draft reaches Rust.
@@ -120,6 +129,20 @@ export type ScheduledTaskRequest = {
     dayOfMonth?: number;
     monthOfYear?: number;
   };
+};
+
+export type ScheduledCheckDecision = {
+  type: 'scheduled-check-decision';
+  outcome: 'matched' | 'notMatched' | 'indeterminate';
+  message: string;
+  reason: string;
+};
+
+export type ScheduledRunContext = {
+  deliveryChannel: 'desktop' | 'telegram';
+  deliveryPolicy: 'always' | 'onMatch' | 'onTransition';
+  deliveryCondition?: string;
+  previousConditionResult?: string;
 };
 
 export type AgentToolEvent = {
@@ -224,7 +247,8 @@ export async function runMainAgentStream(
   scheduledExecution = false,
   executionSurface: 'desktop' | 'scheduled' | 'telegram' = scheduledExecution
     ? 'scheduled'
-    : 'desktop'
+    : 'desktop',
+  scheduledRun?: ScheduledRunContext
 ): Promise<AgentReply> {
   const streamId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -263,6 +287,7 @@ export async function runMainAgentStream(
     chatId,
     scheduledExecution,
     executionSurface,
+    scheduledRun,
     schedulerContext: {
       localDateTime: new Date().toISOString(),
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -275,8 +300,25 @@ export async function runMainAgentStream(
     model: reply.model ?? model,
     buildRequest: reply.buildRequest ?? buildRequest,
     scheduledTaskRequest: reply.scheduledTaskRequest ?? scheduledTaskRequest,
+    scheduledCheckDecision: decodeScheduledCheckDecision(reply.result),
     extensionRecommendation: decodeExtensionRecommendation(reply.result) ?? undefined,
     usage: reply.usage
+  };
+}
+
+export function decodeScheduledCheckDecision(value: unknown): ScheduledCheckDecision | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.type !== 'scheduled-check-decision') return undefined;
+  if (!['matched', 'notMatched', 'indeterminate'].includes(String(raw.outcome))) return undefined;
+  const message = typeof raw.message === 'string' ? raw.message.trim() : '';
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim() : '';
+  if (!message || !reason) return undefined;
+  return {
+    type: 'scheduled-check-decision',
+    outcome: raw.outcome as ScheduledCheckDecision['outcome'],
+    message,
+    reason
   };
 }
 

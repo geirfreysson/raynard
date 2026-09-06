@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   calendarFieldsFor,
+  deliveryStatusLabel,
+  notificationChannelLabel,
   ordinal,
   relativeRunLabel,
   runStatusLabel,
@@ -8,6 +10,30 @@ import {
   scheduleShorthand,
   taskStatus
 } from './scheduled-task-view';
+
+describe('notificationChannelLabel', () => {
+  it('names the desktop default and the fixed Telegram recipient', () => {
+    expect(notificationChannelLabel({})).toBe('Desktop');
+    expect(
+      notificationChannelLabel({
+        deliveryChannel: 'telegram',
+        telegramRecipient: { name: 'Ada Lovelace', username: 'ada' }
+      })
+    ).toBe('Telegram · @ada');
+  });
+});
+
+describe('deliveryStatusLabel', () => {
+  it('distinguishes a false condition from a transition already notified', () => {
+    expect(deliveryStatusLabel('skipped')).toEqual({ label: 'Condition not met', tone: 'muted' });
+    expect(deliveryStatusLabel('alreadySent')).toEqual({ label: 'Already notified', tone: 'muted' });
+  });
+
+  it('surfaces queued and indeterminate checks as needing attention', () => {
+    expect(deliveryStatusLabel('queued').tone).toBe('error');
+    expect(deliveryStatusLabel('indeterminate').tone).toBe('error');
+  });
+});
 
 describe('scheduleSentence', () => {
   it('describes a daily schedule', () => {

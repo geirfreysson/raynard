@@ -101,6 +101,21 @@ pub struct TelegramInboundEvent {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TelegramScheduledDelivery {
+    pub id: String,
+    pub task_id: String,
+    pub execution_id: String,
+    pub recipient_user_id: i64,
+    pub chunks: Vec<String>,
+    pub delivered_chunks: usize,
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TelegramStore {
     version: u32,
     enabled: bool,
@@ -112,6 +127,8 @@ struct TelegramStore {
     pairing_requests: Vec<TelegramPairingRequest>,
     #[serde(default)]
     events: Vec<TelegramInboundEvent>,
+    #[serde(default)]
+    scheduled_deliveries: Vec<TelegramScheduledDelivery>,
 }
 
 impl Default for TelegramStore {
@@ -125,6 +142,7 @@ impl Default for TelegramStore {
             next_offset: None,
             pairing_requests: Vec::new(),
             events: Vec::new(),
+            scheduled_deliveries: Vec::new(),
         }
     }
 }
@@ -153,6 +171,14 @@ pub struct TelegramChannelEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TelegramDeliveryResult {
     pub delivered: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramScheduledDeliveryResult {
+    pub delivery_id: String,
+    pub status: String,
     pub error: Option<String>,
 }
 
@@ -258,6 +284,26 @@ fn prune_store(store: &mut TelegramStore, now: i64) {
             store.events.remove(index);
         }
     }
+    for delivery in &mut store.scheduled_deliveries {
+        if delivery.status == "queued" && delivery.expires_at <= now {
+            delivery.status = "blocked".to_string();
+            delivery.last_error =
+                Some("The Telegram alert expired before it could be sent.".to_string());
+        }
+    }
+    store.scheduled_deliveries.retain(|delivery| {
+        !matches!(delivery.status.as_str(), "sent" | "blocked")
+            || delivery.created_at >= now.saturating_sub(COMPLETED_EVENT_TTL_MS)
+    });
+}
+
+fn block_queued_scheduled_deliveries(store: &mut TelegramStore, message: &str) {
+    for delivery in &mut store.scheduled_deliveries {
+        if delivery.status == "queued" {
+            delivery.status = "blocked".to_string();
+            delivery.last_error = Some(message.to_string());
+        }
+    }
 }
 
 fn snapshot(
@@ -295,7 +341,12 @@ fn snapshot(
             .events
             .iter()
             .filter(|event| event.status != TelegramInboundStatus::Delivered)
-            .count(),
+            .count()
+            + store
+                .scheduled_deliveries
+                .iter()
+                .filter(|delivery| delivery.status == "queued")
+                .count(),
         error,
     }
 }
@@ -450,6 +501,10 @@ pub fn configure(
         store
             .events
             .retain(|event| event.status == TelegramInboundStatus::Delivered);
+        block_queued_scheduled_deliveries(
+            &mut store,
+            "The Telegram bot changed before this alert could be sent.",
+        );
         store.next_offset = None;
     }
     store.enabled = true;
@@ -473,6 +528,10 @@ pub fn disconnect(root: &Path, runtime: &TelegramRuntimeState) -> Result<(), Str
     store
         .events
         .retain(|event| event.status == TelegramInboundStatus::Delivered);
+    block_queued_scheduled_deliveries(
+        &mut store,
+        "Telegram was disconnected before this alert could be sent.",
+    );
     write_store(root, &store)?;
     set_live(runtime, "disconnected", None);
     Ok(())
@@ -487,6 +546,10 @@ pub fn forget_owner(root: &Path, runtime: &TelegramRuntimeState) -> Result<(), S
     store.owner = None;
     store.active_chat_id = None;
     store.pairing_requests.clear();
+    block_queued_scheduled_deliveries(
+        &mut store,
+        "The paired Telegram account was removed before this alert could be sent.",
+    );
     write_store(root, &store)?;
     drop(_guard);
     notify(runtime, "state");
@@ -665,6 +728,211 @@ async fn send_text(
     )
     .await
     .map(|_| ())
+}
+
+pub fn enqueue_scheduled_delivery(
+    root: &Path,
+    runtime: &TelegramRuntimeState,
+    task_id: &str,
+    execution_id: &str,
+    recipient_user_id: i64,
+    chunks: Vec<String>,
+    expires_at: i64,
+) -> Result<TelegramScheduledDelivery, String> {
+    let _guard = runtime
+        .store_lock
+        .lock()
+        .map_err(|_| "Could not lock Telegram state.".to_string())?;
+    let mut store = read_store(root);
+    if !store.enabled {
+        return Err("Telegram is disconnected.".to_string());
+    }
+    if store.owner.as_ref().map(|owner| owner.user_id) != Some(recipient_user_id) {
+        return Err("The task's Telegram recipient is no longer paired.".to_string());
+    }
+    let id = format!("scheduled-{execution_id}");
+    if let Some(existing) = store
+        .scheduled_deliveries
+        .iter()
+        .find(|delivery| delivery.id == id)
+        .cloned()
+    {
+        return Ok(existing);
+    }
+    let delivery = TelegramScheduledDelivery {
+        id,
+        task_id: task_id.to_string(),
+        execution_id: execution_id.to_string(),
+        recipient_user_id,
+        chunks,
+        delivered_chunks: 0,
+        status: "queued".to_string(),
+        created_at: now_millis(),
+        expires_at,
+        last_error: None,
+    };
+    store.scheduled_deliveries.push(delivery.clone());
+    write_store(root, &store)?;
+    drop(_guard);
+    notify(runtime, "delivery");
+    Ok(delivery)
+}
+
+fn update_scheduled_delivery_progress(
+    root: &Path,
+    runtime: &TelegramRuntimeState,
+    delivery_id: &str,
+    delivered_chunks: usize,
+    status: &str,
+    error: Option<String>,
+) -> Result<TelegramScheduledDelivery, String> {
+    let _guard = runtime
+        .store_lock
+        .lock()
+        .map_err(|_| "Could not lock Telegram state.".to_string())?;
+    let mut store = read_store(root);
+    let delivery = store
+        .scheduled_deliveries
+        .iter_mut()
+        .find(|delivery| delivery.id == delivery_id)
+        .ok_or_else(|| "Telegram delivery not found.".to_string())?;
+    delivery.delivered_chunks = delivered_chunks;
+    delivery.status = status.to_string();
+    delivery.last_error = error;
+    let result = delivery.clone();
+    write_store(root, &store)?;
+    drop(_guard);
+    notify(runtime, "delivery");
+    Ok(result)
+}
+
+pub fn scheduled_delivery_status(
+    root: &Path,
+    runtime: &TelegramRuntimeState,
+    delivery_id: &str,
+) -> Option<TelegramScheduledDeliveryResult> {
+    let _guard = runtime.store_lock.lock().ok()?;
+    let mut store = read_store(root);
+    prune_store(&mut store, now_millis());
+    let result = store
+        .scheduled_deliveries
+        .iter()
+        .find(|delivery| delivery.id == delivery_id)
+        .map(|delivery| TelegramScheduledDeliveryResult {
+            delivery_id: delivery.id.clone(),
+            status: delivery.status.clone(),
+            error: delivery.last_error.clone(),
+        });
+    let _ = write_store(root, &store);
+    result
+}
+
+pub async fn deliver_scheduled_delivery(
+    root: &Path,
+    runtime: &TelegramRuntimeState,
+    token: &str,
+    delivery_id: &str,
+) -> Result<TelegramScheduledDeliveryResult, String> {
+    let delivery = {
+        let _guard = runtime
+            .store_lock
+            .lock()
+            .map_err(|_| "Could not lock Telegram state.".to_string())?;
+        let mut store = read_store(root);
+        prune_store(&mut store, now_millis());
+        let delivery = store
+            .scheduled_deliveries
+            .iter()
+            .find(|delivery| delivery.id == delivery_id)
+            .cloned()
+            .ok_or_else(|| "Telegram delivery not found.".to_string())?;
+        if store.owner.as_ref().map(|owner| owner.user_id) != Some(delivery.recipient_user_id) {
+            drop(_guard);
+            let blocked = update_scheduled_delivery_progress(
+                root,
+                runtime,
+                delivery_id,
+                delivery.delivered_chunks,
+                "blocked",
+                Some("The task's Telegram recipient is no longer paired.".to_string()),
+            )?;
+            return Ok(TelegramScheduledDeliveryResult {
+                delivery_id: blocked.id,
+                status: blocked.status,
+                error: blocked.last_error,
+            });
+        }
+        delivery
+    };
+    if delivery.status != "queued" {
+        return Ok(TelegramScheduledDeliveryResult {
+            delivery_id: delivery.id,
+            status: delivery.status,
+            error: delivery.last_error,
+        });
+    }
+    let client = Client::new();
+    let mut delivered = delivery.delivered_chunks;
+    for chunk in delivery.chunks.iter().skip(delivered) {
+        match send_text(&client, token, delivery.recipient_user_id, chunk).await {
+            Ok(()) => {
+                delivered += 1;
+                update_scheduled_delivery_progress(
+                    root,
+                    runtime,
+                    delivery_id,
+                    delivered,
+                    if delivered == delivery.chunks.len() {
+                        "sent"
+                    } else {
+                        "queued"
+                    },
+                    None,
+                )?;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                update_scheduled_delivery_progress(
+                    root,
+                    runtime,
+                    delivery_id,
+                    delivered,
+                    "queued",
+                    Some(message.clone()),
+                )?;
+                return Ok(TelegramScheduledDeliveryResult {
+                    delivery_id: delivery.id,
+                    status: "queued".to_string(),
+                    error: Some(message),
+                });
+            }
+        }
+    }
+    Ok(TelegramScheduledDeliveryResult {
+        delivery_id: delivery.id,
+        status: "sent".to_string(),
+        error: None,
+    })
+}
+
+async fn deliver_scheduled_deliveries(root: &Path, runtime: &TelegramRuntimeState, token: &str) {
+    let ids = {
+        let Ok(_guard) = runtime.store_lock.lock() else {
+            return;
+        };
+        let mut store = read_store(root);
+        prune_store(&mut store, now_millis());
+        let _ = write_store(root, &store);
+        store
+            .scheduled_deliveries
+            .iter()
+            .filter(|delivery| delivery.status == "queued")
+            .map(|delivery| delivery.id.clone())
+            .collect::<Vec<_>>()
+    };
+    for id in ids {
+        let _ = deliver_scheduled_delivery(root, runtime, token, &id).await;
+    }
 }
 
 pub async fn send_pairing_approved(token: &str, chat_id: i64) {
@@ -890,6 +1158,7 @@ pub fn start_poller(root: PathBuf, runtime: &TelegramRuntimeState, token: String
                 break;
             }
             deliver_answered_events(&root, &runtime, &token).await;
+            deliver_scheduled_deliveries(&root, &runtime, &token).await;
             let offset = {
                 let Ok(_guard) = runtime.store_lock.lock() else {
                     break;
@@ -1144,5 +1413,135 @@ mod tests {
         assert_eq!(disconnected.active_chat_id, None);
         assert!(disconnected.events.is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scheduled_delivery_is_durable_deduplicated_and_bound_to_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "raynard-telegram-scheduled-test-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let runtime = TelegramRuntimeState::default();
+        let store = TelegramStore {
+            enabled: true,
+            owner: Some(TelegramOwner {
+                user_id: 42,
+                username: Some("ada".into()),
+                name: "Ada".into(),
+                approved_at: 1,
+            }),
+            ..TelegramStore::default()
+        };
+        write_store(&root, &store).unwrap();
+
+        let first = enqueue_scheduled_delivery(
+            &root,
+            &runtime,
+            "task-one",
+            "execution-one",
+            42,
+            vec!["The condition matched.".into()],
+            now_millis() + 60_000,
+        )
+        .unwrap();
+        let duplicate = enqueue_scheduled_delivery(
+            &root,
+            &runtime,
+            "task-one",
+            "execution-one",
+            42,
+            vec!["A different retry body must not replace it.".into()],
+            now_millis() + 60_000,
+        )
+        .unwrap();
+
+        assert_eq!(first.id, duplicate.id);
+        assert_eq!(read_store(&root).scheduled_deliveries.len(), 1);
+        assert_eq!(duplicate.chunks, vec!["The condition matched."]);
+        assert!(enqueue_scheduled_delivery(
+            &root,
+            &runtime,
+            "task-one",
+            "execution-two",
+            7,
+            vec!["Wrong account".into()],
+            now_millis() + 60_000,
+        )
+        .unwrap_err()
+        .contains("no longer paired"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disconnect_blocks_queued_scheduled_alerts() {
+        let root = std::env::temp_dir().join(format!(
+            "raynard-telegram-scheduled-disconnect-test-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let runtime = TelegramRuntimeState::default();
+        let store = TelegramStore {
+            enabled: true,
+            owner: Some(TelegramOwner {
+                user_id: 42,
+                username: None,
+                name: "Ada".into(),
+                approved_at: 1,
+            }),
+            scheduled_deliveries: vec![TelegramScheduledDelivery {
+                id: "scheduled-execution-one".into(),
+                task_id: "task-one".into(),
+                execution_id: "execution-one".into(),
+                recipient_user_id: 42,
+                chunks: vec!["Alert".into()],
+                delivered_chunks: 0,
+                status: "queued".into(),
+                created_at: now_millis(),
+                expires_at: now_millis() + 60_000,
+                last_error: None,
+            }],
+            ..TelegramStore::default()
+        };
+        write_store(&root, &store).unwrap();
+
+        disconnect(&root, &runtime).unwrap();
+
+        let disconnected = read_store(&root);
+        assert_eq!(disconnected.scheduled_deliveries[0].status, "blocked");
+        assert!(disconnected.scheduled_deliveries[0]
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disconnected"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expired_scheduled_alerts_fail_closed() {
+        let mut store = TelegramStore {
+            scheduled_deliveries: vec![TelegramScheduledDelivery {
+                id: "scheduled-expired".into(),
+                task_id: "task-one".into(),
+                execution_id: "execution-one".into(),
+                recipient_user_id: 42,
+                chunks: vec!["Stale alert".into()],
+                delivered_chunks: 0,
+                status: "queued".into(),
+                created_at: 100,
+                expires_at: 199,
+                last_error: None,
+            }],
+            ..TelegramStore::default()
+        };
+
+        prune_store(&mut store, 200);
+
+        assert_eq!(store.scheduled_deliveries[0].status, "blocked");
+        assert!(store.scheduled_deliveries[0]
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("expired"));
     }
 }

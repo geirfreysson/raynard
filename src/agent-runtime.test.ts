@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyStreamPayload, type StreamPayload } from './agent-runtime';
+import { applyStreamPayload, decodeScheduledCheckDecision, type StreamPayload } from './agent-runtime';
 
 describe('applyStreamPayload', () => {
   it('accumulates answer deltas and provider metadata for the active stream', () => {
@@ -467,5 +467,26 @@ describe('applyStreamPayload', () => {
     );
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe('decodeScheduledCheckDecision', () => {
+  it('accepts only a complete fail-closed scheduled decision', () => {
+    expect(
+      decodeScheduledCheckDecision({
+        type: 'scheduled-check-decision',
+        outcome: 'matched',
+        message: 'Apple is below USD 150.',
+        reason: 'The current quote is USD 149.'
+      })
+    ).toMatchObject({ outcome: 'matched', message: 'Apple is below USD 150.' });
+    expect(
+      decodeScheduledCheckDecision({
+        type: 'scheduled-check-decision',
+        outcome: 'maybe',
+        message: 'Perhaps.',
+        reason: 'Unknown.'
+      })
+    ).toBeUndefined();
   });
 });

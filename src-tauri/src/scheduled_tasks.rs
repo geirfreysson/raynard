@@ -24,6 +24,23 @@ pub struct TaskSchedule {
     pub month_of_year: Option<u32>,
 }
 
+fn default_delivery_channel() -> String {
+    "desktop".to_string()
+}
+
+fn default_delivery_policy() -> String {
+    "always".to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramRecipient {
+    pub user_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledTask {
@@ -33,6 +50,14 @@ pub struct ScheduledTask {
     pub destination_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_chat_id: Option<String>,
+    #[serde(default = "default_delivery_channel")]
+    pub delivery_channel: String,
+    #[serde(default = "default_delivery_policy")]
+    pub delivery_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_recipient: Option<TelegramRecipient>,
     pub schedule: TaskSchedule,
     pub enabled: bool,
     pub created_at: String,
@@ -46,6 +71,14 @@ pub struct ScheduledTask {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_condition_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -56,6 +89,14 @@ pub struct ScheduledTaskDraft {
     pub destination_type: String,
     #[serde(default)]
     pub destination_chat_id: Option<String>,
+    #[serde(default = "default_delivery_channel")]
+    pub delivery_channel: String,
+    #[serde(default = "default_delivery_policy")]
+    pub delivery_policy: String,
+    #[serde(default)]
+    pub delivery_condition: Option<String>,
+    #[serde(default)]
+    pub telegram_recipient: Option<TelegramRecipient>,
     pub schedule: TaskSchedule,
 }
 
@@ -66,6 +107,16 @@ pub struct ScheduledExecution {
     pub manual: bool,
     pub scheduled_for: String,
     pub task: ScheduledTask,
+}
+
+pub struct ScheduledTaskCompletion {
+    pub status: String,
+    pub error: Option<String>,
+    pub destination_chat_id: Option<String>,
+    pub condition_result: Option<String>,
+    pub delivery_status: Option<String>,
+    pub delivery_error: Option<String>,
+    pub delivery_id: Option<String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -230,6 +281,29 @@ fn validate_draft(draft: &ScheduledTaskDraft) -> Result<(), String> {
     {
         return Err("An existing-chat destination requires a chat ID.".to_string());
     }
+    if !matches!(draft.delivery_channel.as_str(), "desktop" | "telegram") {
+        return Err("Notification channel must be desktop or telegram.".to_string());
+    }
+    if !matches!(
+        draft.delivery_policy.as_str(),
+        "always" | "onMatch" | "onTransition"
+    ) {
+        return Err("Notification timing is invalid.".to_string());
+    }
+    let condition = draft
+        .delivery_condition
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    if draft.delivery_policy != "always" && condition.is_empty() {
+        return Err("Conditional notifications require a condition.".to_string());
+    }
+    if condition.chars().count() > 1_000 {
+        return Err("Notification condition must be 1,000 characters or fewer.".to_string());
+    }
+    if draft.delivery_channel == "telegram" && draft.telegram_recipient.is_none() {
+        return Err("Telegram notifications require a paired recipient.".to_string());
+    }
     validate_schedule(&draft.schedule)
 }
 
@@ -264,6 +338,26 @@ pub fn list(path: &Path) -> Result<Vec<ScheduledTask>, String> {
     Ok(tasks)
 }
 
+pub fn get(path: &Path, id: &str) -> Result<ScheduledTask, String> {
+    read_store(path)?
+        .tasks
+        .into_iter()
+        .find(|task| task.id == id)
+        .ok_or_else(|| "Scheduled task not found.".to_string())
+}
+
+pub fn should_deliver(task: &ScheduledTask, condition_result: Option<&str>) -> bool {
+    match task.delivery_policy.as_str() {
+        "always" => true,
+        "onMatch" => condition_result == Some("matched"),
+        "onTransition" => {
+            condition_result == Some("matched")
+                && task.last_condition_result.as_deref() != Some("matched")
+        }
+        _ => false,
+    }
+}
+
 pub fn create(path: &Path, draft: ScheduledTaskDraft) -> Result<ScheduledTask, String> {
     validate_draft(&draft)?;
     let now = Utc::now();
@@ -276,6 +370,13 @@ pub fn create(path: &Path, draft: ScheduledTaskDraft) -> Result<ScheduledTask, S
         destination_chat_id: draft
             .destination_chat_id
             .filter(|value| !value.trim().is_empty()),
+        delivery_channel: draft.delivery_channel,
+        delivery_policy: draft.delivery_policy,
+        delivery_condition: draft
+            .delivery_condition
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        telegram_recipient: draft.telegram_recipient,
         schedule: draft.schedule.clone(),
         enabled: true,
         created_at: timestamp.clone(),
@@ -286,6 +387,10 @@ pub fn create(path: &Path, draft: ScheduledTaskDraft) -> Result<ScheduledTask, S
         last_status: None,
         last_error: None,
         active_execution_id: None,
+        last_condition_result: None,
+        last_delivery_status: None,
+        last_delivery_error: None,
+        last_delivery_id: None,
     };
     let mut store = read_store(path)?;
     store.tasks.push(task.clone());
@@ -310,6 +415,23 @@ pub fn update(path: &Path, id: &str, draft: ScheduledTaskDraft) -> Result<Schedu
     task.destination_chat_id = draft
         .destination_chat_id
         .filter(|value| !value.trim().is_empty());
+    let delivery_changed = task.delivery_channel != draft.delivery_channel
+        || task.delivery_policy != draft.delivery_policy
+        || task.delivery_condition != draft.delivery_condition
+        || task.telegram_recipient != draft.telegram_recipient;
+    task.delivery_channel = draft.delivery_channel;
+    task.delivery_policy = draft.delivery_policy;
+    task.delivery_condition = draft
+        .delivery_condition
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    task.telegram_recipient = draft.telegram_recipient;
+    if delivery_changed {
+        task.last_condition_result = None;
+        task.last_delivery_status = None;
+        task.last_delivery_error = None;
+        task.last_delivery_id = None;
+    }
     task.schedule = draft.schedule;
     task.updated_at = now_iso();
     task.next_run_at = next_occurrence(&task.schedule, Utc::now())?
@@ -418,9 +540,7 @@ pub fn complete(
     path: &Path,
     id: &str,
     execution_id: &str,
-    status: &str,
-    error: Option<String>,
-    destination_chat_id: Option<String>,
+    completion: ScheduledTaskCompletion,
 ) -> Result<ScheduledTask, String> {
     let mut store = read_store(path)?;
     let task = store
@@ -432,19 +552,36 @@ pub fn complete(
         return Err("That scheduled execution is no longer active.".to_string());
     }
     if task.destination_type == "newChat" && task.destination_chat_id.is_none() {
-        task.destination_chat_id = destination_chat_id.filter(|value| !value.trim().is_empty());
+        task.destination_chat_id = completion
+            .destination_chat_id
+            .filter(|value| !value.trim().is_empty());
     }
     task.active_execution_id = None;
     task.last_run_at = Some(now_iso());
     task.last_status = Some(
-        if status == "completed" {
+        if completion.status == "completed" {
             "completed"
         } else {
             "error"
         }
         .to_string(),
     );
-    task.last_error = error.filter(|value| !value.trim().is_empty());
+    task.last_error = completion.error.filter(|value| !value.trim().is_empty());
+    if matches!(
+        completion.condition_result.as_deref(),
+        Some("matched" | "notMatched")
+    ) {
+        task.last_condition_result = completion.condition_result;
+    }
+    task.last_delivery_status = completion
+        .delivery_status
+        .filter(|value| !value.trim().is_empty());
+    task.last_delivery_error = completion
+        .delivery_error
+        .filter(|value| !value.trim().is_empty());
+    task.last_delivery_id = completion
+        .delivery_id
+        .filter(|value| !value.trim().is_empty());
     task.updated_at = now_iso();
     let result = task.clone();
     write_store(path, &store)?;
@@ -534,6 +671,10 @@ mod tests {
             prompt: "Compare Iceland inflation with the OECD.".to_string(),
             destination_type: "newChat".to_string(),
             destination_chat_id: None,
+            delivery_channel: default_delivery_channel(),
+            delivery_policy: default_delivery_policy(),
+            delivery_condition: None,
+            telegram_recipient: None,
             schedule: schedule("daily", "UTC"),
         }
     }
@@ -577,9 +718,15 @@ mod tests {
             &path,
             &task.id,
             &execution.execution_id,
-            "completed",
-            None,
-            Some("chat-task".to_string()),
+            ScheduledTaskCompletion {
+                status: "completed".to_string(),
+                error: None,
+                destination_chat_id: Some("chat-task".to_string()),
+                condition_result: None,
+                delivery_status: Some("sent".to_string()),
+                delivery_error: None,
+                delivery_id: None,
+            },
         )
         .unwrap();
         assert_eq!(completed.destination_chat_id.as_deref(), Some("chat-task"));
@@ -612,6 +759,61 @@ mod tests {
         let recovered = list(&path).unwrap().remove(0);
         assert_eq!(recovered.active_execution_id, None);
         assert_eq!(recovered.last_status.as_deref(), Some("interrupted"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn old_tasks_default_to_desktop_notifications_after_every_run() {
+        let task: ScheduledTask = serde_json::from_value(serde_json::json!({
+            "id": "task-old",
+            "name": "Old task",
+            "prompt": "Check something.",
+            "destinationType": "newChat",
+            "schedule": {
+                "frequency": "daily",
+                "time": "09:00",
+                "timeZone": "UTC"
+            },
+            "enabled": true,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "nextRunAt": "2026-01-02T09:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(task.delivery_channel, "desktop");
+        assert_eq!(task.delivery_policy, "always");
+        assert!(task.telegram_recipient.is_none());
+    }
+
+    #[test]
+    fn conditional_delivery_is_fail_closed_and_transition_aware() {
+        let path = temp_store("conditional");
+        let mut input = draft();
+        input.delivery_policy = "onTransition".to_string();
+        input.delivery_condition = Some("AAPL is below USD 150".to_string());
+        let task = create(&path, input).unwrap();
+
+        assert!(!should_deliver(&task, None));
+        assert!(!should_deliver(&task, Some("indeterminate")));
+        assert!(!should_deliver(&task, Some("notMatched")));
+        assert!(should_deliver(&task, Some("matched")));
+
+        let mut previously_matched = task;
+        previously_matched.last_condition_result = Some("matched".to_string());
+        assert!(!should_deliver(&previously_matched, Some("matched")));
+        previously_matched.last_condition_result = Some("notMatched".to_string());
+        assert!(should_deliver(&previously_matched, Some("matched")));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn telegram_tasks_require_a_bound_recipient() {
+        let path = temp_store("telegram-recipient");
+        let mut input = draft();
+        input.delivery_channel = "telegram".to_string();
+        let error = create(&path, input).unwrap_err();
+        assert!(error.contains("paired recipient"));
         let _ = fs::remove_file(path);
     }
 }

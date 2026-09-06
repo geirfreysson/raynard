@@ -17,10 +17,11 @@ generated API plugins.
 - `src/build-request-flow.ts`: Explore-to-Build mode transition rules.
 - `src/chat-run-registry.ts`: per-chat ownership for concurrent main-agent and builder runs.
 - `src-tauri/src/scheduled_tasks.rs`: persisted recurring schedules, due-task
-  claiming, calendar/time-zone calculation, completion, and interrupted-run
-  recovery.
+  claiming, calendar/time-zone calculation, conditional notification state,
+  completion, and interrupted-run recovery.
 - `src-tauri/src/telegram.rs`: Bot API polling, owner pairing, durable inbound
-  delivery, and outbound reply retries for the Telegram channel.
+  delivery, interactive reply retries, and durable scheduled-alert delivery
+  for the Telegram channel.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
 - `src/telegram-channel.ts`: Telegram state wording and plain-text reply
@@ -118,21 +119,24 @@ generated API plugins.
   quarterly, or yearly Explore task in the selected time zone. A task targets
   either a dedicated task chat or an existing chat and can be edited, paused,
   resumed, run immediately, or deleted from its detail screen. Run now does not
-  move the recurring schedule. Every execution, including Run now, sends an
-  OS-native completion or error notification on macOS, Windows, and Linux.
-  Notification text names the task but keeps answer and error details out of
-  the lock-screen-visible body.
+  move the recurring schedule. History and notification delivery are separate:
+  every execution is saved to its history chat, while its notification goes to
+  desktop or a fixed paired Telegram recipient. Delivery can happen after every
+  run, every matching conditional run, or only when a condition transitions
+  from false to true. Desktop notification text names the task but keeps answer
+  and error details out of the lock-screen-visible body.
 - A task detail screen leads with the task's status pill, plain-English
   schedule sentence, and time zone, followed by Next run / Last run /
-  Destination tiles. Run now is the only header button; pause, resume, open
-  chat, and delete live in the `⋯` menu, which reuses the plugin detail menu so
-  Escape and outside clicks already close it. The editor below is grouped into
-  Task, Schedule, and Destination, picks a frequency with a segmented control,
-  shows only the calendar fields that frequency validates, and restates the
-  result as a sentence. Its save bar stays disabled until something actually
-  changes, and then offers Discard next to it. `src/scheduled-task-view.ts`
-  holds the pure wording/status helpers behind all of that. The in-chat
-  creation confirmation renders the same editor without the dirty-state bar.
+  History / Notification tiles. Run now is the only header button; pause,
+  resume, open chat, and delete live in the `⋯` menu, which reuses the plugin
+  detail menu so Escape and outside clicks already close it. The editor below
+  is grouped into Task, Schedule, Notification, and History, picks a frequency
+  with a segmented control, shows only the calendar fields that frequency
+  validates, and restates the result as a sentence. Its save bar stays disabled
+  until something actually changes, and then offers Discard next to it.
+  `src/scheduled-task-view.ts` holds the pure wording/status helpers behind all
+  of that. The in-chat creation confirmation renders the same editor without
+  the dirty-state bar.
 - The composer stays live while an Explore turn is working. Enter queues what
   you type as a **steering** message the agent picks up at its next tool-round
   boundary; Alt+Enter queues a **follow-up** that waits until the agent would
@@ -265,8 +269,10 @@ background capability granted to generated plugins.
 
 1. When the user asks for recurring work, the main agent's first and only tool
    call is `request_scheduled_task`. The tool returns a structured draft with a
-   name, execution-only prompt, destination, recurrence, local time, and IANA
-   time zone. It does not perform the requested research in that turn.
+   name, execution-only prompt, history destination, notification channel and
+   policy, optional standalone condition, recurrence, local time, and IANA time
+   zone. It does not perform the requested research in that turn. Scheduling
+   and delivery wording stays out of the execution prompt.
    Only `name` and `prompt` matter, and both are optional in the schema: the
    tool repairs what it can (`weekday`, `every 3 months`, `7am`, `monday`,
    `new_chat`) and defaults the rest, because the very next thing the user sees
@@ -296,10 +302,13 @@ background capability granted to generated plugins.
    the renderer through `subscribe_scheduled_tasks`. The renderer lists and
    claims due work, queues executions one at a time, and waits when a target
    chat already owns another run.
-4. A scheduled execution is an ordinary main Pi agent run with scheduling
-   disabled, so it cannot recursively create another task. It uses Explore,
-   the currently selected provider/model, installed plugin tools, and the
-   normal result-card/source persistence path.
+4. A scheduled execution is an ordinary main Pi agent run on a restricted
+   scheduled surface. It uses Explore, the currently selected provider/model,
+   installed plugin tools, and the normal result-card/source persistence path,
+   but cannot recursively schedule, build, change memory, or request
+   credentials. A conditional run must terminate through
+   `finish_scheduled_check` with `matched`, `notMatched`, or `indeterminate`;
+   missing or ambiguous evidence fails closed.
 5. Dedicated tasks create one chat on their first run and reuse it thereafter.
    Existing-chat tasks append to the selected chat. Both the user and assistant
    records carry the task name and execution ID so the transcript can label
@@ -307,10 +316,19 @@ background capability granted to generated plugins.
 6. Scheduled work cannot silently enter Build. A missing capability is recorded
    as an explanation to open the chat and request the build interactively;
    credential requests likewise remain user-owned.
-7. Completing a run records its status, error, last-run time, and destination.
-   A manual **Run now** does not advance the recurring occurrence. Startup
-   clears abandoned execution IDs and marks those runs interrupted.
-8. The scheduler runs only while the Raynard process is alive. A task left due
+7. Completing a run records its status, error, last-run time, destination,
+   condition result, and delivery result. `onMatch` sends each affirmative run;
+   `onTransition` sends only when the previous determined result was not a
+   match, and rearms after `notMatched`. Every run remains in history, but a
+   non-match neither marks the chat unread nor emits a notification.
+8. Telegram tasks store the numeric paired recipient in the task. Matching
+   output is put into a durable per-execution queue before Bot API delivery;
+   retries resume from the first unsent 4,000-character chunk and expire at the
+   earlier of the next run or 24 hours. Bot replacement, disconnect, or owner
+   removal blocks queued delivery instead of redirecting it.
+9. A manual **Run now** does not advance the recurring occurrence. Startup
+   clears abandoned execution IDs and marks those runs interrupted. The
+   scheduler runs only while the Raynard process is alive. A task left due
    while the app is closed is claimed once after the next configured launch;
    missed occurrences are not replayed individually.
 

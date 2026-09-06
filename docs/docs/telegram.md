@@ -109,7 +109,7 @@ scheduled-task controls—are desktop commands and do not run through Telegram.
 | Create or edit extensions | Asks you to open the desktop chat | Review, confirm, build, and test extensions |
 | Install catalog extensions | Desktop handoff only | Full catalog and installation flow |
 | Enter API credentials | Desktop handoff only | Secure credential prompts and Settings |
-| Create or manage scheduled tasks | Desktop handoff only | Full task creation and management |
+| Scheduled tasks | Receives alerts selected for this paired account | Create, edit, run, and inspect tasks and every run's history |
 | Memory changes | Desktop handoff only | Review and confirm memory changes |
 | Attachments, voice, groups | Not supported; private text DMs only | Desktop text and host-rendered results |
 | Steering and Stop | Later messages wait; there is no Telegram Stop command | Steer Explore turns or select **Stop** |
