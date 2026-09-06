@@ -4309,6 +4309,7 @@ function taskDraftFromForm(form: HTMLFormElement, fallback: ScheduledTaskRequest
 
 const TASK_FREQUENCIES: Array<{ value: ScheduledTaskRequest['schedule']['frequency']; label: string }> = [
   { value: 'daily', label: 'Daily' },
+  { value: 'weekdays', label: 'Weekdays' },
   { value: 'weekly', label: 'Weekly' },
   { value: 'monthly', label: 'Monthly' },
   { value: 'quarterly', label: 'Quarterly' },

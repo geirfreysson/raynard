@@ -4,9 +4,9 @@ sidebar_position: 4
 
 # Scheduled tasks
 
-Raynard can repeat an Explore request on a daily, weekly, monthly, quarterly,
-or yearly schedule. Each run is saved as an ordinary conversation, so you can
-inspect the answer, its result cards, and its sources later.
+Raynard can repeat an Explore request on a daily, weekdays, weekly, monthly,
+quarterly, or yearly schedule. Each run is saved as an ordinary conversation,
+so you can inspect the answer, its result cards, and its sources later.
 
 ## Create a scheduled task
 
@@ -31,13 +31,13 @@ It does not run the research immediately. Before saving, review:
   or only when a condition matches.
 - **History** — a dedicated task chat or one of your existing chats. Every run
   is saved here, including checks that do not send a notification.
-- **Repeats** — daily, weekly, monthly, quarterly, or yearly.
+- **Repeats** — daily, weekdays, weekly, monthly, quarterly, or yearly.
 - **Time and calendar fields** — the local time, weekday, day, or anchor month
   required by the selected frequency.
 
-If you request an unsupported cadence, such as hourly or Monday-to-Friday,
-Raynard chooses the closest supported frequency and explains the substitution.
-Review the form before saving.
+If you request an unsupported cadence, such as hourly, Raynard chooses the
+closest supported frequency and explains the substitution. Review the form
+before saving.
 
 The confirmation displays the time zone Raynard will use. Recurring times stay
 at the selected wall-clock time through daylight-saving changes. A monthly run

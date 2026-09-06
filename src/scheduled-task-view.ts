@@ -68,6 +68,8 @@ export function scheduleSentence(schedule: TaskScheduleShape) {
   switch (schedule.frequency) {
     case 'daily':
       return `Every day${at}`;
+    case 'weekdays':
+      return `Every weekday${at}`;
     case 'weekly':
       return `Every ${WEEKDAYS[(schedule.dayOfWeek || 1) - 1] ?? 'Monday'}${at}`;
     case 'monthly':

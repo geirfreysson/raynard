@@ -31,9 +31,10 @@ queues a correction the agent picks up at its next tool-call boundary;
 `Alt+Enter` queues a follow-up for when it would otherwise stop. Queued text
 sits above the composer until the agent actually takes it.
 
-**Work on a schedule.** Recurring Explore tasks run daily, weekly, monthly,
-quarterly, or yearly in your time zone, writing results into a dedicated chat or
-an existing one. Scheduled runs can never enter Build on their own.
+**Work on a schedule.** Recurring Explore tasks run daily, weekdays, weekly,
+monthly, quarterly, or yearly in your time zone, writing results into a
+dedicated chat or an existing one. Scheduled runs can never enter Build on
+their own.
 
 **Shareable answers, with no server.** Sharing an answer builds a link that
 carries the whole payload in the URL fragment — which browsers never transmit.
