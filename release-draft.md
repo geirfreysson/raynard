@@ -1,50 +1,26 @@
-# Raynard v0.13.0
+# Raynard v0.14.0
 
-This release adds private Telegram conversations and conditional scheduled
-alerts, gives chats durable memory and bookmark references, expands equity
-research, and makes result charts more useful to explore.
+This release fixes a startup delay on the Telegram channel, formats Telegram
+replies more safely, and widens how much price history the Financial Modeling
+Prep extension can pull in one call.
 
-## Telegram conversations and scheduled alerts
+## Faster startup
 
-Connect a BotFather bot in Settings, explicitly pair one private Telegram
-account, and chat with Raynard using the same selected model, installed
-extensions, and locally saved history as the desktop app. Telegram supports
-ordinary text questions plus `/start` and `/new`; configuration, credentials,
-extension development, and other approval flows remain on the desktop.
+The Telegram channel's keychain check and poller resume used to run
+synchronously during app setup, which could delay the window's first paint
+when OS keychain authorization added latency (most noticeably in `tauri dev`,
+where the ad-hoc signing ACL changes on every rebuild). That check now runs on
+a background thread instead, so it can no longer hold up startup.
 
-Scheduled tasks now separate their always-saved Raynard history from their
-notification channel. A task can notify the desktop or its fixed paired
-Telegram recipient after every run, on every matching condition, or once when
-a condition becomes true and then rearm after a non-match. Conditional checks
-must finish with an explicit evidence-backed match result and fail closed when
-the answer is unavailable or ambiguous. Telegram alerts are durably queued by
-execution, resume at the first unsent chunk after temporary failures, and
-expire before stale results can be delivered.
+## Safer Telegram replies
 
-## Bookmark references and agent memory
+Telegram replies now use Telegram-safe HTML formatting with a persisted parse
+mode, so both live and durably queued scheduled deliveries render consistently
+and replies saved before this change keep their original plain-text delivery
+behavior.
 
-Type `@` to reference saved bookmarks as well as installed extensions. A
-bookmark mention supplies its complete question and answer to the model while
-the chat bubble keeps a compact, clickable reading marker. Bookmark rows can be
-renamed inline, show progress while Raynard generates a title, and recover from
-title-generation attempts that spend their first token budget reasoning.
+## Wider Financial Modeling Prep history
 
-Raynard can also propose remembering, correcting, or forgetting a durable
-fact. Every change requires in-chat confirmation, memories can be scoped to one
-extension, and `/memory` provides a read-only overview. Only bounded, relevant
-global and extension memories are added to a turn.
-
-## Richer charts
-
-Bar charts can switch between grouped, stacked, and line views where the data
-permits it. Charts appear at the point in an answer where the agent presented
-them instead of always collecting at the end, and the renderer improves legend
-spacing, dual-axis handling, series visibility, and highlighted categories.
-
-## Expanded Financial Modeling Prep research
-
-The bundled Financial Modeling Prep extension adds historical price charts,
-current TTM metrics, long-range valuation history, and a company screener.
-Financial statements and revenue segments now accept inclusive fiscal-year
-ranges and larger bounded histories, making requests such as an Apple analysis
-from 2011 onward possible without manually paging periods.
+`fmp_price_history`'s range option topped out at one year even though the
+underlying FMP endpoint already returns its full default history. It now
+offers 2Y/5Y/10Y/MAX buckets as well.
