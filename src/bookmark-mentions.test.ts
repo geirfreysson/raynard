@@ -87,6 +87,40 @@ describe('expandBookmarkMentions', () => {
     const expanded = expandBookmarkMentions(text, index);
     expect(expanded.startsWith(text)).toBe(true);
   });
+
+  // Picking a bookmark from the @ menu replaces the whole `@query`, `@`
+  // included, with the bare slug — so that is what a submitted message carries.
+  it('expands the bare slug the mention menu inserts', () => {
+    const index = buildBookmarkMentionIndex([appleBookmark]);
+    const slug = bookmarkMentionSlug(appleBookmark);
+    const text = `if you look at ${slug} and the price now, where am i`;
+    const expanded = expandBookmarkMentions(text, index);
+    expect(expanded.startsWith(text)).toBe(true);
+    expect(expanded).toContain('[Referenced bookmark: Apple FY2024 margins]');
+  });
+
+  it('expands a bare slug followed by sentence punctuation', () => {
+    const index = buildBookmarkMentionIndex([appleBookmark]);
+    const slug = bookmarkMentionSlug(appleBookmark);
+    for (const text of [`check ${slug}.`, `is ${slug}? still right`, `see ${slug}, then`]) {
+      expect(expandBookmarkMentions(text, index)).toContain('[Referenced bookmark:');
+    }
+  });
+
+  it('expands a bookmark referenced both bare and with @ only once', () => {
+    const index = buildBookmarkMentionIndex([appleBookmark]);
+    const slug = bookmarkMentionSlug(appleBookmark);
+    const expanded = expandBookmarkMentions(`${slug} vs @${slug}`, index);
+    expect((expanded.match(/\[Referenced bookmark:/g) || []).length).toBe(1);
+  });
+
+  it('does not expand a token that merely contains or prefixes a slug', () => {
+    const index = buildBookmarkMentionIndex([appleBookmark]);
+    const slug = bookmarkMentionSlug(appleBookmark);
+    for (const text of [`xx-${slug}`, `${slug}x`, slug.slice(0, -1), `path/${slug}`]) {
+      expect(expandBookmarkMentions(text, index)).toBe(text);
+    }
+  });
 });
 
 describe('parseBookmarkReferenceBlocks', () => {

@@ -1,6 +1,7 @@
 // "@" reference support for bookmarks: build mention candidates from saved
-// bookmarks, and expand a bookmark mention token into the bookmark's full
-// saved content so a later prompt actually carries what it references.
+// bookmarks, and expand a bookmark slug — with or without its `@` — into the
+// bookmark's full saved content so a later prompt actually carries what it
+// references.
 
 import { bookmarkLabel, stableTextHash } from './bookmarks';
 import { isReferenceTokenChar, type MentionItem } from './mention';
@@ -55,31 +56,35 @@ export function buildBookmarkMentionIndex(
   return index;
 }
 
-/** Every `@token` span in `text`, using the same rules as the mention menu's own detector. */
-function findAtTokens(text: string): Array<{ token: string; start: number; end: number }> {
-  const tokens: Array<{ token: string; start: number; end: number }> = [];
+/**
+ * Every candidate slug in `text`: each maximal run of reference-token
+ * characters, with an optional leading `@` dropped and trailing `.`/`/`
+ * trimmed so a slug ending a sentence still matches. The bare form matters
+ * because picking a bookmark from the @ menu replaces the `@` too.
+ */
+function findReferenceTokens(text: string): string[] {
+  const tokens: string[] = [];
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== '@') continue;
-    const previousChar = index > 0 ? text[index - 1] : '';
-    if (previousChar && isReferenceTokenChar(previousChar)) continue;
+    if (!isReferenceTokenChar(text[index])) continue;
     let end = index + 1;
     while (end < text.length && isReferenceTokenChar(text[end])) end += 1;
-    if (end === index + 1) continue; // bare "@" with nothing after
-    tokens.push({ token: text.slice(index + 1, end), start: index, end });
+    const token = text.slice(index, end).replace(/[./]+$/, '');
+    if (token) tokens.push(token);
     index = end - 1;
   }
   return tokens;
 }
 
 /**
- * Appends the full content of every bookmark mentioned in `text` as a
+ * Appends the full content of every bookmark mentioned in `text` (as `@slug`
+ * or the bare slug; the hash suffix keeps a bare match deliberate) as a
  * delimited block, so the saved/model-visible text actually carries what was
  * referenced. Text with no recognized bookmark mention is returned unchanged.
  */
 export function expandBookmarkMentions(text: string, index: Map<string, MentionableBookmark>): string {
   const seen = new Set<string>();
   const matched: MentionableBookmark[] = [];
-  for (const { token } of findAtTokens(text)) {
+  for (const token of findReferenceTokens(text)) {
     const bookmark = index.get(token);
     if (bookmark && !seen.has(bookmark.id)) {
       seen.add(bookmark.id);
