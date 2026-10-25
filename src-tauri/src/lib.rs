@@ -1,4 +1,5 @@
 mod app_updates;
+mod bookmark_mentions;
 mod extension_contribution;
 mod scheduled_tasks;
 mod telegram;
@@ -635,19 +636,13 @@ async fn list_bookmarks(
     .map_err(|error| format!("Could not join bookmark listing task: {error}"))?
 }
 
-fn all_bookmarks(cache: &BookmarkCache) -> Vec<StoredBookmark> {
-    cache.ordered.values().cloned().collect()
-}
-
-/// The whole bookmark collection, unpaginated, for the @-mention menu: it
-/// needs every bookmark available synchronously as the user types, unlike
-/// `list_bookmarks`'s paginated sidebar listing.
-#[tauri::command]
-async fn list_bookmark_mentions(
+/// Runs `read` against the bookmark cache, loading it from disk first if this
+/// is the first bookmark read of the session.
+async fn with_bookmark_cache<T: Send + 'static>(
     app: tauri::AppHandle,
-    state: tauri::State<'_, BookmarkStoreState>,
-) -> Result<Vec<StoredBookmark>, String> {
-    let store = state.inner().clone();
+    store: BookmarkStoreState,
+    read: impl FnOnce(&BookmarkCache) -> T + Send + 'static,
+) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = bookmarks_dir(&app)?;
         let mut guard = store
@@ -657,11 +652,40 @@ async fn list_bookmark_mentions(
         if guard.is_none() {
             *guard = Some(load_bookmark_cache_in(&root)?);
         }
-        let cache = guard.as_ref().expect("bookmark cache initialized");
-        Ok(all_bookmarks(cache))
+        Ok(read(guard.as_ref().expect("bookmark cache initialized")))
     })
     .await
-    .map_err(|error| format!("Could not join bookmark mention listing task: {error}"))?
+    .map_err(|error| format!("Could not join bookmark cache task: {error}"))?
+}
+
+/// The `@` menu's bookmark candidates for what the user has typed so far. The
+/// menu asks on each keystroke instead of holding every bookmark itself.
+#[tauri::command]
+async fn search_bookmark_mentions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<bookmark_mentions::BookmarkMentionCandidate>, String> {
+    let limit = limit.unwrap_or(8).clamp(1, 50);
+    with_bookmark_cache(app, state.inner().clone(), move |cache| {
+        bookmark_mentions::search_bookmark_mentions(cache.ordered.values(), &query, limit)
+    })
+    .await
+}
+
+/// The bookmarks a message about to be sent refers to, by `@slug` or bare slug,
+/// so the renderer can attach their saved content.
+#[tauri::command]
+async fn resolve_bookmark_mentions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BookmarkStoreState>,
+    text: String,
+) -> Result<Vec<StoredBookmark>, String> {
+    with_bookmark_cache(app, state.inner().clone(), move |cache| {
+        bookmark_mentions::resolve_bookmark_mentions(cache.ordered.values(), &text)
+    })
+    .await
 }
 
 fn scheduled_tasks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -7555,7 +7579,7 @@ fn resolve_model_config_for_role(
 #[cfg(test)]
 mod tests {
     use super::{
-        account_id_from_access_token, all_bookmarks, bookmark_page, bookmark_titles_path,
+        account_id_from_access_token, bookmark_mentions, bookmark_page, bookmark_titles_path,
         build_plugin_tools_stub, canonical_provider_id, clear_plugin_api_cache,
         ensure_shared_plugin_sdk, external_url_target, externalize_large_card_data_in,
         externalize_result_data_in, format_quota_window, generated_plugin_source_mtime_millis,
@@ -8117,7 +8141,7 @@ mod tests {
     }
 
     #[test]
-    fn bookmark_mention_list_returns_full_cache_unpaginated() {
+    fn bookmark_mentions_search_the_full_cache_unpaginated() {
         let mut cache = BookmarkCache::default();
         for index in 0..250 {
             upsert_bookmark_cache(
@@ -8136,11 +8160,24 @@ mod tests {
             );
         }
 
-        // Unlike `bookmark_page`, which clamps `limit` to 100, the @-mention
-        // listing must return every bookmark so client-side filtering has the
-        // full collection to search as the user types.
-        let all = all_bookmarks(&cache);
-        assert_eq!(all.len(), 250);
+        // Unlike `bookmark_page`, which clamps `limit` to 100, mention search
+        // and resolution see every bookmark — including the oldest, which no
+        // sidebar page would reach.
+        let oldest = cache
+            .ordered
+            .values()
+            .find(|bookmark| bookmark.message_key == "key-0")
+            .expect("oldest bookmark cached");
+        let slug = bookmark_mentions::bookmark_mention_slug(oldest);
+        let candidates =
+            bookmark_mentions::search_bookmark_mentions(cache.ordered.values(), "title 0", 8);
+        assert_eq!(candidates[0].slug, slug);
+        let resolved = bookmark_mentions::resolve_bookmark_mentions(
+            cache.ordered.values(),
+            &format!("what about {slug}?"),
+        );
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].message_key, "key-0");
     }
 
     fn draft_memory(content: &str, scope: &str) -> StoredMemory {
@@ -9580,7 +9617,8 @@ pub fn run() {
             update_catalog_extension,
             list_catalog_extensions,
             list_bookmarks,
-            list_bookmark_mentions,
+            search_bookmark_mentions,
+            resolve_bookmark_mentions,
             list_chat_bookmarks,
             list_generated_plugins,
             list_chat_history,

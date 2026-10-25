@@ -1,71 +1,55 @@
 import { describe, expect, it } from 'vitest';
 import {
-  bookmarkMentionSlug,
-  buildBookmarkMentionIndex,
   buildBookmarkMentionItems,
   expandBookmarkMentions,
   parseBookmarkReferenceBlocks,
-  type MentionableBookmark
+  type ReferencedBookmark
 } from './bookmark-mentions';
 
-const appleBookmark: MentionableBookmark = {
+// Slug generation and matching live in Rust (`src-tauri/src/bookmark_mentions.rs`)
+// and are tested there; these cover the renderer's half.
+
+const appleBookmark: ReferencedBookmark = {
   id: 'apple-1',
   title: 'Apple FY2024 margins',
   prompt: 'What are Apple FY2024 margins?',
-  answer: 'Gross margin was 46.2%.',
-  chatName: 'Q3 research'
+  answer: 'Gross margin was 46.2%.'
 };
 
-const secondAppleBookmark: MentionableBookmark = {
+const secondAppleBookmark: ReferencedBookmark = {
   id: 'apple-2',
   title: 'Apple FY2024 margins',
   prompt: 'What are Apple FY2024 margins, again?',
   answer: 'Still 46.2%.'
 };
 
-describe('bookmarkMentionSlug', () => {
-  it('is unique across two bookmarks that share a title', () => {
-    const first = bookmarkMentionSlug(appleBookmark);
-    const second = bookmarkMentionSlug(secondAppleBookmark);
-    expect(first).not.toBe(second);
-    expect(first.startsWith('apple-fy2024-margins-')).toBe(true);
-    expect(second.startsWith('apple-fy2024-margins-')).toBe(true);
-  });
-
-  it('is stable for the same bookmark', () => {
-    expect(bookmarkMentionSlug(appleBookmark)).toBe(bookmarkMentionSlug({ ...appleBookmark }));
-  });
-});
-
 describe('buildBookmarkMentionItems', () => {
   it('produces bookmark-kind items with slug insertText and title label', () => {
-    const items = buildBookmarkMentionItems([appleBookmark]);
+    const items = buildBookmarkMentionItems([
+      { slug: 'apple-fy2024-margins-176azl', label: 'Apple FY2024 margins', chatName: 'Q3 research' }
+    ]);
     expect(items).toHaveLength(1);
     expect(items[0].kind).toBe('bookmark');
     expect(items[0].label).toBe('Apple FY2024 margins');
-    expect(items[0].insertText).toBe(bookmarkMentionSlug(appleBookmark));
+    expect(items[0].insertText).toBe('apple-fy2024-margins-176azl');
+    expect(items[0].match).toBe('apple-fy2024-margins-176azl apple fy2024 margins');
     expect(items[0].description).toContain('Q3 research');
+  });
+
+  it('describes a candidate without a chat name as a plain bookmark', () => {
+    const items = buildBookmarkMentionItems([{ slug: 'x-abc123', label: 'X', chatName: '' }]);
+    expect(items[0].description).toBe('bookmark');
   });
 });
 
 describe('expandBookmarkMentions', () => {
-  it('leaves text with no mention unchanged', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const text = 'just a plain message';
-    expect(expandBookmarkMentions(text, index)).toBe(text);
+  it('leaves text unchanged when nothing was referenced', () => {
+    expect(expandBookmarkMentions('just a plain message', [])).toBe('just a plain message');
   });
 
-  it('leaves an unmatched @token untouched and does not throw', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const text = 'look at @not-a-real-bookmark please';
-    expect(expandBookmarkMentions(text, index)).toBe(text);
-  });
-
-  it('appends the full bookmark content for a single mention', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    const text = `look at @${slug} and tell me whether it is still true`;
-    const expanded = expandBookmarkMentions(text, index);
+  it('appends the full bookmark content after the untouched message', () => {
+    const text = 'if you look at apple-fy2024-margins-176azl, is it still true?';
+    const expanded = expandBookmarkMentions(text, [appleBookmark]);
     expect(expanded.startsWith(text)).toBe(true);
     expect(expanded).toContain('[Referenced bookmark: Apple FY2024 margins]');
     expect(expanded).toContain('Q: What are Apple FY2024 margins?');
@@ -73,53 +57,14 @@ describe('expandBookmarkMentions', () => {
     expect(expanded).toContain('[End referenced bookmark]');
   });
 
-  it('appends one block per distinct mention when multiple bookmarks are referenced', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark, secondAppleBookmark]);
-    const text = `compare @${bookmarkMentionSlug(appleBookmark)} with @${bookmarkMentionSlug(secondAppleBookmark)}`;
-    const expanded = expandBookmarkMentions(text, index);
+  it('labels an untitled bookmark by its prompt', () => {
+    const expanded = expandBookmarkMentions('see', [{ ...appleBookmark, title: '' }]);
+    expect(expanded).toContain('[Referenced bookmark: What are Apple FY2024 margins?]');
+  });
+
+  it('appends one block per distinct bookmark', () => {
+    const expanded = expandBookmarkMentions('compare', [appleBookmark, secondAppleBookmark, appleBookmark]);
     expect((expanded.match(/\[Referenced bookmark:/g) || []).length).toBe(2);
-  });
-
-  it('leaves the sentence intact and appends the block after it', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    const text = `@${slug} is that still true?`;
-    const expanded = expandBookmarkMentions(text, index);
-    expect(expanded.startsWith(text)).toBe(true);
-  });
-
-  // Picking a bookmark from the @ menu replaces the whole `@query`, `@`
-  // included, with the bare slug — so that is what a submitted message carries.
-  it('expands the bare slug the mention menu inserts', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    const text = `if you look at ${slug} and the price now, where am i`;
-    const expanded = expandBookmarkMentions(text, index);
-    expect(expanded.startsWith(text)).toBe(true);
-    expect(expanded).toContain('[Referenced bookmark: Apple FY2024 margins]');
-  });
-
-  it('expands a bare slug followed by sentence punctuation', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    for (const text of [`check ${slug}.`, `is ${slug}? still right`, `see ${slug}, then`]) {
-      expect(expandBookmarkMentions(text, index)).toContain('[Referenced bookmark:');
-    }
-  });
-
-  it('expands a bookmark referenced both bare and with @ only once', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    const expanded = expandBookmarkMentions(`${slug} vs @${slug}`, index);
-    expect((expanded.match(/\[Referenced bookmark:/g) || []).length).toBe(1);
-  });
-
-  it('does not expand a token that merely contains or prefixes a slug', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    for (const text of [`xx-${slug}`, `${slug}x`, slug.slice(0, -1), `path/${slug}`]) {
-      expect(expandBookmarkMentions(text, index)).toBe(text);
-    }
   });
 });
 
@@ -129,9 +74,7 @@ describe('parseBookmarkReferenceBlocks', () => {
   });
 
   it('extracts title, prompt, and answer for a single expanded mention', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark]);
-    const slug = bookmarkMentionSlug(appleBookmark);
-    const expanded = expandBookmarkMentions(`look at @${slug}`, index);
+    const expanded = expandBookmarkMentions('look at apple-fy2024-margins-176azl', [appleBookmark]);
     const blocks = parseBookmarkReferenceBlocks(expanded);
     expect(blocks).toHaveLength(1);
     expect(blocks[0].title).toBe('Apple FY2024 margins');
@@ -141,9 +84,9 @@ describe('parseBookmarkReferenceBlocks', () => {
   });
 
   it('extracts one block per mention for multiple bookmarks', () => {
-    const index = buildBookmarkMentionIndex([appleBookmark, secondAppleBookmark]);
-    const text = `compare @${bookmarkMentionSlug(appleBookmark)} with @${bookmarkMentionSlug(secondAppleBookmark)}`;
-    const blocks = parseBookmarkReferenceBlocks(expandBookmarkMentions(text, index));
+    const blocks = parseBookmarkReferenceBlocks(
+      expandBookmarkMentions('compare these', [appleBookmark, secondAppleBookmark])
+    );
     expect(blocks).toHaveLength(2);
     expect(blocks[0].end).toBeLessThanOrEqual(blocks[1].start);
   });

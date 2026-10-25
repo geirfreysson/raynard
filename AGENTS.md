@@ -22,6 +22,10 @@ generated API plugins.
 - `src-tauri/src/telegram.rs`: Bot API polling, owner pairing, durable inbound
   delivery, interactive reply retries, and durable scheduled-alert delivery
   for the Telegram channel.
+- `src-tauri/src/bookmark_mentions.rs`: bookmark mention slugs, `@` menu
+  candidate search, and resolving which bookmarks a sent message references
+  (as `@slug` or the bare slug the menu inserts), against the Rust bookmark
+  cache so the renderer never holds the whole collection.
 - `src/errors.ts`: shared error formatting helpers.
 - `src/scheduled-task-view.ts`: pure wording for a schedule, its status, and its run history, shared by the sidebar row and the task detail screen.
 - `src/telegram-channel.ts`: Telegram state wording, source-aware safe-HTML

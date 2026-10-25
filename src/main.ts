@@ -200,11 +200,10 @@ import {
   type MentionItem
 } from './mention';
 import {
-  buildBookmarkMentionIndex,
   buildBookmarkMentionItems,
   expandBookmarkMentions,
   parseBookmarkReferenceBlocks,
-  type MentionableBookmark
+  type BookmarkMentionCandidate
 } from './bookmark-mentions';
 import { openBookmarkReferenceModal } from './bookmark-reference-modal';
 import {
@@ -902,8 +901,6 @@ let bookmarkLoading = false;
 let bookmarkRefreshQueued = false;
 /** Bookmark ids currently waiting on the background AI naming call, so their row can show a spinner. */
 const namingBookmarkIds = new Set<string>();
-/** The full bookmark collection, kept in sync for the @-mention menu (list_bookmarks is paginated). */
-let bookmarkMentionRows: StoredBookmark[] = [];
 /** Every saved memory, used to resolve a proposal's current scope and to render `/memory`. */
 let memoryRows: StoredMemory[] = [];
 let scheduledTasks: ScheduledTask[] = [];
@@ -971,7 +968,6 @@ initProviderOnboarding().catch(() => {
 void refreshChatHistory();
 void refreshGeneratedPlugins();
 void refreshScheduledTasks();
-void refreshBookmarkMentionIndex();
 void refreshMemoryRows();
 void refreshTelegramChannelState();
 syncModeControls();
@@ -1026,14 +1022,14 @@ for (const button of suggestionButtons) {
 for (const input of [introInput, chatInput]) {
   input?.addEventListener('input', () => {
     syncSlashMenu(input);
-    syncMentionMenu(input);
+    void syncMentionMenu(input);
   });
 
   // Re-evaluate the @menu when the caret moves (arrow keys, clicks).
   input?.addEventListener('keyup', (event) => {
-    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) syncMentionMenu(input);
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) void syncMentionMenu(input);
   });
-  input?.addEventListener('click', () => syncMentionMenu(input));
+  input?.addEventListener('click', () => void syncMentionMenu(input));
   input?.addEventListener('blur', () => {
     window.setTimeout(hideMentionMenu, 120);
   });
@@ -1399,23 +1395,43 @@ function mentionMenuIsOpen(): boolean {
   return Boolean(mentionMenu && !mentionMenu.classList.contains('is-hidden'));
 }
 
+/**
+ * Bumped per menu sync and on every hide, so a bookmark search still in flight
+ * can neither repaint a newer query's menu nor reopen one just closed.
+ */
+let mentionSearchSeq = 0;
+
 function hideMentionMenu() {
+  mentionSearchSeq += 1;
   mentionMenu?.classList.add('is-hidden');
   mentionMenu?.setAttribute('aria-hidden', 'true');
   mentionState = null;
 }
 
+/** Rust's best bookmark candidates for `query`; none if the lookup fails. */
+async function searchBookmarkMentions(query: string): Promise<BookmarkMentionCandidate[]> {
+  try {
+    return await invoke<BookmarkMentionCandidate[]>('search_bookmark_mentions', { query, limit: 8 });
+  } catch {
+    // The @-mention menu just won't offer bookmarks; not worth surfacing.
+    return [];
+  }
+}
+
 // Show the "@" reference menu when the cursor is inside an @token, listing the
-// installed plugins / tools / cards filtered by what's typed so far.
-function syncMentionMenu(input: HTMLTextAreaElement | null) {
+// installed plugins and saved bookmarks filtered by what's typed so far.
+async function syncMentionMenu(input: HTMLTextAreaElement | null) {
   if (!input || !mentionMenu) return;
+  const seq = ++mentionSearchSeq;
   const ref = getReferenceQueryAtCursor(input.value, input.selectionStart ?? input.value.length);
   if (!ref) {
     hideMentionMenu();
     return;
   }
+  const bookmarkCandidates = await searchBookmarkMentions(ref.query);
+  if (seq !== mentionSearchSeq) return;
   const items = filterMentionItems(
-    [...buildMentionItems(generatedPlugins), ...buildBookmarkMentionItems(bookmarkMentionRows)],
+    [...buildMentionItems(generatedPlugins), ...buildBookmarkMentionItems(bookmarkCandidates)],
     ref.query
   );
   if (!items.length) {
@@ -4032,14 +4048,6 @@ async function refreshChatHistory() {
   }
 }
 
-async function refreshBookmarkMentionIndex() {
-  try {
-    bookmarkMentionRows = await invoke<StoredBookmark[]>('list_bookmark_mentions');
-  } catch {
-    // The @-mention menu just won't offer bookmarks this session; not worth surfacing.
-  }
-}
-
 async function refreshMemoryRows(): Promise<StoredMemory[]> {
   try {
     memoryRows = await invoke<StoredMemory[]>('list_memories');
@@ -4202,7 +4210,6 @@ async function saveBookmarkTitle(bookmark: StoredBookmark, title: string) {
     if (row) bookmarkRows[bookmarkRows.indexOf(row)] = updated;
     const activeEntry = activeBookmarks.get(updated.messageKey);
     if (activeEntry?.id === updated.id) activeBookmarks.set(updated.messageKey, updated);
-    void refreshBookmarkMentionIndex();
   } catch (error) {
     console.warn('Could not rename bookmark:', getErrorMessage(error, 'unknown error'));
   } finally {
@@ -6041,8 +6048,6 @@ async function nameBookmarkInBackground(
     } else if (sidebarView === 'bookmarks') {
       await refreshBookmarks(true);
     }
-    // The title feeds the @-mention slug, so a naming pass changes it.
-    void refreshBookmarkMentionIndex();
   } catch (error) {
     // Keeping the prompt as the label is the fallback, so there is nothing to
     // interrupt the user with. It is still logged: a title that never arrives is
@@ -6097,7 +6102,6 @@ async function toggleMessageBookmark(
       syncMessageActions(article, message);
     }
     if (sidebarView === 'bookmarks') await refreshBookmarks(true);
-    void refreshBookmarkMentionIndex();
   } catch (error) {
     button.title = getErrorMessage(error, 'Could not update bookmark.');
   } finally {
@@ -6262,7 +6266,7 @@ async function submitMessage(
   // Expanded once, here, so the same text reaches the transcript, the persisted
   // record, and the model — a bookmark mention must survive a chat reload, and
   // the saved text is the only thing rebuilt into model-visible history on load.
-  const content = expandBookmarkMentions(typed, buildBookmarkMentionIndex(bookmarkMentionRows));
+  const content = expandBookmarkMentions(typed, await resolveBookmarkMentions(typed));
 
   const run = chatRuns.get(activeSessionId);
   if (run) {
@@ -6292,6 +6296,20 @@ async function submitMessage(
   input.value = '';
   appendUserTurn(content);
   await startAgentTurn(content);
+}
+
+/**
+ * The bookmarks `text` refers to, by `@slug` or by the bare slug the @ menu
+ * inserts. A failed lookup sends the message without attachments rather than
+ * not at all.
+ */
+async function resolveBookmarkMentions(text: string): Promise<StoredBookmark[]> {
+  try {
+    return await invoke<StoredBookmark[]>('resolve_bookmark_mentions', { text });
+  } catch (error) {
+    console.error('Could not resolve bookmark mentions:', getErrorMessage(error));
+    return [];
+  }
 }
 
 /** Adds the user's message to the transcript and history. */
