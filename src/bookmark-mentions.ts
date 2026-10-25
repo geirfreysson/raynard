@@ -1,97 +1,53 @@
-// "@" reference support for bookmarks: build mention candidates from saved
-// bookmarks, and expand a bookmark mention token into the bookmark's full
-// saved content so a later prompt actually carries what it references.
+// "@" reference support for bookmarks. Rust owns the bookmark collection, the
+// slugs, and the matching (`src-tauri/src/bookmark_mentions.rs`), so the
+// renderer never holds every bookmark: it turns Rust's candidates into menu
+// items, and appends the bookmarks a sent message referenced as delimited
+// blocks so the prompt actually carries what it refers to.
 
-import { bookmarkLabel, stableTextHash } from './bookmarks';
-import { isReferenceTokenChar, type MentionItem } from './mention';
+import { bookmarkLabel } from './bookmarks';
+import type { MentionItem } from './mention';
 
-export type MentionableBookmark = {
+/** One `@` menu candidate, as `search_bookmark_mentions` returns it. */
+export type BookmarkMentionCandidate = {
+  slug: string;
+  label: string;
+  chatName: string;
+};
+
+/** A bookmark `resolve_bookmark_mentions` matched in a message. */
+export type ReferencedBookmark = {
   id: string;
   title?: string;
   prompt: string;
   answer: string;
-  chatName?: string;
 };
 
-function kebabCase(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40)
-    .replace(/-+$/g, '');
-}
-
-/** A stable, unique @-mention slug for a bookmark: kebab(title) + a short hash of its id. */
-export function bookmarkMentionSlug(bookmark: MentionableBookmark): string {
-  const base = kebabCase(bookmarkLabel(bookmark)) || 'bookmark';
-  const suffix = stableTextHash(bookmark.id).slice(0, 6);
-  return `${base}-${suffix}`;
-}
-
 /** Bookmark reference items for the @-mention menu. */
-export function buildBookmarkMentionItems(bookmarks: MentionableBookmark[]): MentionItem[] {
-  return (Array.isArray(bookmarks) ? bookmarks : []).map((bookmark) => {
-    const label = bookmarkLabel(bookmark);
-    const slug = bookmarkMentionSlug(bookmark);
-    return {
-      kind: 'bookmark',
-      match: `${slug} ${label}`.toLowerCase(),
-      label,
-      description: bookmark.chatName ? `bookmark · ${bookmark.chatName}` : 'bookmark',
-      insertText: slug
-    };
-  });
-}
-
-/** Slug -> bookmark, for resolving a mention token back to its content. */
-export function buildBookmarkMentionIndex(
-  bookmarks: MentionableBookmark[]
-): Map<string, MentionableBookmark> {
-  const index = new Map<string, MentionableBookmark>();
-  for (const bookmark of Array.isArray(bookmarks) ? bookmarks : []) {
-    index.set(bookmarkMentionSlug(bookmark), bookmark);
-  }
-  return index;
-}
-
-/** Every `@token` span in `text`, using the same rules as the mention menu's own detector. */
-function findAtTokens(text: string): Array<{ token: string; start: number; end: number }> {
-  const tokens: Array<{ token: string; start: number; end: number }> = [];
-  for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== '@') continue;
-    const previousChar = index > 0 ? text[index - 1] : '';
-    if (previousChar && isReferenceTokenChar(previousChar)) continue;
-    let end = index + 1;
-    while (end < text.length && isReferenceTokenChar(text[end])) end += 1;
-    if (end === index + 1) continue; // bare "@" with nothing after
-    tokens.push({ token: text.slice(index + 1, end), start: index, end });
-    index = end - 1;
-  }
-  return tokens;
+export function buildBookmarkMentionItems(candidates: BookmarkMentionCandidate[]): MentionItem[] {
+  return (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
+    kind: 'bookmark',
+    match: `${candidate.slug} ${candidate.label}`.toLowerCase(),
+    label: candidate.label,
+    description: candidate.chatName ? `bookmark · ${candidate.chatName}` : 'bookmark',
+    insertText: candidate.slug
+  }));
 }
 
 /**
- * Appends the full content of every bookmark mentioned in `text` as a
- * delimited block, so the saved/model-visible text actually carries what was
- * referenced. Text with no recognized bookmark mention is returned unchanged.
+ * Appends the full content of each referenced bookmark as a delimited block,
+ * so the saved/model-visible text actually carries what was referenced. With
+ * nothing referenced the text is returned unchanged.
  */
-export function expandBookmarkMentions(text: string, index: Map<string, MentionableBookmark>): string {
+export function expandBookmarkMentions(text: string, referenced: ReferencedBookmark[]): string {
   const seen = new Set<string>();
-  const matched: MentionableBookmark[] = [];
-  for (const { token } of findAtTokens(text)) {
-    const bookmark = index.get(token);
-    if (bookmark && !seen.has(bookmark.id)) {
-      seen.add(bookmark.id);
-      matched.push(bookmark);
-    }
-  }
-  if (!matched.length) return text;
-
-  const blocks = matched.map((bookmark) => {
+  const blocks: string[] = [];
+  for (const bookmark of Array.isArray(referenced) ? referenced : []) {
+    if (seen.has(bookmark.id)) continue;
+    seen.add(bookmark.id);
     const title = bookmarkLabel(bookmark);
-    return `[Referenced bookmark: ${title}]\nQ: ${bookmark.prompt}\nA: ${bookmark.answer}\n[End referenced bookmark]`;
-  });
+    blocks.push(`[Referenced bookmark: ${title}]\nQ: ${bookmark.prompt}\nA: ${bookmark.answer}\n[End referenced bookmark]`);
+  }
+  if (!blocks.length) return text;
   return `${text}\n\n${blocks.join('\n\n')}`;
 }
 
